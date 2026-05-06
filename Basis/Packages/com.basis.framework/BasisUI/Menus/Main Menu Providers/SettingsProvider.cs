@@ -326,6 +326,37 @@ namespace Basis.BasisUI
             toggleDisableSeats.Descriptor.SetTitle(BasisLocalization.Get("settings.general.disableSeats"));
             toggleDisableSeats.Descriptor.SetDescription(BasisLocalization.Get("settings.general.disableSeats.description"));
 
+            // HUD overlays — heads-up display elements rendered over the scene.
+            PanelElementDescriptor hudGroup =
+                PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, container);
+            hudGroup.SetTitle(BasisLocalization.Get("settings.general.hud.title"));
+
+            PanelToggle toggleDesktopReticle = PanelToggle.CreateNewEntry(hudGroup);
+            toggleDesktopReticle.AssignBinding(BasisSettingsDefaults.DesktopReticle);
+            toggleDesktopReticle.Descriptor.SetTitle(BasisLocalization.Get("settings.general.desktopReticle"));
+            toggleDesktopReticle.Descriptor.SetDescription(BasisLocalization.Get("settings.general.desktopReticle.description"));
+
+            // Third-person camera is desktop-only; hide the entire group in VR/XR.
+            if (BasisDeviceManagement.IsUserInDesktop())
+            {
+                PanelElementDescriptor cameraGroup =
+                    PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, container);
+                cameraGroup.SetTitle(BasisLocalization.Get("settings.general.camera.title"));
+
+                PanelToggle toggleThirdPerson = PanelToggle.CreateNewEntry(cameraGroup);
+                toggleThirdPerson.AssignBinding(BasisSettingsDefaults.EnableThirdPersonCamera);
+                toggleThirdPerson.Descriptor.SetTitle(BasisLocalization.Get("settings.general.thirdPerson"));
+                toggleThirdPerson.Descriptor.SetDescription(BasisLocalization.Get("settings.general.thirdPerson.description"));
+
+                // Audio source toggle is only meaningful while third-person is active, but we
+                // leave it visible alongside the parent toggle so the user can pre-configure
+                // their preference before flipping into third-person.
+                PanelToggle toggleAudioFromHead = PanelToggle.CreateNewEntry(cameraGroup);
+                toggleAudioFromHead.AssignBinding(BasisSettingsDefaults.AudioListenerFollowsHead);
+                toggleAudioFromHead.Descriptor.SetTitle(BasisLocalization.Get("settings.general.thirdPerson.audioFromHead"));
+                toggleAudioFromHead.Descriptor.SetDescription(BasisLocalization.Get("settings.general.thirdPerson.audioFromHead.description"));
+            }
+
             // One reset button for this whole page
             AddResetPageButton(container, "settings.tab.general", ResetGeneralDefaults);
             descriptor.ForceRebuild();
@@ -391,6 +422,9 @@ namespace Basis.BasisUI
         {
             BasisSettingsDefaults.AvatarPreview.ResetToDefault();
             BasisSettingsDefaults.DisableSeats.ResetToDefault();
+            BasisSettingsDefaults.DesktopReticle.ResetToDefault();
+            BasisSettingsDefaults.EnableThirdPersonCamera.ResetToDefault();
+            BasisSettingsDefaults.AudioListenerFollowsHead.ResetToDefault();
         }
 
         // ------------------
@@ -1449,6 +1483,11 @@ namespace Basis.BasisUI
             toggleTrackerGizmos.Descriptor.SetDescription(BasisLocalization.Get("settings.developer.trackerGizmos.description"));
             toggleTrackerGizmos.AssignBinding(BasisSettingsDefaults.TrackerGizmos);
 
+            PanelToggle toggleLinkedTrackerLines = PanelToggle.CreateNewEntry(gizmosGroup.ContentParent);
+            toggleLinkedTrackerLines.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.linkedTrackerLines"));
+            toggleLinkedTrackerLines.Descriptor.SetDescription(BasisLocalization.Get("settings.developer.linkedTrackerLines.description"));
+            toggleLinkedTrackerLines.AssignBinding(BasisSettingsDefaults.LinkedTrackerLines);
+
             // Hide sub-toggles when the master is off — they're meaningless without it
             // and shouldn't clutter the page.
             void RefreshGizmoSubVisibility(bool masterOn)
@@ -1457,6 +1496,7 @@ namespace Basis.BasisUI
                 toggleCalibrationSpheres.Descriptor.SetActive(masterOn);
                 toggleJiggleVisuals.Descriptor.SetActive(masterOn);
                 toggleTrackerGizmos.Descriptor.SetActive(masterOn);
+                toggleLinkedTrackerLines.Descriptor.SetActive(masterOn);
                 gizmosGroup.ForceRebuild();
             }
             RefreshGizmoSubVisibility(toggleShowGizmos.Value);
