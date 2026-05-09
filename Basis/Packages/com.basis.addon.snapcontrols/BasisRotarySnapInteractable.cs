@@ -5,28 +5,27 @@ using UnityEngine;
 namespace Basis.Scripts.BasisSdk.Interactions
 {
     /// <summary>
-    /// Snap-path interactable whose snap points lie on an arc. Position is the snap point's
-    /// world position plus a fixed world offset captured at Awake, so the scrubber traces the
-    /// marker arc regardless of how individual markers are oriented. Rotation tracks
-    /// <see cref="pivot"/> (when set) plus an angular delta around the arc's rotation axis
-    /// equal to the angle swept from the resting marker to the current marker, so the scrubber
-    /// rotates with the arc as it moves between snap points.
+    /// Snap-path interactable for rotary controls — knobs, levers, switches, and any object
+    /// that swings between discrete detents around a pivot. Snap points are placed where the
+    /// detents should sit and the interactable both translates between them and rotates by the
+    /// angle swept between them, so the control's orientation tracks its position around the
+    /// pivot.
     ///
-    /// The arc rotation axis is derived from the marker world positions (cross product of two
-    /// chords), not from the pivot's authored rotation. The pivot transform is consulted for
-    /// position-as-centre and rotation-tracking, but its own up-axis is not assumed to align
-    /// with the arc plane's normal.
+    /// The rotation axis is derived from the marker world positions themselves (cross product
+    /// of two chords); the pivot transform supplies the rotational centre and a rotation
+    /// reference, but its own up-axis is not assumed to align with anything in particular —
+    /// author markers wherever the detents need to sit and the swing axis follows.
     ///
     /// Index selection runs entirely in world space:
     /// * A hand whose bone is within <see cref="BasisInteractableObject.GrabRadius"/>×2 of the
-    ///   scrubber selects the marker closest to the bone position.
+    ///   interactable selects the marker closest to the bone position.
     /// * Otherwise (hand laser, desktop center-eye), the marker with the smallest perpendicular
     ///   distance to the input's <see cref="BasisInput.RaycastCoord"/> ray wins.
     /// </summary>
-    public class BasisArcSnapInteractable : BasisSnapPathInteractable
+    public class BasisRotarySnapInteractable : BasisSnapPathInteractable
     {
-        [Header("Arc")]
-        [Tooltip("Rotation source for the scrubber. The scrubber's rotation is captured relative to the pivot at Awake; on each EvaluateAtIndex it's re-applied with an additional rotation around the marker-derived arc axis equal to the arc-angle swept from the resting marker, so the scrubber rotates with the arc as it moves. Leave empty to keep the authored world rotation and skip arc-angle rotation.")]
+        [Header("Rotation")]
+        [Tooltip("Rotational centre the interactable swings around. The interactable's pose relative to the pivot is captured at Awake; on each snap, that resting pose is re-applied with an additional rotation around the marker-derived swing axis equal to the angle from the resting marker to the current one. Leave empty to translate between markers without applying rotation.")]
         public Transform pivot;
 
         private Vector3 _restingPositionOffset;
@@ -85,9 +84,11 @@ namespace Basis.Scripts.BasisSdk.Interactions
         /// </summary>
         private Vector3 ComputeArcAxis()
         {
-            if (snapPoints == null || snapPoints.Length < 3) return Vector3.zero;
-            int last = snapPoints.Length - 1;
-            int mid = snapPoints.Length / 2;
+            if (snapPoints == null) return Vector3.zero;
+            int snapCount = snapPoints.Length;
+            if (snapCount < 3) return Vector3.zero;
+            int last = snapCount - 1;
+            int mid = snapCount / 2;
             if (snapPoints[0] == null || snapPoints[mid] == null || snapPoints[last] == null) return Vector3.zero;
 
             Vector3 v1 = snapPoints[mid].position - snapPoints[0].position;
@@ -128,7 +129,9 @@ namespace Basis.Scripts.BasisSdk.Interactions
         protected override int FindNearestIndex(BasisInputWrapper interacting)
         {
             if (!_arcReady) return CurrentIndex;
-            if (snapPoints == null || snapPoints.Length == 0) return CurrentIndex;
+            if (snapPoints == null) return CurrentIndex;
+            int snapCount = snapPoints.Length;
+            if (snapCount == 0) return CurrentIndex;
 
             Vector3 handPos = interacting.BoneControl.OutgoingWorldData.position;
             bool isHandRole = interacting.Role == BasisBoneTrackedRole.LeftHand
@@ -145,7 +148,7 @@ namespace Basis.Scripts.BasisSdk.Interactions
 
             int nearest = CurrentIndex;
             float bestScore = float.MaxValue;
-            for (int i = 0; i < snapPoints.Length; i++)
+            for (int i = 0; i < snapCount; i++)
             {
                 Transform marker = snapPoints[i];
                 if (marker == null) continue;

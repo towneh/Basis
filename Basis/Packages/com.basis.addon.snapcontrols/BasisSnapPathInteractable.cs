@@ -47,12 +47,16 @@ namespace Basis.Scripts.BasisSdk.Interactions
             }
             CurrentIndex = Mathf.Clamp(initialIndex, 0, snapPoints.Length - 1);
 
-            _activationTargets = new BasisActivationTarget[snapPoints.Length];
-            for (int i = 0; i < snapPoints.Length; i++)
+            int snapCount = snapPoints.Length;
+            _activationTargets = new BasisActivationTarget[snapCount];
+            for (int i = 0; i < snapCount; i++)
             {
                 if (snapPoints[i] == null) continue;
-                _activationTargets[i] = snapPoints[i].GetComponent<BasisActivationTarget>();
-                _activationTargets[i]?.ApplyActiveState(i == CurrentIndex, fireEvents: false);
+                if (snapPoints[i].TryGetComponent(out BasisActivationTarget target))
+                {
+                    _activationTargets[i] = target;
+                    target.ApplyActiveState(i == CurrentIndex, fireEvents: false);
+                }
             }
         }
 

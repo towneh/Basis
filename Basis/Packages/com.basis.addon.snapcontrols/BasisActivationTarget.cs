@@ -34,7 +34,8 @@ namespace Basis.Scripts.BasisSdk.Interactions
         public void ApplyActiveState(bool active, bool fireEvents = true)
         {
             IsActive = active;
-            for (int i = 0; i < enableWhileActive.Length; i++)
+            int n = enableWhileActive.Length;
+            for (int i = 0; i < n; i++)
             {
                 GameObject go = enableWhileActive[i];
                 if (go != null) go.SetActive(active);
