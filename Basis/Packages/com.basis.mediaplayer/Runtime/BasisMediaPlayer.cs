@@ -472,7 +472,9 @@ public sealed class BasisMediaPlayer : MonoBehaviour
     }
 
     // Convenience wrapper: builds a BasisMediaSource from an absolute or
-    // streaming-assets-relative path and calls LoadSource.
+    // streaming-assets-relative path and loads it. Routed through the same consent gate as
+    // LoadUrl so there's one load entry point — a local path never actually prompts (consent
+    // is http/https only), but it bumps LoadGeneration so it supersedes a pending URL load.
     public void LoadLocalPath(string path)
     {
         if (string.IsNullOrEmpty(path))
@@ -480,14 +482,24 @@ public sealed class BasisMediaPlayer : MonoBehaviour
             BasisDebug.LogWarning("BasisMediaPlayer.LoadLocalPath called with empty path.", BasisDebug.LogTag.Video);
             return;
         }
-        var media = BasisMediaSource.FromLocalPath(path);
-        LoadSource(media);
+        LastErrorMessage = null;
+        int gen = ++LoadGeneration;
+        BasisMediaPlayerConsent.Gate(path, () =>
+        {
+            if (gen != LoadGeneration) return;
+            LoadSource(BasisMediaSource.FromLocalPath(path));
+        });
     }
 
     // Resolves the descriptor to the OS-codec engine and starts it. All network
     // URLs (rtsp/rtspt/rtmp/rtmps/http/https) are decoded by basis_media_native
     // straight into a GPU texture. The CPU IBasisFrameSource path is reserved for
     // code that assigns Source directly (e.g. BasisSyntheticTestSource for tests).
+    //
+    // Consent is LoadUrl's responsibility: sources reaching LoadSource are either already
+    // consented (via LoadUrl/LoadLocalPath) or derived from a consented URL (the resolver's
+    // resolved streams). Only the host-safety floor (BasisMediaPlayerSecurity.IsUrlAllowed)
+    // is enforced here.
     public void LoadSource(BasisMediaSource media)
     {
         if (media == null)
