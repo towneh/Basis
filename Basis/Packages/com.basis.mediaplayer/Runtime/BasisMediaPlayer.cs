@@ -424,7 +424,20 @@ public sealed class BasisMediaPlayer : MonoBehaviour
             return;
         }
         LastErrorMessage = null;
-        LoadGeneration++;
+        int gen = ++LoadGeneration;
+
+        // Consent gates the originating URL before any routing/resolution, so a page URL is
+        // approved before it ever reaches the resolver. The prompt may resolve a frame or more
+        // later, so re-check the generation in the continuation — a newer LoadUrl supersedes this.
+        BasisMediaPlayerConsent.Gate(url, () =>
+        {
+            if (gen != LoadGeneration) return;
+            LoadUrlConfirmed(url);
+        });
+    }
+
+    private void LoadUrlConfirmed(string url)
+    {
         if (BasisMediaUrlRouter.TryResolveAndLoad(this, url)) return;
         if (!BasisMediaUrlRouter.IsDirectlyPlayable(url))
         {
