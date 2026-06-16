@@ -416,7 +416,11 @@ public sealed class BasisMediaPlayer : MonoBehaviour
     // through, and with no resolver installed a page URL reports that rather than
     // silently failing to demux an HTML page. LoadSource is NOT routed (it receives
     // already-resolved or direct sources, e.g. the resolver's own output).
-    public void LoadUrl(string url)
+    // Loads a URL, gated by per-user consent (BasisMediaPlayerConsent). startPosition / autoPlay /
+    // onLoaded let the networked receive path carry its synced state through the (possibly async)
+    // consent prompt; they apply only to a directly-playable URL — a page URL goes to the resolver
+    // (async, no native seek), which drops them. autoPlay null leaves AutoPlayOnSourceAssigned as-is.
+    public void LoadUrl(string url, TimeSpan startPosition = default, bool? autoPlay = null, Action onLoaded = null)
     {
         if (string.IsNullOrEmpty(url))
         {
@@ -432,11 +436,11 @@ public sealed class BasisMediaPlayer : MonoBehaviour
         BasisMediaPlayerConsent.Gate(url, () =>
         {
             if (gen != LoadGeneration) return;
-            LoadUrlConfirmed(url);
+            LoadUrlConfirmed(url, startPosition, autoPlay, onLoaded);
         });
     }
 
-    private void LoadUrlConfirmed(string url)
+    private void LoadUrlConfirmed(string url, TimeSpan startPosition, bool? autoPlay, Action onLoaded)
     {
         if (BasisMediaUrlRouter.TryResolveAndLoad(this, url)) return;
         if (!BasisMediaUrlRouter.IsDirectlyPlayable(url))
@@ -450,8 +454,21 @@ public sealed class BasisMediaPlayer : MonoBehaviour
                 BasisDebug.LogTag.Video);
             return;
         }
+
         var media = BasisMediaSource.FromUrl(url);
-        LoadSource(media);
+        media.StartPosition = startPosition;
+        if (autoPlay.HasValue)
+        {
+            bool savedAutoPlay = AutoPlayOnSourceAssigned;
+            AutoPlayOnSourceAssigned = autoPlay.Value;
+            LoadSource(media);
+            AutoPlayOnSourceAssigned = savedAutoPlay;
+        }
+        else
+        {
+            LoadSource(media);
+        }
+        onLoaded?.Invoke();
     }
 
     // Convenience wrapper: builds a BasisMediaSource from an absolute or

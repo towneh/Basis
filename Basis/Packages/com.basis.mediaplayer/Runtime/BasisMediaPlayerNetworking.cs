@@ -592,22 +592,25 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour
                     return;
                 }
 
-                var media = BasisMediaSource.FromUrl(url);
-                media.StartPosition = positionTicks > 0 ? TimeSpan.FromTicks(positionTicks) : TimeSpan.Zero;
-
-                bool savedAutoPlay = mediaPlayer.AutoPlayOnSourceAssigned;
-                mediaPlayer.AutoPlayOnSourceAssigned = state == SyncedPlaybackState.Playing || state == SyncedPlaybackState.Paused;
-                mediaPlayer.LoadSource(media);
-                mediaPlayer.AutoPlayOnSourceAssigned = savedAutoPlay;
-
-                if (state == SyncedPlaybackState.Paused)
-                {
-                    mediaPlayer.Pause();
-                }
-                else if (state == SyncedPlaybackState.Stopped)
-                {
-                    mediaPlayer.Stop();
-                }
+                // A directly-playable URL funnels through LoadUrl too, so it passes the same consent
+                // gate as page URLs — an owner can't push a direct stream to peers unprompted. The
+                // synced start position and autoplay ride through; the post-load Pause/Stop runs once
+                // the source is assigned (after the consent prompt, if one is shown).
+                mediaPlayer.LoadUrl(
+                    url,
+                    positionTicks > 0 ? TimeSpan.FromTicks(positionTicks) : TimeSpan.Zero,
+                    state == SyncedPlaybackState.Playing || state == SyncedPlaybackState.Paused,
+                    () =>
+                    {
+                        if (state == SyncedPlaybackState.Paused)
+                        {
+                            mediaPlayer.Pause();
+                        }
+                        else if (state == SyncedPlaybackState.Stopped)
+                        {
+                            mediaPlayer.Stop();
+                        }
+                    });
 
                 return;
             }
