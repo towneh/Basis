@@ -8,7 +8,8 @@ using Basis.BasisUI;
 /// Consent attaches to the originating URL only; whatever it resolves to (a CDN URL,
 /// or a split video+audio pair) is a derivation that rides the safety floor and is
 /// never re-prompted. Mirrors the consent flow in com.basis.shim/VideoPlayerShim,
-/// reusing the framework's <see cref="BasisTrustedUrls"/> + URL prompt panel.
+/// reusing the framework's <see cref="BasisTrustedUrls"/> + URL prompt panel. Admins
+/// (the control/* permission) bypass the prompt — they are the trusted operators who set URLs.
 /// </summary>
 public static class BasisMediaPlayerConsent
 {
@@ -23,7 +24,14 @@ public static class BasisMediaPlayerConsent
     {
         if (onAllowed == null) return;
 
-        if (!NeedsConsent(url) || BasisTrustedUrls.IsTrusted(url))
+        // Admins (the basis.mediaplayer.control or * permission) bypass the prompt: they are the
+        // trusted operators permitted to set URLs, so prompting them is pointless — and it gives
+        // headless / automated clients a way to load without a dialog they can't show, by granting
+        // the test client the control permission. Offline (no network permissions) IsLocalAdmin is
+        // false, so consent still applies in single-player.
+        if (!NeedsConsent(url)
+            || BasisMediaPlayerNetworking.IsLocalAdmin()
+            || BasisTrustedUrls.IsTrusted(url))
         {
             onAllowed();
             return;
