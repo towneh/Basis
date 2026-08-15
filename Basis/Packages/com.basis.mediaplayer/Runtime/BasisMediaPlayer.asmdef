@@ -1,20 +1,17 @@
 {
     "name": "BasisMediaPlayer",
-    "rootNamespace": "",
+    "rootNamespace": "Basis.Media",
     "references": [
-        "BasisDebug",
-        "Unity.Addressables",
-        "Unity.ResourceManager",
-        "UnityEngine.UI",
         "Basis Framework",
-        "BasisNetworkCore",
-        "BasisSDK",
-        "Unity.TextMeshPro",
-        "BasisCommon"
+        "BasisCommon",
+        "BasisDebug",
+        "BasisSettings",
+        "UnityEngine.UI",
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
-    "allowUnsafeCode": false,
+    "allowUnsafeCode": true,
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": true,

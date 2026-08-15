@@ -8,6 +8,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Events;
 using Cilbox;
+using UrlSecurity = Basis.Scripts.Common.BasisUrlSecurity;
 
 namespace Basis
 {
@@ -132,13 +133,13 @@ namespace Basis
 		{
 			if( callback == null ) return;
 
-			if( !BasisMediaPlayerSecurity.IsUrlAllowed( stringUrl, out string reason ) )
+			if( !UrlSecurity.IsHttpUrlAllowed( stringUrl, out string reason ) )
 			{
 				callback( new IBasisImageDownload( null, null, "Security Failure: " + reason ) );
 				return;
 			}
 
-			string dnsReason = await BasisMediaPlayerSecurity.ValidateResolvedHostAsync( stringUrl );
+			string dnsReason = await UrlSecurity.ValidateResolvedHostAsync( stringUrl );
 			if( dnsReason != null )
 			{
 				callback( new IBasisImageDownload( null, null, "Security Failure: " + dnsReason ) );
@@ -296,13 +297,13 @@ namespace Basis
 		{
 			if( callback == null ) return;
 
-			if( !BasisMediaPlayerSecurity.IsUrlAllowed( stringUrl, out string reason ) )
+			if( !UrlSecurity.IsHttpUrlAllowed( stringUrl, out string reason ) )
 			{
 				callback( new IBasisStringDownload( null, "Security Failure: " + reason ) );
 				return;
 			}
 
-			string dnsReason = await BasisMediaPlayerSecurity.ValidateResolvedHostAsync( stringUrl );
+			string dnsReason = await UrlSecurity.ValidateResolvedHostAsync( stringUrl );
 			if( dnsReason != null )
 			{
 				callback( new IBasisStringDownload( null, "Security Failure: " + dnsReason ) );

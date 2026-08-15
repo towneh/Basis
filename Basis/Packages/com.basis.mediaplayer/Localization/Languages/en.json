@@ -1,0 +1,46 @@
+{
+  "code": "en",
+  "nativeName": "English",
+  "entries": [
+    {
+      "key": "settings.media.title",
+      "value": "Media Player"
+    },
+    {
+      "key": "settings.media.description",
+      "value": "How media players on this machine decode video. These are per-machine settings; they are not part of any world."
+    },
+    {
+      "key": "settings.media.decode",
+      "value": "Decode preference"
+    },
+    {
+      "key": "settings.media.decode.tooltip",
+      "value": "Which decode route a media player may take. Takes effect the next time a source is opened."
+    },
+    {
+      "key": "settings.media.decode.hardwareFallback",
+      "value": "Hardware, fall back to software"
+    },
+    {
+      "key": "settings.media.decode.hardwareOnly",
+      "value": "Hardware only"
+    },
+    {
+      "key": "settings.media.decode.softwareOnly",
+      "value": "Software only"
+    },
+    {
+      "key": "settings.media.engine.title",
+      "value": "Engine"
+    },
+    {
+      "key": "settings.media.engine.available",
+      "value": "{0} • {1} hardware video routes, {2} software"
+    },
+    {
+      "key": "settings.media.engine.unavailable",
+      "value": "Engine unavailable on this platform."
+    }
+  ]
+}

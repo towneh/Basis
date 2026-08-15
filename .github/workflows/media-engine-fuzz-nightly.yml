@@ -1,0 +1,70 @@
+# Scheduled coverage-growing fuzz campaigns for the Rust media engine's
+# parsers — short (10 min/target), seeds-only, artifacts uploaded on findings.
+# The deterministic per-PR replay gate lives in media-engine.yml; deep
+# multi-hour campaigns stay on the maintainer's fuzz box until this job has
+# proven itself. Note schedules only fire from the default branch — until the
+# package lands there, run it via workflow_dispatch on the feature branch.
+name: media-engine-fuzz-nightly
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: media-engine-fuzz-nightly
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NATIVE_DIR: Basis/Packages/com.basis.mediaplayer/Native~
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - adts_stream
+          - caption_scan
+          - flac_stream
+          - hls_playlist
+          - mkv_stream
+          - mp3_stream
+          - mp4_stream
+          - ogg_stream
+          - rtp_session
+          - ts_stream
+          - whep_signal
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.NATIVE_DIR }}/fuzz
+          key: fuzz-nightly
+      - name: Campaign (10 min)
+        working-directory: ${{ env.NATIVE_DIR }}
+        # --target: the prebuilt cargo-fuzz is musl-linked and defaults to its
+        # own build triple, which has no ASan-compatible std on the runner.
+        run: |
+          FEATURES=""
+          [ "${{ matrix.target }}" = "whep_signal" ] && FEATURES="--features whep"
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu $FEATURES "${{ matrix.target }}" \
+            "fuzz/corpus/${{ matrix.target }}" -- -max_total_time=600 -timeout=30
+      - name: Upload findings
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bm-fuzz-findings-${{ matrix.target }}
+          path: ${{ env.NATIVE_DIR }}/fuzz/artifacts/
+          if-no-files-found: ignore

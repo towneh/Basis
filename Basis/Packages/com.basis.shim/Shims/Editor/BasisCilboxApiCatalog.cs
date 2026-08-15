@@ -850,12 +850,12 @@ for (int i = 0; i < count; i++)
                 GroupKey = GroupMedia,
                 TitleKey = "sdk.cilbox.api.mediaPlayer.title",
                 SummaryKey = "sdk.cilbox.api.mediaPlayer.summary",
-                Requires = new[] { new CilboxApiRequirement("BasisMediaPlayer", "get_OutputTexture") },
+                Requires = new[] { new CilboxApiRequirement("Basis.Media.BasisMediaPlayer", "get_Texture") },
                 Example =
 @"// Read-only. There is no event, so poll it.
 void Update()
 {
-    Texture frame = mediaPlayer.OutputTexture;
+    Texture frame = mediaPlayer.Texture;
     if (frame != null && frame != lastFrame)
     {
         lastFrame = frame;

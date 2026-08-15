@@ -1,72 +1,80 @@
 using UnityEngine;
 
-// End-to-end wiring for live OS-codec playback. Point a BasisMediaPlayer at a
-// VRCDN (or any OS-decodable) live URL; the native engine decodes it with the
-// platform hardware decoder straight into the player's zero-copy OutputTexture.
-//
-// Attach a BasisVideoMaterialOutput (renderer material) or BasisVideoDisplay
-// (uGUI RawImage) on the same GameObject to display OutputTexture. For audio,
-// add a BasisMediaPlayerAudio (with an AudioSource) on the same GameObject; the
-// player feeds it PCM decoded natively.
-//
-// Per-platform protocol guidance (from https://panel.vrcdn.live/preview/<name>):
-//   PC / VR (low latency) : rtsp://stream.vrcdn.live/live/<name>
-//   Quest (Android)       : https://stream.vrcdn.live/live/<name>.live.ts   (MPEG-TS)
-//   Alternatives          : rtmp://stream.vrcdn.live/live/<name>
-//                           https://stream.vrcdn.live/live/<name>.live.mp4  (fMP4)
-[RequireComponent(typeof(BasisMediaPlayer))]
-public sealed class BasisMediaPlayerStreaming : MonoBehaviour
+namespace Basis.Media
 {
-    [Header("Stream")]
-    [Tooltip("Live URL to play when AutoSelectPerPlatform is off. RTSP/RTMP/HTTPS-fMP4/HTTPS-TS are all accepted.")]
-    public string StreamUrl = "rtsp://stream.vrcdn.live/live/vrcdn";
-
-    [Tooltip("If true, pick PcUrl or QuestUrl automatically by build target instead of using StreamUrl. RTSP is lowest latency on PC/VR; Quest pulls MPEG-TS over HTTPS.")]
-    public bool AutoSelectPerPlatform = false;
-
-    [Tooltip("URL used on desktop/standalone (and in the editor) when AutoSelectPerPlatform is on.")]
-    public string PcUrl = "rtsp://stream.vrcdn.live/live/vrcdn";
-
-    [Tooltip("URL used on Android/Quest when AutoSelectPerPlatform is on.")]
-    public string QuestUrl = "https://stream.vrcdn.live/live/vrcdn.live.ts";
-
-    [Header("Lifecycle")]
-    [Tooltip("If true, the stream is loaded into the player on Start. Disable to call Configure() yourself.")]
-    public bool ConfigureOnStart = true;
-
-    private void Start()
+    /// <summary>
+    /// Points a <see cref="BasisMediaPlayer"/> at a live stream, optionally
+    /// choosing between a desktop and an Android URL by build target.
+    ///
+    /// A player with a URL already set needs none of this. It earns its place
+    /// when the right URL differs by platform: RTSP is lowest latency on
+    /// desktop, and Quest wants MPEG-TS over HTTPS from the same source.
+    ///
+    /// Per-platform guidance from a VRCDN panel (https://panel.vrcdn.live/preview/&lt;name&gt;):
+    ///   PC / VR (low latency) : rtsp://stream.vrcdn.live/live/&lt;name&gt;
+    ///   Quest (Android)       : https://stream.vrcdn.live/live/&lt;name&gt;.live.ts
+    /// </summary>
+    [AddComponentMenu("Basis/Basis Media Player Streaming")]
+    [RequireComponent(typeof(BasisMediaPlayer))]
+    public sealed class BasisMediaPlayerStreaming : MonoBehaviour
     {
-        if (ConfigureOnStart) Configure();
-    }
+        [Header("Stream")]
+        [Tooltip("Live URL to play when AutoSelectPerPlatform is off. RTSP/HTTPS-fMP4/HTTPS-TS/HLS/RIST/WHEP are all accepted.")]
+        public string StreamUrl = "rtsp://stream.vrcdn.live/live/vrcdn";
 
-    // Loads the resolved URL into the BasisMediaPlayer on this GameObject. The
-    // player auto-plays if AutoPlayOnSourceAssigned is set (the default).
-    public void Configure()
-    {
-        if (!TryGetComponent(out BasisMediaPlayer player))
+        [Tooltip("If true, pick PcUrl or QuestUrl automatically by build target instead of using StreamUrl. RTSP is lowest latency on PC/VR; Quest pulls MPEG-TS over HTTPS.")]
+        public bool AutoSelectPerPlatform = false;
+
+        [Tooltip("URL used on desktop/standalone (and in the editor) when AutoSelectPerPlatform is on.")]
+        public string PcUrl = "rtsp://stream.vrcdn.live/live/vrcdn";
+
+        [Tooltip("URL used on Android/Quest when AutoSelectPerPlatform is on.")]
+        public string QuestUrl = "https://stream.vrcdn.live/live/vrcdn.live.ts";
+
+        [Header("Lifecycle")]
+        [Tooltip("If true, the resolved URL is written to the player before it starts. Disable to call Configure() yourself.")]
+        public bool ConfigureOnStart = true;
+
+        // Awake, not Start: every Awake runs before any Start, so the player
+        // finds its URL in place and opens it through its own playOnStart.
+        // Doing this in Start would race the player's and could open twice.
+        private void Awake()
         {
-            BasisDebug.LogError("BasisMediaPlayerStreaming requires a BasisMediaPlayer on the same GameObject.", BasisDebug.LogTag.Video);
-            return;
+            if (!ConfigureOnStart) return;
+            if (!TryGetComponent(out BasisMediaPlayer player)) return;
+            string url = ResolveUrl();
+            if (!string.IsNullOrEmpty(url)) player.url = url;
         }
 
-        string url = ResolveUrl();
-        if (string.IsNullOrEmpty(url))
+        /// <summary>Resolves the URL for this platform and opens it now,
+        /// through the router so an authored page URL resolves rather than
+        /// failing to open.</summary>
+        public void Configure()
         {
-            BasisDebug.LogWarning("BasisMediaPlayerStreaming has no URL to load.", BasisDebug.LogTag.Video);
-            return;
-        }
-        // LoadUrl steers page URLs (YouTube/Twitch/…) through the resolver and loads
-        // direct streams straight through, so this just hands the URL over.
-        player.LoadUrl(url);
-    }
+            if (!TryGetComponent(out BasisMediaPlayer player))
+            {
+                Debug.LogError("[BasisMedia] BasisMediaPlayerStreaming needs a BasisMediaPlayer on the same GameObject.");
+                return;
+            }
 
-    public string ResolveUrl()
-    {
-        if (!AutoSelectPerPlatform) return StreamUrl?.Trim();
+            string url = ResolveUrl();
+            if (string.IsNullOrEmpty(url))
+            {
+                Debug.LogWarning("[BasisMedia] BasisMediaPlayerStreaming has no URL to load.");
+                return;
+            }
+
+            player.OpenUserUrl(url);
+        }
+
+        public string ResolveUrl()
+        {
+            if (!AutoSelectPerPlatform) return StreamUrl?.Trim();
 #if UNITY_ANDROID && !UNITY_EDITOR
-        return QuestUrl?.Trim();
+            return QuestUrl?.Trim();
 #else
-        return PcUrl?.Trim();
+            return PcUrl?.Trim();
 #endif
+        }
     }
 }

@@ -1,6 +1,19 @@
 name: Automatic build
 
-on: [push, pull_request]
+# The media engine's sources have their own pipeline (media-engine.yml) and are
+# invisible to Unity (`~` folders), so changes that stay inside them skip the
+# Unity builds. Committed plugin binaries live under the package's
+# Runtime/Plugins — outside Native~ — so binary updates still build. Tag pushes
+# bypass path filters, keeping releases unaffected.
+on:
+  push:
+    paths-ignore:
+      - "Basis/Packages/com.basis.mediaplayer/Native~/**"
+      - ".github/workflows/media-engine*.yml"
+  pull_request:
+    paths-ignore:
+      - "Basis/Packages/com.basis.mediaplayer/Native~/**"
+      - ".github/workflows/media-engine*.yml"
 
 jobs:
   # To setup secrets for client build, see https://game.ci/docs/github/activation

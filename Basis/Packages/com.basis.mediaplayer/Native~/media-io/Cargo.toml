@@ -1,0 +1,41 @@
+[package]
+name = "media-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+media-demux = { workspace = true }
+media-hls = { workspace = true }
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+url = "2"
+
+# TLS provider decision (§5.5, resolved at M3): rustls stays on ring. The
+# spec's aws-lc-rs lean was re-examined when the async stack landed:
+# aws-lc-sys needs CMake + NASM on MSVC hosts (a real toolchain tax on
+# every contributor), ring is already vetted in-tree with a clean licence
+# (no OpenSSL-advertising clause, so no THIRD_PARTY_NOTICES burden), and
+# the cargo-deny advisory feed watches it. Revisit if ring gains an
+# unfixed RUSTSEC entry or rustls drops the provider.
+#
+# Trust anchors (R16): the OS store where one exists; Android exposes no
+# CA store rustls-native-certs can read (https failed at connect with
+# error 103 on device), so Android bundles the webpki-roots CCADB set.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls-native-roots",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls-webpki-roots",
+] }
+
+[dev-dependencies]
+media-clock = { workspace = true }
+
+[lints]
+workspace = true

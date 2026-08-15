@@ -2,6 +2,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using System;
 using Basis.Scripts.BasisSdk.Players;
+using MediaPlayer = Basis.Media.BasisMediaPlayer;
 using Basis.Scripts.Networking.NetworkedAvatar;
 
 namespace Cilbox
@@ -23,8 +24,8 @@ namespace Cilbox
 			"UnityEngine.Rendering.AsyncGPUReadback",
 			"UnityEngine.Rendering.AsyncGPUReadbackRequest",
 			"Unity.Collections.NativeArray*",
-			// VRSL DMX BasisMediaPlayer bridge (zero-copy OutputTexture -> DMX grid)
-			"BasisMediaPlayer",
+			// VRSL DMX media player bridge (zero-copy video texture -> DMX grid)
+			"Basis.Media.BasisMediaPlayer",
 
 			// Scene-specific Basis types
 			"Basis.Scripts.BasisSdk.Interactions.BasisInteractableButton",
@@ -285,14 +286,14 @@ namespace Cilbox
 			// VRSL DMX GPU readback surface (mirrors CilboxPropBasis).
 			{ typeof(UnityEngine.Graphics), new HashSet<string>{ "Blit" } },
 			{ typeof(UnityEngine.Rendering.AsyncGPUReadback), new HashSet<string>{ "Request" } },
-			// BasisMediaPlayer: read-only video output access only. Blocks LoadUrl/LoadLocalPath/
-			// LoadSource/Play/Stop/Seek/CaptureScreenshot so sandboxed scenes can't load arbitrary
-			// media (bypassing the VideoPlayerShim URL trust prompt) or write screenshots to disk.
+			// The media player: read-only video output access only. Blocks Open/OpenUserUrl/
+			// Play/Pause/Seek/Close so sandboxed scenes can't load arbitrary media,
+			// bypassing the VideoPlayerShim URL trust prompt.
 			// OutputFrameIsTopLeftOrigin is the per-client orientation flag DMX/video sinks XOR
 			// into their flip so the grid isn't upside-down on GPUs that can't normalize it.
-			{ typeof(BasisMediaPlayer), new HashSet<string>{
-				$"get_{nameof(BasisMediaPlayer.OutputTexture)}",
-				$"get_{nameof(BasisMediaPlayer.OutputFrameIsTopLeftOrigin)}",
+			{ typeof(MediaPlayer), new HashSet<string>{
+				$"get_{nameof(MediaPlayer.Texture)}",
+				$"get_{nameof(MediaPlayer.OutputFrameIsTopLeftOrigin)}",
 				} },
 			{ typeof(Basis.Shims.BasisVoiceRoutingShim), new HashSet<string>{
 				nameof(Basis.Shims.BasisVoiceRoutingShim.HasConsent),

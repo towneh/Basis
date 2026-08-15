@@ -1,0 +1,225 @@
+//! Decode trait + format types shared by the platform adapters.
+
+use std::fmt;
+
+/// YUV→RGB matrix, as stated by the decoder (§6.8: colour comes from the
+/// stream's own reported parameters, never guessed from dimensions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum YuvMatrix {
+    /// The decoder did not state a matrix; converters fall back to BT.601.
+    #[default]
+    Unspecified,
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+/// Sample range, as stated by the decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum YuvRange {
+    /// The decoder did not state a range; converters fall back to limited.
+    #[default]
+    Unspecified,
+    /// Studio swing: Y in 16..=235, chroma in 16..=240.
+    Limited,
+    /// Full swing: 0..=255.
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColorInfo {
+    pub matrix: YuvMatrix,
+    pub range: YuvRange,
+}
+
+/// A decoded NV12 frame, tightly packed: `height` rows of Y, then `height / 2`
+/// rows of interleaved UV. `width`/`height` are the decoder's coded dimensions,
+/// which may exceed the display dimensions (e.g. 640x368 coded for 640x360).
+pub struct Nv12Frame {
+    pub width: u32,
+    pub height: u32,
+    pub pts_us: i64,
+    pub color: ColorInfo,
+    pub data: Vec<u8>,
+}
+
+/// A decoded frame that never left the decoder's own memory: an opaque
+/// GPU buffer (Android `AHardwareBuffer` under the MediaCodec adapter,
+/// a DXVA `IMFSample` texture-array slice under the Windows hardware
+/// adapter), presented by importing or copying the buffer GPU-side
+/// rather than reading pixels. Dropping the handle returns the buffer to
+/// its owner (the adapter's image reader / the MFT's surface pool), so a
+/// handle must stay alive until the present pass has consumed it.
+pub trait OpaqueImage: Send {
+    /// The platform buffer handle (`AHardwareBuffer*` on Android,
+    /// `IMFSample*` on Windows). Valid for the lifetime of this object.
+    fn hardware_buffer(&self) -> *mut core::ffi::c_void;
+
+    /// Windows DXVA payloads: the decoded NV12 plane as
+    /// (`ID3D11Texture2D*`, subresource index). The texture is a slice of
+    /// the decoder's array — the index is load-bearing, never assume
+    /// slice 0. Both valid for the lifetime of this object. `None` on
+    /// every other platform's payload.
+    fn d3d11_slice(&self) -> Option<(*mut core::ffi::c_void, u32)> {
+        None
+    }
+}
+
+/// A decoded frame kept in decoder-native GPU memory (§6.8: opaque
+/// end-to-end, never CPU-locked).
+pub struct OpaqueFrame {
+    pub width: u32,
+    pub height: u32,
+    pub pts_us: i64,
+    pub color: ColorInfo,
+    pub image: Box<dyn OpaqueImage>,
+}
+
+/// One decoded video frame, in whichever memory the adapter produces.
+pub enum VideoFrame {
+    /// CPU NV12 (the Windows sync-MFT and software decoders).
+    Nv12(Nv12Frame),
+    /// Decoder-native GPU buffer (the MediaCodec adapter).
+    Opaque(OpaqueFrame),
+}
+
+impl VideoFrame {
+    pub fn pts_us(&self) -> i64 {
+        match self {
+            VideoFrame::Nv12(f) => f.pts_us,
+            VideoFrame::Opaque(f) => f.pts_us,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        match self {
+            VideoFrame::Nv12(f) => f.width,
+            VideoFrame::Opaque(f) => f.width,
+        }
+    }
+
+    pub fn height(&self) -> u32 {
+        match self {
+            VideoFrame::Nv12(f) => f.height,
+            VideoFrame::Opaque(f) => f.height,
+        }
+    }
+
+    pub fn color(&self) -> ColorInfo {
+        match self {
+            VideoFrame::Nv12(f) => f.color,
+            VideoFrame::Opaque(f) => f.color,
+        }
+    }
+
+    /// The CPU NV12 payload, when this frame has one (test oracles and
+    /// the probe tool inspect pixels; the engine matches on the variant).
+    pub fn as_nv12(&self) -> Option<&Nv12Frame> {
+        match self {
+            VideoFrame::Nv12(f) => Some(f),
+            VideoFrame::Opaque(_) => None,
+        }
+    }
+}
+
+impl From<Nv12Frame> for VideoFrame {
+    fn from(frame: Nv12Frame) -> Self {
+        VideoFrame::Nv12(frame)
+    }
+}
+
+#[derive(Debug)]
+pub struct DecodeError(pub String);
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "decode error: {}", self.0)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    Accepted,
+    /// The decoder's input queue is full; drain outputs and resubmit.
+    NotAccepting,
+}
+
+/// One decoded PCM chunk: interleaved f32, `data.len() == frames * channels`.
+/// `sample_rate`/`channels` are the decoder's *output* format, which can
+/// change mid-stream (HE-AAC renegotiates when in-band SBR doubles the core
+/// rate) — consumers re-check per chunk.
+pub struct PcmChunk {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub pts_us: i64,
+    pub data: Vec<f32>,
+}
+
+pub trait AudioDecoder {
+    /// The output format the decoder will produce, `(sample_rate,
+    /// channels)`, as negotiated at construction. Chunks re-state it and
+    /// can diverge mid-stream (HE-AAC renegotiation) — this is the format
+    /// the ring is built for.
+    fn output_format(&self) -> (u32, u32);
+
+    /// Submit one raw compressed frame with its presentation timestamp.
+    fn submit(&mut self, au: &[u8], pts_us: i64) -> Result<SubmitOutcome, DecodeError>;
+
+    /// Pull one decoded chunk if one is ready.
+    fn try_output(&mut self) -> Result<Option<PcmChunk>, DecodeError>;
+
+    /// Signal end of stream; keep calling `try_output` until it returns
+    /// `None` *and* [`AudioDecoder::drain_dry`] reports true.
+    fn begin_drain(&mut self) -> Result<(), DecodeError>;
+
+    /// After `begin_drain`, whether a `None` from `try_output` means the
+    /// stream is truly dry. Synchronous adapters drain inline, so `None`
+    /// is always dry (the default). An adapter whose tail arrives
+    /// asynchronously returns false while output may still come — bounding
+    /// its own wait internally so this eventually reports true — and the
+    /// caller keeps polling instead of blocking inside one call, staying
+    /// responsive to flushes.
+    fn drain_dry(&self) -> bool {
+        true
+    }
+
+    /// Flush and restart the stream (loop / seek).
+    fn reset(&mut self) -> Result<(), DecodeError>;
+}
+
+pub trait VideoDecoder {
+    /// After an error: whether this hardware adapter detected the platform
+    /// decoder silently falling back to CPU output (the Windows DXVA
+    /// no-DXGI-backing signal). The caller reroutes to the software path
+    /// and reports `DecodeFallbackHwToSw` instead of failing the session.
+    /// Software and well-behaved adapters never report it (the default).
+    fn hardware_fell_back(&self) -> bool {
+        false
+    }
+
+    /// Submit one Annex-B access unit with its presentation timestamp.
+    fn submit(&mut self, annexb: &[u8], pts_us: i64) -> Result<SubmitOutcome, DecodeError>;
+
+    /// Pull one decoded frame if one is ready.
+    fn try_output(&mut self) -> Result<Option<VideoFrame>, DecodeError>;
+
+    /// Signal end of stream; keep calling `try_output` until it returns
+    /// `None` *and* [`VideoDecoder::drain_dry`] reports true.
+    fn begin_drain(&mut self) -> Result<(), DecodeError>;
+
+    /// After `begin_drain`, whether a `None` from `try_output` means the
+    /// stream is truly dry. Synchronous adapters drain inline, so `None`
+    /// is always dry (the default). An adapter whose tail arrives
+    /// asynchronously returns false while output may still come — bounding
+    /// its own wait internally so this eventually reports true — and the
+    /// caller keeps polling instead of blocking inside one call, staying
+    /// responsive to flushes.
+    fn drain_dry(&self) -> bool {
+        true
+    }
+
+    /// Flush and restart the stream (loop / seek).
+    fn reset(&mut self) -> Result<(), DecodeError>;
+}

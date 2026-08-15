@@ -1,0 +1,19 @@
+[package]
+name = "decode-mediacodec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+media-decode = { path = ".." }
+
+# The MediaCodecList ceilings probe (§6.11) goes through JNI — the NDK has
+# no native codec-capabilities API. Only reachable when the host process
+# hands over its JavaVM (Unity does, via JNI_OnLoad); absent that, probes
+# degrade to presence-only.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+libc = "0.2.189"
+
+[lints]
+workspace = true

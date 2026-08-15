@@ -1,54 +1,75 @@
+using System.IO;
 using UnityEditor;
 using UnityEditor.UIElements;
 using UnityEngine.UIElements;
 
-[CustomEditor(typeof(BasisVideoMaterialOutput))]
-public class BasisVideoMaterialOutputInspector : Editor
+namespace Basis.Media
 {
-    private const string UxmlPath = "Packages/com.basis.mediaplayer/Editor/StyleSheets/VideoMaterialOutputSDK.uxml";
-    private const string UssPath = "Packages/com.basis.mediaplayer/Editor/StyleSheets/MediaPlayerSDK.uss";
-
-    private VisualElement _root;
-
-    public override VisualElement CreateInspectorGUI()
+    /// <summary>
+    /// Inspector for <see cref="BasisVideoMaterialOutput"/>: the layout lives in
+    /// UXML and the look in the shared stylesheet, so this is binding glue.
+    /// </summary>
+    [CustomEditor(typeof(BasisVideoMaterialOutput))]
+    public class BasisVideoMaterialOutputInspector : Editor
     {
-        _root = new VisualElement();
+        private VisualElement _root;
 
-        var tree = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(UxmlPath);
-        var sheet = AssetDatabase.LoadAssetAtPath<StyleSheet>(UssPath);
-        if (tree == null)
+        /// <summary>
+        /// The package's own asset root, asked of the package manager rather than
+        /// spelled out, so the paths survive the folder being renamed.
+        /// </summary>
+        private static string PackagePath => UnityEditor.PackageManager.PackageInfo
+            .FindForAssembly(typeof(BasisVideoMaterialOutputInspector).Assembly)?.assetPath;
+
+        public override VisualElement CreateInspectorGUI()
         {
-            _root.Add(new HelpBox("VideoMaterialOutputSDK.uxml missing.", HelpBoxMessageType.Error));
+            _root = new VisualElement();
+
+            string package = PackagePath;
+            if (string.IsNullOrEmpty(package))
+            {
+                _root.Add(new HelpBox("Could not resolve the package path for the media player editor assembly.", HelpBoxMessageType.Error));
+                return _root;
+            }
+
+            var tree = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(
+                Path.Combine(package, "Editor/StyleSheets/VideoMaterialOutputSDK.uxml").Replace('\\', '/'));
+            var sheet = AssetDatabase.LoadAssetAtPath<StyleSheet>(
+                Path.Combine(package, "Editor/StyleSheets/MediaPlayerSDK.uss").Replace('\\', '/'));
+            if (tree == null)
+            {
+                _root.Add(new HelpBox("VideoMaterialOutputSDK.uxml missing.", HelpBoxMessageType.Error));
+                return _root;
+            }
+            tree.CloneTree(_root);
+            if (sheet != null) _root.styleSheets.Add(sheet);
+
+            var playerField = _root.Q<ObjectField>("PlayerField");
+            if (playerField != null) playerField.objectType = typeof(BasisMediaPlayer);
+
+            BindByName("PlayerField", "Player");
+            BindByName("TargetRendererField", "TargetRenderer");
+            BindByName("MaterialIndexField", "MaterialIndex");
+            BindByName("TexturePropertyField", "TexturePropertyName");
+            BindByName("UseSharedMaterialField", "UseSharedMaterial");
+            BindByName("AdditionalTargetsField", "AdditionalTargets");
+            BindByName("PlaceholderField", "PlaceholderTexture");
+            BindByName("RestoreOnEndedField", "RestorePlaceholderOnEnded");
+            BindByName("FlipVerticallyField", "FlipVertically");
+            BindByName("FlipHorizontallyField", "FlipHorizontally");
+            BindByName("ProjectionModeField", "ProjectionMode");
+            BindByName("StereoEyeField", "StereoEye");
+            BindByName("AspectModeField", "AspectMode");
+            BindByName("DisplayAspectOverrideField", "DisplayAspectOverride");
+            BindByName("PictureField", "Picture");
+            _root.Bind(serializedObject);
+
             return _root;
         }
-        tree.CloneTree(_root);
-        if (sheet != null) _root.styleSheets.Add(sheet);
 
-        var playerField = _root.Q<ObjectField>("PlayerField");
-        if (playerField != null) playerField.objectType = typeof(BasisMediaPlayer);
-
-        BindByName("PlayerField", "Player");
-        BindByName("TargetRendererField", "TargetRenderer");
-        BindByName("MaterialIndexField", "MaterialIndex");
-        BindByName("TexturePropertyField", "TexturePropertyName");
-        BindByName("UseSharedMaterialField", "UseSharedMaterial");
-        BindByName("AdditionalTargetsField", "AdditionalTargets");
-        BindByName("PlaceholderField", "PlaceholderTexture");
-        BindByName("RestoreOnEndedField", "RestorePlaceholderOnEnded");
-        BindByName("FlipVerticallyField", "FlipVertically");
-        BindByName("FlipHorizontallyField", "FlipHorizontally");
-        BindByName("ProjectionModeField", "ProjectionMode");
-        BindByName("StereoEyeField", "StereoEye");
-        BindByName("AspectModeField", "AspectMode");
-        BindByName("DisplayAspectOverrideField", "DisplayAspectOverride");
-        BindByName("PictureField", "Picture");
-        _root.Bind(serializedObject);
-
-        return _root;
-    }
-
-    private void BindByName(string name, string property)
-    {
-        if (_root.Q<VisualElement>(name) is IBindable bindable) bindable.bindingPath = property;
+        private void BindByName(string name, string property)
+        {
+            if (_root.Q<VisualElement>(name) is IBindable bindable) bindable.bindingPath = property;
+        }
     }
 }

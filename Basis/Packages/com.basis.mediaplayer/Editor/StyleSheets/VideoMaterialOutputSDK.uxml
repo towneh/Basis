@@ -2,11 +2,11 @@
     <engine:VisualElement class="bvp-root">
         <engine:VisualElement name="HeaderCard" class="bvp-card bvp-header-card">
             <engine:Label text="Basis Video Material Output" name="HeaderTitle" selectable="false" class="bvp-header-title"/>
-            <engine:Label text="Binds the player's OutputTexture to one or more Renderer material properties" name="HeaderSubtitle" selectable="false" class="bvp-header-subtitle"/>
+            <engine:Label text="Binds the player's video texture to one or more Renderer material properties" name="HeaderSubtitle" selectable="false" class="bvp-header-subtitle"/>
         </engine:VisualElement>
 
         <engine:Foldout text="Binding" name="BindingFoldout" value="true" class="bvp-foldout">
-            <editor:ObjectField label="Player" name="PlayerField" type="BasisMediaPlayer, BasisMediaPlayer" allow-scene-objects="true"/>
+            <editor:ObjectField label="Player" name="PlayerField" type="Basis.Media.BasisMediaPlayer, Basis.Media" allow-scene-objects="true"/>
             <editor:ObjectField label="Target Renderer" name="TargetRendererField" type="UnityEngine.Renderer, UnityEngine.CoreModule" allow-scene-objects="true"/>
             <engine:IntegerField label="Material Index" name="MaterialIndexField"/>
             <engine:TextField label="Texture Property Name" name="TexturePropertyField" tooltip="URP uses _BaseMap; legacy BiRP uses _MainTex."/>
@@ -17,7 +17,7 @@
         <engine:Foldout text="Behavior" name="BehaviorFoldout" value="true" class="bvp-foldout">
             <editor:ObjectField label="Placeholder Texture" name="PlaceholderField" type="UnityEngine.Texture, UnityEngine.CoreModule" allow-scene-objects="true"/>
             <engine:Toggle label="Restore Placeholder On Ended" name="RestoreOnEndedField"/>
-            <engine:Toggle label="Flip Vertically" name="FlipVerticallyField" tooltip="Native GPU textures (D3D11/D3D12) come in top-left origin; ON by default."/>
+            <engine:Toggle label="Flip Vertically" name="FlipVerticallyField" tooltip="Platform frame-origin differences are corrected automatically; only turn this on for content encoded upside-down at source."/>
             <engine:Toggle label="Flip Horizontally" name="FlipHorizontallyField" tooltip="Mirror the video left-right. Use when the screen mesh winding presents the video reversed."/>
         </engine:Foldout>
 

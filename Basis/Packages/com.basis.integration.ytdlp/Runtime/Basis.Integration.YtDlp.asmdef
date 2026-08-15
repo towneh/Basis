@@ -3,7 +3,7 @@
     "rootNamespace": "Basis.Integration.YtDlp",
     "references": [
         "BasisMediaPlayer",
-        "BasisDebug",
+        "Basis.Integration.YtDlp.Core",
         "YtDlp.Runtime"
     ],
     "includePlatforms": [],

@@ -1,0 +1,136 @@
+//! The resilience path end to end: a live TS server that kills the first
+//! connection mid-stream; the session must rebuild the transport (with the
+//! banked depth playing through the outage), rejoin at the live edge
+//! mid-GOP, and keep presenting — no Error state, no manual intervention.
+
+#![cfg(windows)]
+
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use media_engine::{OpenRequest, Session, SourceLiveness, State};
+
+/// Serve the fixture at ~1x from a shared live origin. The first
+/// connection is dropped after `kill_after`; later connections join at the
+/// current live position, like any real edge.
+fn spawn_live_server(bytes: Vec<u8>, rate: u64, kill_after: Duration) -> (String, Arc<AtomicU32>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicU32::new(0));
+    let seen = Arc::clone(&connections);
+    let body = Arc::new(bytes);
+    thread::spawn(move || {
+        let origin = Instant::now();
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let n = seen.fetch_add(1, Ordering::SeqCst) + 1;
+            let body = Arc::clone(&body);
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim_end().is_empty() || line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                if stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .is_err()
+                {
+                    return;
+                }
+                let deadline = (n == 1).then(|| Instant::now() + kill_after);
+                // Join at the live edge, aligned down to a packet.
+                let mut pos =
+                    (origin.elapsed().as_micros() as u64 * rate / 1_000_000 / 188 * 188) as usize;
+                loop {
+                    if let Some(deadline) = deadline
+                        && Instant::now() >= deadline
+                    {
+                        return; // drop the connection
+                    }
+                    let live = (origin.elapsed().as_micros() as u64 * rate / 1_000_000) as usize;
+                    let due = live.min(body.len());
+                    if pos < due {
+                        if stream.write_all(&body[pos..due]).is_err() {
+                            return;
+                        }
+                        pos = due;
+                    }
+                    if pos >= body.len() {
+                        return; // stream over
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}/live"), connections)
+}
+
+#[test]
+fn live_session_survives_a_dropped_connection() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/h264-aac-320x180-30s.ts"),
+    )
+    .expect("fixture readable");
+    // ~30 s of media; rate from size/duration.
+    let rate = bytes.len() as u64 / 30;
+    let (url, connections) = spawn_live_server(bytes, rate, Duration::from_secs(5));
+
+    let mut request = OpenRequest::new(url);
+    request.allow_local_addresses = true;
+    request.liveness = SourceLiveness::Live;
+    // A shallow bank keeps the run short; the point is the rebuild, not
+    // riding out the gap.
+    request.buffer_depth_ms = Some(1000);
+    let mut session = Session::open(request);
+    let shared = session.shared().clone();
+
+    let start = Instant::now();
+    let mut decoded_at_drop = None;
+    let mut recovered = false;
+    while start.elapsed() < Duration::from_secs(20) {
+        let state = shared.state.load(Ordering::Relaxed);
+        assert_ne!(
+            state,
+            State::Error as u32,
+            "session must reconnect, not error (code {})",
+            shared.last_error.load(Ordering::Relaxed)
+        );
+        if state == State::Ended as u32 {
+            break;
+        }
+        let decoded = shared.frames_decoded.load(Ordering::Relaxed);
+        if connections.load(Ordering::SeqCst) >= 2 {
+            let baseline = *decoded_at_drop.get_or_insert(decoded);
+            // Recovered = decode moved on well past the pre-drop point
+            // (a whole GOP, so it cannot be pool residue).
+            if decoded > baseline + 60 {
+                recovered = true;
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        connections.load(Ordering::SeqCst) >= 2,
+        "the engine never reconnected"
+    );
+    assert!(recovered, "decode did not resume after the reconnect");
+    let events = session.diag().take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.code, media_diag::EventCode::Reconnect)),
+        "reconnect must narrate itself in the diagnostics"
+    );
+    session.close();
+}

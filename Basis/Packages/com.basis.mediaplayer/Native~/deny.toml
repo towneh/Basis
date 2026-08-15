@@ -1,0 +1,46 @@
+# cargo-deny: the licence bar as an executable gate, not a review habit
+# (spec §5.5/§15.1). Strict permissive spine; MPL and any copyleft are not
+# on the list by design — a dependency picking one up is a build failure to
+# be dealt with deliberately, never silently shipped.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    # Public-domain dedication; on the spine's permissive bar (the spec
+    # already sanctions MIT/CC0 tooling). Pulled in by rav1d's to_method.
+    "CC0-1.0",
+    # Data-only permissive licence (no copyleft on code): webpki-roots'
+    # CCADB trust-anchor bundle, the Android https root store (R16).
+    "CDLA-Permissive-2.0",
+]
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # audiopus_sys wraps a vendored libopus for the `opus` crate; the
+    # wrapper being unmaintained is a build-script concern, not a codec
+    # one — libopus itself is current and watched. Revisit if the opus
+    # crate grows a maintained -sys or the pure-Rust decoder matures
+    # (§5.5's noted future swap).
+    "RUSTSEC-2026-0150",
+    # paste is a proc-macro used at build time by rav1d; unmaintained but
+    # inert at runtime. Follows rav1d's own tree; drop when upstream does.
+    "RUSTSEC-2024-0436",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

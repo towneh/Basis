@@ -524,7 +524,6 @@ GameObject:
   - component: {fileID: 2005237590012059063}
   - component: {fileID: 1325980082505240853}
   - component: {fileID: 2859578426207650292}
-  - component: {fileID: 5505517674190816405}
   - component: {fileID: 4061480472500249022}
   - component: {fileID: 3404733239259574964}
   - component: {fileID: 2558915426334022879}
@@ -723,28 +722,6 @@ MonoBehaviour:
   StereoEye: 0
   AspectMode: 2
   DisplayAspectOverride: 0
---- !u!114 &5505517674190816405
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 8238937759899344198}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 9313d54e9f39acb40861404700a309d4, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: BasisMediaPlayer::BasisMediaPlayerNetworking
-  HasNetworkID: 0
-  IsOwnedLocallyOnServer: 0
-  IsOwnedLocallyOnClient: 0
-  CurrentOwnerId: 0
-  AdminOnly: 0
-  AllowAnyoneToTakeControl: 1
-  AnyoneCanControl: 0
-  DriftSeekThresholdSeconds: 0
-  PositionHeartbeatSeconds: 5
-  VerboseLogging: 0
 --- !u!114 &4061480472500249022
 MonoBehaviour:
   m_ObjectHideFlags: 0
