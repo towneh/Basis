@@ -25,7 +25,7 @@ use media_engine::{OpenRequest, PipelineShared, Session, SessionShared};
 #[cfg(windows)]
 use media_present::SharedTextureConsumer;
 
-pub const BM_ABI_VERSION: u32 = 2;
+pub const BM_ABI_VERSION: u32 = 4;
 
 pub const BM_OK: i32 = 0;
 pub const BM_ERR_INVALID_ARG: i32 = -1;
@@ -109,10 +109,15 @@ struct Descriptor {
     allow_local_addresses: bool,
     #[serde(default)]
     buffer_depth_ms: Option<u32>,
-    /// "live" | "vod"; absent = unknown (treated as VOD). Stated by the
-    /// caller/resolver, never inferred by the engine (§6.11).
+    /// "live" | "vod"; absent = auto, which is the default and lets the
+    /// engine decide from the source itself. State one only to overrule
+    /// a server whose headers mislead (§6.11).
     #[serde(default)]
     liveness: Option<String>,
+    /// Index into the offered audio track list to bind. Absent = 0, the
+    /// container's first. Switching track re-opens with a new value.
+    #[serde(default)]
+    audio_track: Option<u32>,
     /// Audio-leading start: live sessions start audible at the
     /// first banked audio instead of gating on the first video frame.
     /// For sources where the audio is the content; the picture can
@@ -124,6 +129,11 @@ struct Descriptor {
     /// to on close (sampled at 100 ms engine-side). Absent = off.
     #[serde(default)]
     diag_csv: Option<String>,
+    /// Append each session's capture to `diag_csv` rather than replacing
+    /// it, so a player that opens and closes repeatedly keeps every run.
+    /// Absent = replace.
+    #[serde(default)]
+    diag_csv_append: bool,
     /// Shared-playback divergence bound on live lanes (§8.5),
     /// milliseconds: a ceiling on the Bank's lag cap and so on Auto's
     /// depth growth. Absent = the default cap.
@@ -278,13 +288,15 @@ pub unsafe extern "C" fn bm_session_open(
         request.audio_url = descriptor.audio_url;
         request.allow_local_addresses = descriptor.allow_local_addresses;
         request.buffer_depth_ms = descriptor.buffer_depth_ms;
+        request.audio_track = descriptor.audio_track.unwrap_or(0) as usize;
         request.liveness = match descriptor.liveness.as_deref() {
             Some("live") => media_engine::SourceLiveness::Live,
             Some("vod") => media_engine::SourceLiveness::Vod,
-            _ => media_engine::SourceLiveness::Unknown,
+            _ => media_engine::SourceLiveness::Auto,
         };
         request.audio_leading = descriptor.audio_leading;
         request.diag_csv = descriptor.diag_csv.map(std::path::PathBuf::from);
+        request.diag_csv_append = descriptor.diag_csv_append;
         request.max_divergence_ms = descriptor.max_divergence_ms;
         request.decode_preference = match descriptor.decode_preference.as_deref() {
             Some("hardware_only") => media_engine::DecodePreference::HardwareOnly,
@@ -594,6 +606,185 @@ pub unsafe extern "C" fn bm_session_drain_captions(
         cues.len() as i32
     }))
     .unwrap_or(BM_ERR_PANIC)
+}
+
+/// ISO 639 codes are three bytes; a track name is free text, so it gets
+/// a sane ceiling rather than an exact one.
+pub const BM_TRACK_LANG_CAP: usize = 16;
+pub const BM_TRACK_LABEL_CAP: usize = 64;
+
+/// One selectable audio track. `language` is the container's ISO 639 code
+/// and `label` its track name; either can be absent (a recording with a
+/// microphone on its own track typically states neither), so a picker must
+/// be able to tell rows apart by index alone. Lengths are byte counts into
+/// the fixed buffers, which hold UTF-8 truncated on a character boundary.
+#[repr(C)]
+pub struct BmAudioTrack {
+    pub track_id: u32,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub language_len: u32,
+    pub language: [u8; BM_TRACK_LANG_CAP],
+    pub label_len: u32,
+    pub label: [u8; BM_TRACK_LABEL_CAP],
+}
+
+/// How many audio tracks the source offers *instead of* the bound one.
+/// Zero means there is no choice to present: either one track, or a
+/// container that does not enumerate them. Stable for the session's life,
+/// because switching track re-opens rather than switching in place.
+///
+/// # Safety
+///
+/// `handle` must be a live session handle, or 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn bm_session_audio_track_count(handle: u64) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(entry) = lookup(handle) else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        let Ok(session) = entry.session.lock() else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        session
+            .as_ref()
+            .map_or(0, |s| s.audio_tracks().len() as i32)
+    }))
+    .unwrap_or(BM_ERR_PANIC)
+}
+
+/// Byte length of the container's cover art, or 0 where it carries none
+/// (negative on error). Call before [`bm_session_get_artwork`] to size the
+/// buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn bm_session_artwork_len(handle: u64) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(entry) = lookup(handle) else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        let Ok(session) = entry.session.lock() else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        session
+            .as_ref()
+            .and_then(|s| s.artwork())
+            .map_or(0, |art| art.data.len().min(i32::MAX as usize) as i32)
+    }))
+    .unwrap_or(BM_ERR_PANIC)
+}
+
+/// Copy the cover art into `out` and its MIME type into `mime`, returning
+/// the bytes written (0 = no art, negative = error). The bytes are the
+/// container's own — JPEG or PNG as it stored them — and the caller
+/// decodes them; nothing in the engine parses an image.
+///
+/// A buffer shorter than [`bm_session_artwork_len`] reports
+/// `BM_ERR_INVALID_ARG` rather than a truncated picture.
+///
+/// # Safety
+///
+/// `out` must point to `cap` writable bytes and `mime` to `mime_cap`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bm_session_get_artwork(
+    handle: u64,
+    out: *mut u8,
+    cap: u32,
+    mime: *mut u8,
+    mime_cap: u32,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if out.is_null() || cap == 0 {
+            return BM_ERR_INVALID_ARG;
+        }
+        let Some(entry) = lookup(handle) else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        let Ok(session) = entry.session.lock() else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        let Some(art) = session.as_ref().and_then(|s| s.artwork()) else {
+            return 0;
+        };
+        if art.data.len() > cap as usize {
+            return BM_ERR_INVALID_ARG;
+        }
+        // SAFETY: caller contract — out points to cap writable bytes and
+        // the copy is bounded by the check above.
+        unsafe { std::ptr::copy_nonoverlapping(art.data.as_ptr(), out, art.data.len()) };
+        if !mime.is_null() && mime_cap > 0 {
+            let bytes = art.mime.as_bytes();
+            let n = bytes.len().min(mime_cap as usize - 1);
+            // SAFETY: caller contract — mime points to mime_cap writable
+            // bytes; n leaves room for the terminator.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), mime, n);
+                mime.add(n).write(0);
+            }
+        }
+        art.data.len() as i32
+    }))
+    .unwrap_or(BM_ERR_PANIC)
+}
+
+/// Copy the offered audio tracks into `out`, writing at most `cap` of
+/// them and returning how many were written (or a negative error).
+///
+/// # Safety
+///
+/// `out` must point to `cap` writable `BmAudioTrack`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bm_session_get_audio_tracks(
+    handle: u64,
+    out: *mut BmAudioTrack,
+    cap: u32,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if out.is_null() || cap == 0 {
+            return BM_ERR_INVALID_ARG;
+        }
+        let Some(entry) = lookup(handle) else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        let Ok(session) = entry.session.lock() else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        let Some(tracks) = session.as_ref().map(|s| s.audio_tracks()) else {
+            return 0;
+        };
+        let n = tracks.len().min(cap as usize);
+        for (i, track) in tracks.iter().take(n).enumerate() {
+            let mut language = [0u8; BM_TRACK_LANG_CAP];
+            let language_len = copy_utf8(track.language.as_deref(), &mut language);
+            let mut label = [0u8; BM_TRACK_LABEL_CAP];
+            let label_len = copy_utf8(track.label.as_deref(), &mut label);
+            let record = BmAudioTrack {
+                track_id: track.id.0,
+                sample_rate: track.sample_rate,
+                channels: track.channels,
+                language_len,
+                language,
+                label_len,
+                label,
+            };
+            // SAFETY: caller contract — out points to cap writable
+            // BmAudioTracks; i < n <= cap.
+            unsafe { out.add(i).write(record) };
+        }
+        n as i32
+    }))
+    .unwrap_or(BM_ERR_PANIC)
+}
+
+/// Copy `text` into `buf` as UTF-8, truncated on a character boundary.
+fn copy_utf8(text: Option<&str>, buf: &mut [u8]) -> u32 {
+    let Some(text) = text else { return 0 };
+    let bytes = text.as_bytes();
+    let mut len = bytes.len().min(buf.len());
+    while len > 0 && !text.is_char_boundary(len) {
+        len -= 1;
+    }
+    buf[..len].copy_from_slice(&bytes[..len]);
+    len as u32
 }
 
 /// Register the Unity-created output texture (from `GetNativeTexturePtr`)

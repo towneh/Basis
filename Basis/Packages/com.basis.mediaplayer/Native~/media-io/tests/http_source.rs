@@ -15,6 +15,11 @@ enum Mode {
     Ranges,
     /// Ignores Range headers: always a 200 with the full body.
     Sequential,
+    /// Declines the range request but advertises `Accept-Ranges: bytes`,
+    /// which is the second arm of "will this server serve ranges".
+    SequentialAdvertised,
+    /// A live edge: 200, no length of any kind, closed when done.
+    Unbounded,
 }
 
 /// Serve `body` at `/media`, with `/hop1` -> `/hop2` -> `/media` redirects
@@ -89,10 +94,23 @@ fn serve_connection(stream: TcpStream, body: &[u8], mode: Mode) {
                     r.extend_from_slice(slice);
                     r
                 }
+                (Mode::Unbounded, _) => {
+                    let mut r = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+                    r.extend_from_slice(body);
+                    let _ = stream.write_all(&r);
+                    return;
+                }
                 _ => {
-                    let mut r =
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
-                            .into_bytes();
+                    let accept = if mode == Mode::SequentialAdvertised {
+                        "Accept-Ranges: bytes\r\n"
+                    } else {
+                        ""
+                    };
+                    let mut r = format!(
+                        "HTTP/1.1 200 OK\r\n{accept}Content-Length: {}\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
                     r.extend_from_slice(body);
                     r
                 }
@@ -203,4 +221,43 @@ fn public_gate_blocks_loopback() {
 fn unsupported_scheme_is_a_url_error() {
     let err = open("ftp://example.invalid/media").expect_err("ftp refused");
     assert_eq!(err.kind, IoErrorKind::Url);
+}
+
+/// The liveness inference reads two things off the source: whether the
+/// server will serve byte ranges, and whether it stated any length. The
+/// composition — finite and rangeable is on-demand — is what keeps a VOD
+/// off the jitter-buffer path, where it would play at delivery speed.
+#[test]
+fn seekability_reads_ranges_and_length_not_guesses() {
+    let body = fixture("h264-aac-640x360-30fps.mp4");
+
+    // A real 206 answer, which is the signal — not an advertised header.
+    let ranged = spawn_server(body.clone(), Mode::Ranges);
+    assert!(
+        open(&format!("{ranged}/media"))
+            .expect("open")
+            .is_seekable()
+    );
+
+    // 200 to a range request, no advertisement: nothing says ranges work.
+    let plain = spawn_server(body.clone(), Mode::Sequential);
+    assert!(!open(&format!("{plain}/media")).expect("open").is_seekable());
+
+    // 200 to a range request but `Accept-Ranges: bytes` advertised. The
+    // C player accepted this arm and so does this one, which is the only
+    // gap between them.
+    let advertised = spawn_server(body.clone(), Mode::SequentialAdvertised);
+    assert!(
+        open(&format!("{advertised}/media"))
+            .expect("open")
+            .is_seekable()
+    );
+
+    // No ranges and no length at all: the live-edge shape.
+    let unbounded = spawn_server(body, Mode::Unbounded);
+    assert!(
+        !open(&format!("{unbounded}/media"))
+            .expect("open")
+            .is_seekable()
+    );
 }

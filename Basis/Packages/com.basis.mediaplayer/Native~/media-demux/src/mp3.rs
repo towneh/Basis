@@ -1,14 +1,20 @@
 //! Raw MP3 file demuxer (§6.6): ID3v2 skip, then an MPEG audio frame walk
 //! — each AU is one Layer III frame, length computed from its header, pts
 //! from accumulated samples. A leading Xing/Info/VBRI frame is metadata,
-//! not audio, and is skipped.
+//! not audio: it is parsed for the duration and seek table, then dropped.
+//!
+//! Seeking an MP3 is approximate, as it is in every player: frames carry
+//! no index, so the target maps to a byte offset through the Xing table
+//! where there is one and a constant-bitrate estimate where there is not,
+//! and playback resumes at the first frame header found from there.
 
 use media_clock::{Generation, MediaTime};
 
+use crate::artwork;
 use crate::source::SeqReader;
 use crate::{
-    Au, AudioCodec, ByteSource, DemuxError, DemuxLimits, Demuxer, EosReason, Format, StreamEvent,
-    TrackId,
+    Artwork, Au, AudioCodec, ByteSource, DemuxError, DemuxLimits, Demuxer, EosReason, Format,
+    StreamEvent, TrackId,
 };
 
 const TRACK: TrackId = TrackId(1);
@@ -31,6 +37,8 @@ struct FrameInfo {
     channels: u32,
     /// Whole frame length in bytes, header included.
     frame_len: usize,
+    /// 2 when the frame carries a CRC, which shifts the side-info block.
+    crc_len: usize,
     /// Inter-channel samples per frame at this version.
     samples: u32,
 }
@@ -82,32 +90,77 @@ fn parse_frame_header(h: &[u8]) -> Option<FrameInfo> {
         return None;
     }
     let channels = if (h[3] >> 6) & 0x03 == 0b11 { 1 } else { 2 };
+    // Protection bit clear means a 2-byte CRC follows the header.
+    let crc_len = if h[1] & 1 == 0 { 2 } else { 0 };
     Some(FrameInfo {
         version,
         sample_rate,
         channels,
         frame_len,
+        crc_len,
         samples,
     })
 }
 
-/// Whether this frame is a Xing/Info/VBRI metadata frame (the encoder's
-/// seek/duration table, decodes as silence): checked at the side-info
-/// offset for Xing/Info and at the fixed offset 36 for VBRI.
-fn is_metadata_frame(frame: &[u8], info: &FrameInfo) -> bool {
+/// The encoder's leading metadata frame (Xing/Info from LAME and friends,
+/// VBRI from Fraunhofer): total counts and, for Xing, a 100-entry seek
+/// table mapping time percent to byte percent. Decodes as silence, so it
+/// is dropped from the AU stream.
+#[derive(Default)]
+struct VbrHeader {
+    /// Audio frames in the file, excluding this one. 0 = unstated.
+    frames: u32,
+    /// Bytes of MPEG data from this frame onwards. 0 = unstated.
+    bytes: u32,
+    /// Xing seek table: byte-percent (of `bytes`, scaled by 256) at each
+    /// whole percent of the duration.
+    toc: Option<[u8; 100]>,
+}
+
+fn be32(p: &[u8]) -> u32 {
+    u32::from_be_bytes([p[0], p[1], p[2], p[3]])
+}
+
+/// Parse the leading metadata frame, if this is one. Xing/Info sit past
+/// the side-info block (whose size depends on version and channel count,
+/// and which follows the optional CRC); VBRI is always at byte 36.
+fn parse_vbr_header(frame: &[u8], info: &FrameInfo) -> Option<VbrHeader> {
     let side_info = match (info.version, info.channels) {
         (Version::Mpeg1, 1) => 17,
         (Version::Mpeg1, _) => 32,
         (_, 1) => 9,
         (_, _) => 17,
     };
-    let xing_at = 4 + side_info;
-    let has = |offset: usize, magic: &[u8]| {
-        frame
-            .get(offset..offset + magic.len())
-            .is_some_and(|w| w == magic)
-    };
-    has(xing_at, b"Xing") || has(xing_at, b"Info") || has(36, b"VBRI")
+    let at = 4 + info.crc_len + side_info;
+    if matches!(frame.get(at..at + 4), Some(b"Xing") | Some(b"Info")) {
+        let mut header = VbrHeader::default();
+        let flags = be32(frame.get(at + 4..at + 8)?);
+        let mut q = at + 8;
+        if flags & 0x1 != 0 {
+            header.frames = be32(frame.get(q..q + 4)?);
+            q += 4;
+        }
+        if flags & 0x2 != 0 {
+            header.bytes = be32(frame.get(q..q + 4)?);
+            q += 4;
+        }
+        if flags & 0x4 != 0
+            && let Some(toc) = frame.get(q..q + 100)
+        {
+            header.toc = Some(toc.try_into().expect("sliced 100"));
+        }
+        return Some(header);
+    }
+    if frame.get(36..40) == Some(b"VBRI") {
+        // Counts only; its table is a different shape and the estimate
+        // covers what it would buy.
+        return Some(VbrHeader {
+            bytes: be32(frame.get(46..50)?),
+            frames: be32(frame.get(50..54)?),
+            toc: None,
+        });
+    }
+    None
 }
 
 pub struct Mp3Demuxer {
@@ -121,24 +174,54 @@ pub struct Mp3Demuxer {
     samples_out: u64,
     notes: Vec<String>,
     ended: bool,
+    /// Absolute offset of the first MPEG frame, which is the metadata one
+    /// where the file has it. Xing byte counts are measured from here.
+    mpeg_start: u64,
+    /// Absolute offset of the first *audio* frame.
+    audio_start: u64,
+    /// Bytes per second at the first frame's bitrate: the estimate that
+    /// carries a file with no seek table.
+    cbr_bps: u64,
+    vbr: Option<VbrHeader>,
+    duration: Option<MediaTime>,
+    /// Whether the source can serve the backwards reads a seek needs.
+    seekable: bool,
+    /// Cover art from the ID3v2 tag the frame walk skips over.
+    artwork: Option<Artwork>,
 }
 
 impl Mp3Demuxer {
     pub fn open(
-        src: Box<dyn ByteSource>,
+        mut src: Box<dyn ByteSource>,
         _limits: DemuxLimits,
         generation: Generation,
     ) -> Result<Self, DemuxError> {
+        // A size answer is the seek gate: a sequential live source serves
+        // forward reads only, and a duration implies a working seek bar.
+        let seekable = src.size().map_err(DemuxError::Source)?.is_some();
         let mut reader = SeqReader::new(src);
 
         // ID3v2: "ID3", version (2), flags (1), syncsafe size (4).
+        let mut artwork = None;
         let head = reader.peek(10).map_err(DemuxError::Source)?;
         if head.starts_with(b"ID3") && head.len() >= 10 {
+            let major = head[3];
+            let flags = head[5];
             let size = (u64::from(head[6] & 0x7F) << 21)
                 | (u64::from(head[7] & 0x7F) << 14)
                 | (u64::from(head[8] & 0x7F) << 7)
                 | u64::from(head[9] & 0x7F);
-            let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
+            let footer = if flags & 0x10 != 0 { 10 } else { 0 };
+            // The tag is skipped either way; read it first only when it is
+            // small enough to be a tag rather than a hostile length, since
+            // cover art is the one thing in it worth carrying.
+            if size <= artwork::MAX_ARTWORK_BYTES as u64 {
+                let want = 10 + size as usize;
+                let tag = reader.peek(want).map_err(DemuxError::Source)?;
+                if let Some(body) = tag.get(10..want) {
+                    artwork = artwork::from_id3v2(major, flags, body);
+                }
+            }
             reader
                 .seek_to(10 + size + footer)
                 .map_err(DemuxError::Source)?;
@@ -172,6 +255,36 @@ impl Mp3Demuxer {
             }
         };
 
+        // The leading metadata frame carries the counts and the seek
+        // table. Consume it here rather than mid-walk so the byte offsets
+        // either side of it are known before the first AU is served.
+        let mpeg_start = reader.pos();
+        let mut vbr = None;
+        let frame = reader
+            .peek(info.frame_len)
+            .map_err(DemuxError::Source)?
+            .to_vec();
+        if frame.len() >= info.frame_len
+            && let Some(header) = parse_vbr_header(&frame[..info.frame_len], &info)
+        {
+            reader.consume(info.frame_len);
+            vbr = Some(header);
+        }
+        let audio_start = reader.pos();
+
+        let cbr_bps = if info.samples > 0 {
+            u64::from(info.frame_len as u32) * u64::from(info.sample_rate) / u64::from(info.samples)
+        } else {
+            0
+        };
+        let duration = match &vbr {
+            Some(header) if header.frames > 0 => Some(MediaTime::from_micros(
+                i64::from(header.frames) * i64::from(info.samples) * 1_000_000
+                    / i64::from(info.sample_rate),
+            )),
+            _ => None,
+        };
+
         Ok(Self {
             reader,
             generation,
@@ -182,7 +295,45 @@ impl Mp3Demuxer {
             samples_out: 0,
             notes: Vec::new(),
             ended: false,
+            mpeg_start,
+            audio_start,
+            cbr_bps,
+            vbr,
+            // A duration is only offered where the seek it implies works.
+            duration: if seekable { duration } else { None },
+            seekable,
+            artwork,
         })
+    }
+
+    /// Byte offset for a target instant: the Xing table where the file has
+    /// one, interpolated between its whole-percent entries; a proportional
+    /// split of the stated byte count where it states frames but no table;
+    /// and a constant-bitrate estimate otherwise.
+    fn offset_for(&self, target: MediaTime) -> u64 {
+        let micros = target.as_micros().max(0);
+        let payload = self
+            .vbr
+            .as_ref()
+            .map(|v| u64::from(v.bytes))
+            .unwrap_or(0)
+            .saturating_sub(self.audio_start - self.mpeg_start);
+        if let (Some(vbr), Some(duration)) = (self.vbr.as_ref(), self.duration)
+            && duration.as_micros() > 0
+            && payload > 0
+        {
+            let mut frac = micros as f64 / duration.as_micros() as f64;
+            frac = frac.clamp(0.0, 1.0);
+            if let Some(toc) = &vbr.toc {
+                let percent = frac * 100.0;
+                let a = (percent as usize).min(99);
+                let fa = f64::from(toc[a]);
+                let fb = if a < 99 { f64::from(toc[a + 1]) } else { 256.0 };
+                frac = (fa + (fb - fa) * (percent - a as f64)) / 256.0;
+            }
+            return self.audio_start + (frac * payload as f64) as u64;
+        }
+        self.audio_start + (micros as u64).saturating_mul(self.cbr_bps) / 1_000_000
     }
 }
 
@@ -244,9 +395,6 @@ impl Demuxer for Mp3Demuxer {
             }
             let frame = data[..info.frame_len].to_vec();
             self.reader.consume(info.frame_len);
-            if self.samples_out == 0 && is_metadata_frame(&frame, &info) {
-                continue;
-            }
             let pts = MediaTime::from_micros(
                 (self.samples_out as i64).saturating_mul(1_000_000) / i64::from(self.sample_rate),
             );
@@ -262,22 +410,35 @@ impl Demuxer for Mp3Demuxer {
         }
     }
 
-    fn seek(
-        &mut self,
-        _target: MediaTime,
-        _generation: Generation,
-    ) -> Result<MediaTime, DemuxError> {
-        // CBR arithmetic or the Xing TOC would both serve; neither is
-        // built yet.
-        Err(DemuxError::Unsupported("seek on a raw MP3 file"))
+    fn seek(&mut self, target: MediaTime, generation: Generation) -> Result<MediaTime, DemuxError> {
+        if !self.seekable {
+            return Err(DemuxError::Unsupported("seek on a streaming MP3 source"));
+        }
+        self.reader.reposition(self.offset_for(target));
+        self.generation = generation;
+        // The landing is a byte estimate, so the timeline is re-anchored
+        // on the request: the next frame found from there is treated as
+        // the target instant. Without this the pts would keep counting
+        // from the samples emitted before the seek and run backwards.
+        self.samples_out = (target.as_micros().max(0) as u64)
+            .saturating_mul(u64::from(self.sample_rate))
+            / 1_000_000;
+        self.ended = false;
+        Ok(MediaTime::from_micros(
+            (self.samples_out as i64).saturating_mul(1_000_000) / i64::from(self.sample_rate),
+        ))
     }
 
     fn duration(&self) -> Option<MediaTime> {
-        None
+        self.duration
     }
 
     fn audio_track(&self) -> Option<TrackId> {
         Some(TRACK)
+    }
+
+    fn artwork(&self) -> Option<&Artwork> {
+        self.artwork.as_ref()
     }
 
     fn take_notes(&mut self) -> Vec<String> {

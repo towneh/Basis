@@ -3,7 +3,36 @@
 
 use media_clock::{Generation, MediaTime};
 
-use crate::{DemuxError, StreamEvent, TrackId};
+use crate::{Artwork, AudioCodec, DemuxError, StreamEvent, TrackId};
+
+/// One selectable audio track, as the container describes it. Containers
+/// that carry a single audio track report none: a picker with one entry is
+/// not a choice, and the engine's binding is unambiguous there anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioTrackInfo {
+    pub id: TrackId,
+    /// ISO 639 code as the container states it; `None` when unstated or
+    /// explicitly undetermined. This is what makes the picker a language
+    /// picker rather than a list of numbers.
+    pub language: Option<String>,
+    /// Human-readable track name, where the container carries one.
+    pub label: Option<String>,
+    pub codec: AudioCodec,
+    pub sample_rate: u32,
+    pub channels: u32,
+}
+
+/// Choices made at open that the demuxer cannot revisit later. Audio track
+/// selection lands here rather than as a mid-stream call: switching track
+/// re-opens the session at the current position, so the demuxer only ever
+/// needs to honour a choice once.
+#[derive(Debug, Clone, Default)]
+pub struct DemuxOptions {
+    /// Index into [`Demuxer::audio_tracks`] to bind. Out of range, or a
+    /// track that turns out to be undecodable, falls back to the first
+    /// usable one with a note.
+    pub audio_track: usize,
+}
 
 /// Parse-time caps drawn from the session budget (§6.6): enforced inside
 /// the demuxer, not around it.
@@ -47,6 +76,19 @@ pub trait Demuxer: Send {
 
     /// The selected audio track, once known (see [`Self::video_track`]).
     fn audio_track(&self) -> Option<TrackId> {
+        None
+    }
+
+    /// Every audio track a caller could bind instead of the current one,
+    /// in container order, or empty where there is no choice to offer.
+    fn audio_tracks(&self) -> Vec<AudioTrackInfo> {
+        Vec::new()
+    }
+
+    /// Embedded cover art, where the container carries one and the
+    /// container is one that can. Read once after open, like the duration:
+    /// it is a property of the file, not of the stream.
+    fn artwork(&self) -> Option<&Artwork> {
         None
     }
 

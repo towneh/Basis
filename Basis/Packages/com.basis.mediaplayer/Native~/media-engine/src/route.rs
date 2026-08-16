@@ -270,18 +270,14 @@ pub fn open_audio_decoder(
     codec_private: &[u8],
 ) -> Result<Box<dyn AudioDecoder>, media_decode::DecodeError> {
     use decode_mf::{AacDecoder, Mp3Decoder};
-    use decode_sw::{FlacDecoder, OpusDecoder};
+    use decode_sw::{FlacDecoder, OpusDecoder, PcmDecoder};
     use media_demux::AudioCodec;
     Ok(match codec {
         AudioCodec::Aac => Box::new(AacDecoder::new(sample_rate, channels, codec_private)?),
         AudioCodec::Mp3 => Box::new(Mp3Decoder::new(sample_rate, channels)?),
         AudioCodec::Flac => Box::new(FlacDecoder::new(codec_private)?),
         AudioCodec::Opus => Box::new(OpusDecoder::new(codec_private)?),
-        AudioCodec::Pcm => {
-            return Err(media_decode::DecodeError(
-                "no LPCM adapter yet (lands with the multichannel work)".into(),
-            ));
-        }
+        AudioCodec::Pcm => Box::new(PcmDecoder::new(sample_rate, channels, codec_private)?),
     })
 }
 
@@ -296,7 +292,7 @@ pub fn open_audio_decoder(
     codec_private: &[u8],
 ) -> Result<Box<dyn AudioDecoder>, media_decode::DecodeError> {
     use decode_mediacodec::{AudioMime, McAudioDecoder};
-    use decode_sw::{FlacDecoder, OpusDecoder};
+    use decode_sw::{FlacDecoder, OpusDecoder, PcmDecoder};
     use media_demux::AudioCodec;
     Ok(match codec {
         AudioCodec::Aac => Box::new(McAudioDecoder::new(
@@ -313,11 +309,7 @@ pub fn open_audio_decoder(
         )?),
         AudioCodec::Flac => Box::new(FlacDecoder::new(codec_private)?),
         AudioCodec::Opus => Box::new(OpusDecoder::new(codec_private)?),
-        AudioCodec::Pcm => {
-            return Err(media_decode::DecodeError(
-                "no LPCM adapter yet (lands with the multichannel work)".into(),
-            ));
-        }
+        AudioCodec::Pcm => Box::new(PcmDecoder::new(sample_rate, channels, codec_private)?),
     })
 }
 
@@ -327,11 +319,11 @@ pub fn open_audio_decoder(
 #[cfg(not(any(windows, target_os = "android")))]
 pub fn open_audio_decoder(
     codec: media_demux::AudioCodec,
-    _sample_rate: u32,
-    _channels: u32,
+    sample_rate: u32,
+    channels: u32,
     codec_private: &[u8],
 ) -> Result<Box<dyn AudioDecoder>, media_decode::DecodeError> {
-    use decode_sw::{FlacDecoder, OpusDecoder};
+    use decode_sw::{FlacDecoder, OpusDecoder, PcmDecoder};
     use media_demux::AudioCodec;
     Ok(match codec {
         AudioCodec::Flac => Box::new(FlacDecoder::new(codec_private)?),
@@ -341,11 +333,7 @@ pub fn open_audio_decoder(
                 "no AAC/MP3 decode path on this platform (platform decoders only, §6.7)".into(),
             ));
         }
-        AudioCodec::Pcm => {
-            return Err(media_decode::DecodeError(
-                "no LPCM adapter yet (lands with the multichannel work)".into(),
-            ));
-        }
+        AudioCodec::Pcm => Box::new(PcmDecoder::new(sample_rate, channels, codec_private)?),
     })
 }
 

@@ -1,112 +1,260 @@
+using System;
 using System.IO;
 using UnityEditor;
+using UnityEditor.UIElements;
 using UnityEngine;
+using UnityEngine.UIElements;
 
-namespace Basis.Media
+/// <summary>
+/// Inspector for <see cref="BasisMediaPlayer"/>: the authored source and
+/// buffering settings, what a resolver reported for the current media, a live
+/// session readout, and transport controls while playing. Also carries the
+/// scene-setup menu items, so a test player is one click away in any project
+/// referencing the package.
+/// </summary>
+[CustomEditor(typeof(BasisMediaPlayer))]
+public class BasisMediaPlayerEditor : Editor
 {
-    /// <summary>
-    /// Inspector for <see cref="BasisMediaPlayer"/>: live session readout and
-    /// transport controls while playing, plus a scene-setup menu item so a
-    /// test player is one click away in any project referencing the package.
-    /// </summary>
-    [CustomEditor(typeof(BasisMediaPlayer))]
-    public class BasisMediaPlayerEditor : Editor
+    BasisMediaPlayer _target;
+    VisualElement _root;
+    Label _title, _uploader, _source, _duration, _nowPlayingHint, _capturePath;
+    Label _state, _position, _banked, _video, _frames, _audio, _sync, _error, _editHint;
+    VisualElement _syncRow;
+    Button _open, _play, _pause, _back, _forward, _close;
+
+    static string PackagePath => UnityEditor.PackageManager.PackageInfo
+        .FindForAssembly(typeof(BasisMediaPlayerEditor).Assembly)?.assetPath;
+
+    public override VisualElement CreateInspectorGUI()
     {
-        public override bool RequiresConstantRepaint() => Application.isPlaying;
+        _target = (BasisMediaPlayer)target;
+        _root = new VisualElement();
 
-        public override void OnInspectorGUI()
+        string package = PackagePath;
+        if (string.IsNullOrEmpty(package))
         {
-            DrawDefaultInspector();
+            _root.Add(new HelpBox("Could not resolve the package path for the media player editor assembly.", HelpBoxMessageType.Error));
+            return _root;
+        }
 
-            var player = (BasisMediaPlayer)target;
+        var tree = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(
+            Path.Combine(package, "Editor/StyleSheets/MediaPlayerSDK.uxml").Replace('\\', '/'));
+        var sheet = AssetDatabase.LoadAssetAtPath<StyleSheet>(
+            Path.Combine(package, "Editor/StyleSheets/MediaPlayerSDK.uss").Replace('\\', '/'));
+        if (tree == null)
+        {
+            _root.Add(new HelpBox("MediaPlayerSDK.uxml missing.", HelpBoxMessageType.Error));
+            return _root;
+        }
+        tree.CloneTree(_root);
+        if (sheet != null) _root.styleSheets.Add(sheet);
+
+        BindByName("PerPlatformUrlsField", "perPlatformUrls");
+        BindByName("UrlField", "url");
+        BindByName("AndroidUrlField", "androidUrl");
+        BindByName("LivenessField", "liveness");
+        BindByName("PlayOnStartField", "playOnStart");
+        BindByName("AudioLeadingField", "audioLeadingStart");
+        BindByName("MaxDivergenceField", "maxDivergenceMs");
+        BindByName("EngineCaptureField", "engineCapture");
+        BindByName("EngineCaptureFileField", "engineCaptureFileName");
+        BindByName("EngineCaptureAppendField", "engineCaptureAppend");
+        BindByName("AllowLocalField", "allowLocalAddresses");
+        _root.Bind(serializedObject);
+        SetUpPerPlatformUrls();
+
+        _title = _root.Q<Label>("NowPlayingTitle");
+        _uploader = _root.Q<Label>("NowPlayingUploader");
+        _source = _root.Q<Label>("NowPlayingSource");
+        _duration = _root.Q<Label>("NowPlayingDuration");
+        _nowPlayingHint = _root.Q<Label>("NowPlayingHint");
+        _capturePath = _root.Q<Label>("EngineCapturePath");
+
+        _state = _root.Q<Label>("StatusState");
+        _position = _root.Q<Label>("StatusPosition");
+        _banked = _root.Q<Label>("StatusBanked");
+        _video = _root.Q<Label>("StatusVideo");
+        _frames = _root.Q<Label>("StatusFrames");
+        _audio = _root.Q<Label>("StatusAudio");
+        _sync = _root.Q<Label>("StatusSync");
+        _syncRow = _root.Q<VisualElement>("SyncRow");
+        _error = _root.Q<Label>("StatusError");
+        _editHint = _root.Q<Label>("StatusEditModeHint");
+
+        _open = _root.Q<Button>("ActOpenButton");
+        _play = _root.Q<Button>("ActPlayButton");
+        _pause = _root.Q<Button>("ActPauseButton");
+        _back = _root.Q<Button>("ActBackButton");
+        _forward = _root.Q<Button>("ActForwardButton");
+        _close = _root.Q<Button>("ActCloseButton");
+
+        // Through the router, so an authored page URL resolves here the same
+        // way it would at Start rather than failing to open.
+        Wire(_open, () => _target.OpenUserUrl(_target.ResolvedUrl));
+        Wire(_play, () => _target.Play());
+        Wire(_pause, () => _target.Pause());
+        Wire(_back, () => _target.Seek(_target.PositionSeconds - 10.0));
+        Wire(_forward, () => _target.Seek(_target.PositionSeconds + 10.0));
+        Wire(_close, () => _target.Close());
+
+        var debug = _root.Q<Button>("OpenDebugWindowButton");
+        if (debug != null) debug.clicked += BasisMediaPlayerDebugWindow.ShowWindow;
+
+        _root.schedule.Execute(Refresh).Every(250);
+        Refresh();
+        return _root;
+    }
+
+    void Wire(Button button, Action action)
+    {
+        if (button == null) return;
+        button.clicked += () =>
+        {
+            if (_target == null) return;
             if (!Application.isPlaying)
+            {
+                Debug.LogWarning("[BasisMedia] transport controls only run in play mode.");
                 return;
+            }
+            action();
+        };
+    }
 
-            EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Session", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("State", player.State.ToString());
-            EditorGUILayout.LabelField("Position",
-                $"{player.PositionSeconds:F2}s / {player.DurationSeconds:F2}s");
-            EditorGUILayout.LabelField("Banked", $"{player.BankedMilliseconds} ms");
-            EditorGUILayout.LabelField("Frames",
-                $"decoded {player.FramesDecoded}, presented {player.FramesPresented}");
-            EditorGUILayout.LabelField("Audio", $"{player.AudioFramesPulled} frames pulled");
-            if (player.State == BmState.Error)
-                EditorGUILayout.HelpBox($"Error code {player.ErrorCode}", MessageType.Error);
+    void Refresh()
+    {
+        if (_target == null) _target = (BasisMediaPlayer)target;
+        if (_target == null) return;
 
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Open"))
-                player.Open(player.url);
-            if (GUILayout.Button("Play"))
-                player.Play();
-            if (GUILayout.Button("Pause"))
-                player.Pause();
-            if (GUILayout.Button("-10s"))
-                player.Seek(player.PositionSeconds - 10.0);
-            if (GUILayout.Button("+10s"))
-                player.Seek(player.PositionSeconds + 10.0);
-            if (GUILayout.Button("Close"))
-                player.Close();
-            EditorGUILayout.EndHorizontal();
+        bool live = Application.isPlaying;
+        Show(_editHint, !live);
+        Show(_root.Q<VisualElement>("TransportCard"), live);
+
+        BasisResolvedMedia media = _target.Media;
+        bool described = media != null;
+        Show(_nowPlayingHint, !described);
+        SetText(_title, described ? Or(media.Title, "—") : "—");
+        SetText(_uploader, described ? Or(media.Uploader, "—") : "—");
+        SetText(_source, described ? Or(media.SourceUrl, media.Url) : "—");
+        SetText(_duration, described && media.Duration.HasValue
+            ? Clock(media.Duration.Value.TotalSeconds)
+            : "—");
+
+        SetState(_state, live ? _target.State : (BmState?)null);
+        SetText(_position, live
+            ? (_target.DurationSeconds > 0
+                ? $"{Clock(_target.PositionSeconds)} / {Clock(_target.DurationSeconds)}"
+                : Clock(_target.PositionSeconds))
+            : "—");
+        SetText(_banked, live ? $"{_target.BankedMilliseconds} ms" : "—");
+        SetText(_video, live && _target.VideoSize.x > 0
+            ? $"{_target.VideoSize.x}×{_target.VideoSize.y}"
+            : "—");
+        SetText(_frames, live
+            ? $"{_target.FramesPresented} presented, {_target.FramesDecoded} decoded"
+            : "—");
+        SetText(_audio, live ? $"{_target.AudioFramesPulled} frames" : "—");
+
+        // Only meaningful while a sync target is being converged on.
+        int ppm = live ? _target.SyncRatePpm : 0;
+        Show(_syncRow, ppm != 0);
+        SetText(_sync, $"{ppm} ppm");
+
+        string capture = _target.EngineCapturePath;
+        Show(_capturePath, !string.IsNullOrEmpty(capture));
+        SetText(_capturePath, capture);
+
+        bool failed = live && _target.State == BmState.Error;
+        Show(_error, failed);
+        if (failed && _error != null) _error.text = $"Engine error code {_target.ErrorCode}";
+    }
+
+    static string Or(string value, string fallback) =>
+        string.IsNullOrEmpty(value) ? fallback : value;
+
+    static string Clock(double seconds)
+    {
+        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0) return "—";
+        var span = TimeSpan.FromSeconds(seconds);
+        return span.TotalHours >= 1
+            ? $"{(int)span.TotalHours}:{span.Minutes:00}:{span.Seconds:00}"
+            : $"{span.Minutes}:{span.Seconds:00}";
+    }
+
+    static void Show(VisualElement element, bool show)
+    {
+        if (element != null) element.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+    }
+
+    static void SetText(Label label, string value)
+    {
+        if (label != null) label.text = value;
+    }
+
+    static void SetState(Label label, BmState? state)
+    {
+        if (label == null) return;
+        label.RemoveFromClassList("bvp-pill-neutral");
+        label.RemoveFromClassList("bvp-pill-good");
+        label.RemoveFromClassList("bvp-pill-bad");
+        if (!state.HasValue) { label.text = "—"; label.AddToClassList("bvp-pill-neutral"); return; }
+        label.text = state.Value.ToString();
+        label.AddToClassList(state.Value switch
+        {
+            BmState.Playing => "bvp-pill-good",
+            BmState.Error => "bvp-pill-bad",
+            _ => "bvp-pill-neutral",
+        });
+    }
+
+    void BindByName(string name, string property)
+    {
+        if (_root.Q<VisualElement>(name) is IBindable bindable) bindable.bindingPath = property;
+    }
+
+    /// <summary>
+    /// One URL, or one per platform. Off shows a single "URL"; on relabels it
+    /// "Windows URL" and reveals the Android one beside it, so the common case
+    /// is not asked to look at a field it will never fill in.
+    /// </summary>
+    void SetUpPerPlatformUrls()
+    {
+        var toggle = _root.Q<Toggle>("PerPlatformUrlsField");
+        var urlField = _root.Q<TextField>("UrlField");
+        var androidField = _root.Q<TextField>("AndroidUrlField");
+        if (toggle == null || urlField == null || androidField == null) return;
+
+        // A player authored before this toggle existed, or by a script, states
+        // its intent by carrying an Android URL at all. Adopt that rather than
+        // presenting it as switched off while it is plainly in effect.
+        var player = (BasisMediaPlayer)target;
+        if (!player.perPlatformUrls && !string.IsNullOrEmpty(player.androidUrl))
+        {
+            serializedObject.FindProperty("perPlatformUrls").boolValue = true;
+            serializedObject.ApplyModifiedPropertiesWithoutUndo();
+            toggle.SetValueWithoutNotify(true);
         }
 
-        [MenuItem("Basis/Tools/Media Player/Create Test Player")]
-        static void CreateTestPlayer() => CreateTestPlayer(surround: false);
-
-        [MenuItem("Basis/Tools/Media Player/Create Test Player (Surround)")]
-        static void CreateSurroundTestPlayer() => CreateTestPlayer(surround: true);
-
-        /// <summary>
-        /// A screen, a player and its audio outputs: one unspatialised stereo
-        /// output, or the eight positioned speakers a 5.1 / 7.1 mix wants. The
-        /// arrangement matches the shipped prefabs, so what this drops in the
-        /// scene is what a world author would have built by hand.
-        /// </summary>
-        static void CreateTestPlayer(bool surround)
+        Apply(toggle.value);
+        toggle.RegisterValueChangedCallback(evt =>
         {
-            const float screenWidth = 16f / 9f * 2f;
+            // Switching back to one URL drops the Android one, so a value
+            // cannot linger out of sight and still decide what plays there.
+            if (!evt.newValue)
+            {
+                SerializedProperty android = serializedObject.FindProperty("androidUrl");
+                if (!string.IsNullOrEmpty(android.stringValue))
+                {
+                    android.stringValue = string.Empty;
+                    serializedObject.ApplyModifiedProperties();
+                }
+            }
+            Apply(evt.newValue);
+        });
 
-            var quad = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            quad.name = "BasisMedia Screen";
-            quad.transform.localScale = new Vector3(screenWidth, 2f, 1f);
-            Object.DestroyImmediate(quad.GetComponent<Collider>());
-
-            // Resolved by shader name, so the screen picks up the Basis video
-            // shader wherever it ships from — it paints out-of-range UVs black,
-            // which is what letterboxing an off-aspect source needs.
-            var shader = Shader.Find("Basis/Media Player Video")
-                         ?? Shader.Find("Universal Render Pipeline/Unlit")
-                         ?? Shader.Find("Unlit/Texture");
-            if (shader != null)
-                quad.GetComponent<MeshRenderer>().sharedMaterial = new Material(shader);
-
-            var go = new GameObject("BasisMediaPlayer");
-            go.transform.position = quad.transform.position;
-            var player = go.AddComponent<BasisMediaPlayer>();
-            player.targetRenderer = quad.GetComponent<MeshRenderer>();
-            player.url = DefaultFixtureUrl();
-
-            if (surround) BasisMediaAudioRig.AddSurroundOutputs(go, screenWidth);
-            else BasisMediaAudioRig.AddStereoOutput(go);
-
-            Selection.activeGameObject = go;
-            UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(go.scene);
-            Debug.Log("[BasisMedia] test player created; set a URL and enter play mode.");
-        }
-
-        /// <summary>The repo's A/V fixture when the package is referenced
-        /// straight from a basis-media checkout; empty otherwise.</summary>
-        static string DefaultFixtureUrl()
+        void Apply(bool perPlatform)
         {
-            // Asked of the package manager rather than spelled out, so a folder
-            // rename does not quietly turn this into an empty string.
-            string packagePath = UnityEditor.PackageManager.PackageInfo
-                .FindForAssembly(typeof(BasisMediaPlayerEditor).Assembly)?.assetPath;
-            if (string.IsNullOrEmpty(packagePath)) return string.Empty;
-            packagePath = Path.GetFullPath(packagePath);
-            string fixture = Path.GetFullPath(
-                Path.Combine(packagePath, "Native~", "fixtures", "h264-aac-640x360-30fps.mp4"));
-            return File.Exists(fixture) ? fixture : string.Empty;
+            urlField.label = perPlatform ? "Windows URL" : "URL";
+            androidField.style.display = perPlatform ? DisplayStyle.Flex : DisplayStyle.None;
         }
     }
 }

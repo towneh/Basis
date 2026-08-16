@@ -12,8 +12,10 @@
 mod av1;
 mod flac;
 mod opus;
+mod pcm;
 
 pub use self::opus::{OpusDecoder, OpusHead};
 #[cfg(not(target_os = "android"))]
 pub use av1::SwAv1Decoder;
 pub use flac::FlacDecoder;
+pub use pcm::PcmDecoder;

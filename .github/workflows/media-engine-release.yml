@@ -3,6 +3,11 @@
 # engine needs no Unity headers, so runners can build the real shipping
 # binaries; a reviewer (or a release) can take these artifacts as the source of
 # record instead of trusting a dev-box build.
+#
+# Windows and Linux build with the rist feature on, so rist:// works in the
+# shipped binaries. Android does not: media-rist's build script only stages
+# librist for win-x64 and linux-x64, and there is no NDK cross-build recipe for
+# it, so rist:// refuses there with a typed "not built" error.
 name: media-engine-release
 
 on:
@@ -33,13 +38,48 @@ jobs:
         run: |
           choco install nasm -y --no-progress
           echo "C:\Program Files\NASM" >> "$GITHUB_PATH"
+      - name: Build librist (the rist feature links it statically)
+        working-directory: ${{ env.NATIVE_DIR }}
+        run: |
+          pip install meson ninja
+          pwsh -NoProfile -File tools/build-librist.ps1
       - name: Build release dll
         working-directory: ${{ env.NATIVE_DIR }}
-        run: cargo build --release -p media-ffi
+        run: cargo build --release -p media-ffi --features rist
       - uses: actions/upload-artifact@v4
         with:
           name: bm-basis_media-win-x64
           path: ${{ env.NATIVE_DIR }}/target/release/basis_media.dll
+
+  # No NASM step: the non-Windows graph drops rav1d's asm feature, because its
+  # NASM objects are not position-independent and the cdylib link fails with
+  # them. AV1 decodes through the pure-Rust path here.
+  linux-x64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.NATIVE_DIR }}
+          key: release-linux
+      - name: Build librist (the rist feature links it statically)
+        working-directory: ${{ env.NATIVE_DIR }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y meson ninja-build
+          bash tools/build-librist.sh
+      - name: Build + strip release .so
+        working-directory: ${{ env.NATIVE_DIR }}
+        run: |
+          cargo build --release -p media-ffi --features rist
+          strip --strip-all \
+            -o target/release/libbasis_media.stripped.so \
+            target/release/libbasis_media.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bm-basis_media-linux-x64
+          path: ${{ env.NATIVE_DIR }}/target/release/libbasis_media.stripped.so
 
   android-arm64:
     runs-on: ubuntu-latest
@@ -71,10 +111,15 @@ jobs:
             echo "CMAKE_GENERATOR=Ninja"
             echo "NDK_BIN=$BIN"
           } >> "$GITHUB_ENV"
+      - name: Build librist (static, cross-compiled to android-arm64)
+        working-directory: ${{ env.NATIVE_DIR }}
+        run: |
+          sudo apt-get install -y meson
+          bash tools/build-librist-android.sh
       - name: Build + strip release .so
         working-directory: ${{ env.NATIVE_DIR }}
         run: |
-          cargo build --target aarch64-linux-android -p media-ffi --release
+          cargo build --target aarch64-linux-android -p media-ffi --release --features rist
           "$NDK_BIN/llvm-strip" --strip-all \
             -o target/aarch64-linux-android/release/libbasis_media.stripped.so \
             target/aarch64-linux-android/release/libbasis_media.so

@@ -41,6 +41,7 @@ jobs:
           - ogg_stream
           - rtp_session
           - ts_stream
+          - wav_stream
           - whep_signal
     steps:
       - uses: actions/checkout@v5

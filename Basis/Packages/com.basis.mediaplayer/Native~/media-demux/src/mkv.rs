@@ -13,8 +13,8 @@ use media_clock::{Generation, MediaTime};
 use crate::avc::{self, AvcConfig};
 use crate::source::ByteSource;
 use crate::{
-    Au, AudioCodec, DemuxError, DemuxLimits, Demuxer, EosReason, Format, StreamEvent, TrackId,
-    VideoCodec,
+    Au, AudioCodec, AudioTrackInfo, DemuxError, DemuxLimits, DemuxOptions, Demuxer, EosReason,
+    Format, StreamEvent, TrackId, VideoCodec,
 };
 
 /// `Read + Seek` over a [`ByteSource`] for the EBML walker, which reads
@@ -171,6 +171,7 @@ pub struct MkvDemuxer {
     notes: Vec<String>,
     ended: bool,
     frame: Frame,
+    audio_tracks: Vec<AudioTrackInfo>,
 }
 
 fn map_video_codec(codec_id: &str) -> Option<VideoCodec> {
@@ -196,9 +197,18 @@ fn map_audio_codec(codec_id: &str) -> Option<AudioCodec> {
 
 impl MkvDemuxer {
     pub fn open(
+        src: Box<dyn ByteSource>,
+        limits: DemuxLimits,
+        generation: Generation,
+    ) -> Result<Self, DemuxError> {
+        Self::open_with(src, limits, generation, &DemuxOptions::default())
+    }
+
+    pub fn open_with(
         mut src: Box<dyn ByteSource>,
         limits: DemuxLimits,
         generation: Generation,
+        options: &DemuxOptions,
     ) -> Result<Self, DemuxError> {
         let len = src.size().map_err(DemuxError::Source)?;
         let served_budget = limits
@@ -234,8 +244,9 @@ impl MkvDemuxer {
             notes: Vec::new(),
             ended: false,
             frame: Frame::default(),
+            audio_tracks: Vec::new(),
         };
-        this.select_tracks()?;
+        this.select_tracks(options)?;
         if this.video.is_none() && this.audio.is_none() {
             return Err(DemuxError::Unsupported(
                 "no recognised video or audio track in the Matroska file",
@@ -244,7 +255,52 @@ impl MkvDemuxer {
         Ok(this)
     }
 
-    fn select_tracks(&mut self) -> Result<(), DemuxError> {
+    fn select_tracks(&mut self, options: &DemuxOptions) -> Result<(), DemuxError> {
+        // The audio tracks a caller could pick between, before any is
+        // bound. Only offered when there is more than one: a picker with a
+        // single entry is not a choice. Matroska states language per track,
+        // which is what makes this a language picker.
+        let offered: Vec<AudioTrackInfo> = self
+            .file
+            .tracks()
+            .iter()
+            .filter(|entry| entry.track_type() == TrackType::Audio)
+            .filter_map(|entry| {
+                let codec = map_audio_codec(entry.codec_id())?;
+                let (sample_rate, channels) = entry
+                    .audio()
+                    .map(|audio| {
+                        (
+                            audio.sampling_frequency() as u32,
+                            audio.channels().get() as u32,
+                        )
+                    })
+                    .unwrap_or((0, 0));
+                Some(AudioTrackInfo {
+                    id: TrackId(entry.track_number().get() as u32),
+                    language: match entry.language() {
+                        Some("und") | Some("") | None => None,
+                        Some(other) => Some(other.to_string()),
+                    },
+                    label: entry.name().map(str::to_string),
+                    codec,
+                    sample_rate,
+                    channels,
+                })
+            })
+            .collect();
+        let wanted = offered.get(options.audio_track).map(|t| t.id);
+        if wanted.is_none() && options.audio_track != 0 {
+            self.notes.push(format!(
+                "audio track {} requested, container has {}; using the first",
+                options.audio_track,
+                offered.len()
+            ));
+        }
+        if offered.len() > 1 {
+            self.audio_tracks = offered;
+        }
+
         for entry in self.file.tracks() {
             let number = entry.track_number().get();
             let track = TrackId(number as u32);
@@ -310,7 +366,13 @@ impl MkvDemuxer {
                     ));
                     self.video = Some(SelectedVideo { number, track, avc });
                 }
-                TrackType::Audio if self.audio.is_none() => {
+                // Skip past the unwanted tracks until the chosen one is
+                // reached; an undecodable choice falls through to the next
+                // decodable track, which is why this is not an equality
+                // test.
+                TrackType::Audio
+                    if self.audio.is_none() && wanted.is_none_or(|w| number as u32 >= w.0) =>
+                {
                     let codec_id = entry.codec_id().to_string();
                     let Some(codec) = map_audio_codec(&codec_id) else {
                         self.notes
@@ -486,6 +548,10 @@ impl Demuxer for MkvDemuxer {
 
     fn audio_track(&self) -> Option<TrackId> {
         self.audio.as_ref().map(|a| a.track)
+    }
+
+    fn audio_tracks(&self) -> Vec<AudioTrackInfo> {
+        self.audio_tracks.clone()
     }
 
     fn take_notes(&mut self) -> Vec<String> {

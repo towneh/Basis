@@ -60,14 +60,18 @@ enum Command {
         /// Permit sources that resolve to private/loopback addresses.
         #[arg(long)]
         allow_local: bool,
-        /// Open as a live source (sequential streaming, Bank lag mode).
-        /// Liveness is stated, never inferred (§6.11).
+        /// Force the live path. Liveness is inferred from the source by
+        /// default; this overrules it (§6.11).
         #[arg(long)]
         live: bool,
         /// Audio-leading start: live joins start audible at the
         /// first banked audio; video appears at its keyframe.
         #[arg(long)]
         audio_lead: bool,
+        /// Which of the container's audio tracks to bind, by index into
+        /// the offered list. Out of range falls back to the first.
+        #[arg(long, default_value_t = 0)]
+        audio_track: usize,
         /// A separate audio-only source to play against `url`, which is
         /// then treated as video-only — the shape adaptive ladders serve
         /// above their muxed rung. On-demand HTTP(S) and files only.
@@ -159,6 +163,7 @@ fn main() -> ExitCode {
             allow_local,
             live,
             audio_lead,
+            audio_track,
             audio_url,
         } => play::run(&play::Options {
             url,
@@ -169,6 +174,7 @@ fn main() -> ExitCode {
             allow_local,
             live,
             audio_lead,
+            audio_track,
             audio_url,
         }),
         Command::Bench {

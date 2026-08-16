@@ -1,10 +1,19 @@
-# TESTING — basis-media
+# TESTING — the media engine
 
-The governing verification document for this repo. When a change touches a
-row's surface, run that row and say so when claiming "verified". The parity
-matrix against the C player (transports × codecs × platforms) stays in the
-Basis repo's `TESTING.md` until cutover; this file covers what the new
-engine can already do.
+The governing verification document for the Rust engine. When a change touches
+a row's surface, run that row and say so when claiming "verified" — a row that
+was not run is not a row that passed.
+
+The managed half has its own companion at [`../TESTING.md`](../TESTING.md),
+covering what lives above the ABI: the panel, the session cap, shared playback
+and the prefabs, several of which need two clients or a populated scene and so
+have no automated row anywhere. Between them they cover the package; neither is
+complete on its own.
+
+Rows are grouped by the part of the pipeline they exercise, so a change picks
+its rows by where it landed. Anything whose surface exists but has never been
+exercised sits under [Not yet run](#not-yet-run) instead of among the rows that
+have, so reading the matrix does not imply coverage that is not there.
 
 ## Gate 0 — local CI (every commit)
 
@@ -26,7 +35,7 @@ numbers off them, not watching it.
 | --- | --- | --- | --- |
 | **Engine capture** | the engine, own thread | 100 ms | Everything inside the pipeline: stage counters, bank depth and lag, decode, release, events. Column contract pinned by spec §12.4. Turned on per session: descriptor `diag_csv`, managed `diagnosticsCsvPath`, `bm-probe play --csv`. |
 | **Frame capture** | `BasisMediaPlayerDiagnostics`, main thread | one row per Unity frame | The other side of the boundary, which the engine cannot see: render cadence, how long each frame was held, audio pull rate, what the per-speaker outputs consumed and how loud it was, the device's DSP chain. Sandboxed to `persistentDataPath`. |
-| **Debug window** | editor, live | 250 ms | The same numbers while it is happening, walked in pipeline order, for when the question is "which stage stopped". `Basis > Media v2 > Debug Window`. |
+| **Debug window** | editor, live | 250 ms | The same numbers while it is happening, walked in pipeline order, for when the question is "which stage stopped". `Basis > Debug > Media Player`. |
 
 The two captures share a time base, so they are read side by side: the engine
 capture says what the pipeline did, the frame capture says what the viewer got.
@@ -91,13 +100,13 @@ says why.
 
 ### The smoke test runs that grading for you
 
-`Basis > Media v2 > Run Smoke Test` builds a scene around a player, plays a
+`Basis > Tools > Media Player > Run Smoke Test` builds a scene around a player, plays a
 source, and grades the capture against every band above. Headless, for CI or a
 pre-commit check:
 
 ```
 Unity -batchmode -projectPath <project> -logFile - \
-      -executeMethod Basis.Media.BasisMediaSmokeTest.RunBatch
+      -executeMethod BasisMediaSmokeTest.RunBatch
 ```
 
 Exit code 0 on a pass and 1 on a fail, with the measured numbers in the log
@@ -133,63 +142,188 @@ quoted verbatim so a mismatch is greppable, the healthy bands come from the
 measurements recorded further down this file rather than from taste, and a
 change to what a column carries is a change to this table in the same commit.
 
+Two conventions for adding to it. Name a row for what it proves rather than for
+a tracker identifier — those mean nothing to a reader who has only this repo,
+and one appended to a title displaces the words that would have said something.
+And a row for work that has not been exercised belongs under "Not yet run"
+until it has been, so that reading the matrix keeps meaning coverage.
+
 ## Rows
+
+Grouped by pipeline area. Rows whose third column says "(in CI)" run themselves
+on every commit through Gate 0; the rest are by hand, on a desk box, a device or
+the test rig.
+
+### Foundations, lifecycle and hostile input
 
 | Row | What it proves | How to run |
 | --- | --- | --- |
-| Unit/property tests | Bank sizing table + properties, clock ladder (including the R10 master-observation filter: the synthesised Quest DSP-callback jitter trace holds due-times within 3 ms filtered vs ~7 ms of episode wander raw, snaps stay on the raw error, the filter resets across generations; default-off, so the raw ladder's rows are untouched), pool leasing, ring/playhead, demux fixtures, gate blocklist, HTTP source (in-process server) | `cargo test --workspace` (in CI) |
-| Session lifecycle | pause freezes position, keyframe-clean seek settles, natural end; audio-only sessions play (audio thread starts the clock, owns position) and End only once the ring's tail is consumed; seek after Ended revives the pipeline (B94) on the MP4 and HLS-TS lanes; the R8 ordering row — a seek issued from the EOS drain tail settles without a master snap and plays the remaining tail at 1x (the parked clock never restarts from a stale pre-flush frame, stale-generation work drops instead of parking, and `read_audio` serves silence while the clock is parked) | `cargo test -p media-engine --test session` (in CI) |
-| Seek matrix | keyframe-clean landing across every moov layout (faststart / trailing / fragmented); HLS VOD seek-to-segment (TS + fMP4); Matroska cue seeks land keyframe-clean (targets before the first cue fall back to a linear cluster walk); raw TS and live-HLS seeks refuse as typed Unsupported; seek-to-settled measured per lane by `bench` | `cargo test -p media-demux --test mp4_stream` + `--test ts_stream` + `--test hls` (in CI); `bm-probe bench <lane>` |
-| GPU conversion pass | the §6.8 D3D11 NV12→BGRA pass agrees with the CPU reference converter (same maths, point-sampled chroma) across every stated matrix/range on synthetic sweeps and on decoded fixture frames through the full shared-texture handoff; the reference itself agrees with the integer maths the CPU path shipped with | `cargo test -p media-present --test gpu_pass` (in CI, Windows) |
+| Unit/property tests | Bank sizing table + properties, clock ladder (including the master-observation filter: the synthesised Quest DSP-callback jitter trace holds due-times within 3 ms filtered vs ~7 ms of episode wander raw, snaps stay on the raw error, the filter resets across generations; default-off, so the raw ladder's rows are untouched), pool leasing, ring/playhead, demux fixtures, gate blocklist, HTTP source (in-process server) | `cargo test --workspace` (in CI) |
+| Session lifecycle | pause freezes position, keyframe-clean seek settles, natural end; audio-only sessions play (audio thread starts the clock, owns position) and End only once the ring's tail is consumed; seek after Ended revives the pipeline on the MP4 and HLS-TS lanes; the seek-under-drain ordering row — a seek issued from the EOS drain tail settles without a master snap and plays the remaining tail at 1x (the parked clock never restarts from a stale pre-flush frame, stale-generation work drops instead of parking, and `read_audio` serves silence while the clock is parked) | `cargo test -p media-engine --test session` (in CI) |
+| Seek matrix | keyframe-clean landing across every moov layout (faststart / trailing / fragmented); HLS VOD seek-to-segment (TS + fMP4); Matroska cue seeks land keyframe-clean (targets before the first cue fall back to a linear cluster walk); raw WAV seeks land on the exact frame (PCM is linear, so no keyframe rounding); raw MP3 seeks through its Xing table and Ogg Opus by granule bisection, both approximate as they are in every player and both reporting the landing at the request; raw FLAC bisects over confirmed frame headers (or its SEEKTABLE where the file carries one) and reports the exact landing its headers state, raw ADTS estimates from its measured byte rate and rounds the landing down to a frame; raw TS and live-HLS seeks refuse as typed Unsupported; seek-to-settled measured per lane by `bench` | `cargo test -p media-demux --test mp4_stream` + `--test ts_stream` + `--test hls` + `--test raw_audio` (in CI); `bm-probe bench <lane>` |
 | Conformance (ffprobe oracle) | demuxed AU stream = ffprobe's packets: announce, count, pts to 1 µs, per-packet MD5 (raw payloads, keyframes included), keyframe flags. Covers MP4 (three moov layouts) and MPEG-TS/m2ts (Annex-B video byte-exact; ADTS audio byte-exact in raw mode; LPCM announce + flow only — no canonical packetisation) | `cargo run -p bm-probe -- conformance fixtures` (in CI) |
+| Fuzz | demuxers never panic/overread on hostile bytes; the HLS playlist/scheduler surface never panics on hostile playlists; the caption SEI walker + 608 decoder never panic on hostile AU bytes | `cargo +nightly fuzz run mp4_stream` / `ts_stream` / `hls_playlist` / `mkv_stream` / `flac_stream` / `mp3_stream` / `adts_stream` / `ogg_stream` / `caption_scan` (not on the MSVC host: the VPS fuzz lane — ship via `git archive HEAD \| ssh … tar -x`, nightly + cargo-fuzz installed there — or a local Linux Docker container). `fuzz/corpus/ts_stream/` seeds include the C player's four pinned crash inputs; replay with `-- -runs=0`, campaign with `-- -fork=8 -max_total_time=600` |
+
+### Demux and containers
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
 | TS demuxer unit rows | fixture AU/keyframe counts, mid-GOP join waits for an SPS keyframe, 33-bit PTS unwrap, m2ts stride + LPCM announce, pinned C fuzz-crash replay | `cargo test -p media-demux --test ts_stream` (in CI) |
 | Matroska demuxer rows | pinned AU/keyframe counts on the remuxed A/V fixture, stored-H.264 → Annex-B with SPS/PPS on keyframes, VP9/Opus WebM announces with frames flowing, CodecDelay subtracted from audio pts (Opus pre-skip as negative lead-in), cue seeks landing keyframe-clean at or before the target (vendored matroska-demuxer, see third_party/matroska-demuxer/PATCHES.md) | `cargo test -p media-demux --test mkv_stream` (in CI) |
-| Raw audio demuxer rows | sniffed routing for FLAC/Ogg/MP3/ADTS heads (+ ID3v2 → MP3); pinned AU counts against ffprobe's packet view on the sine fixtures; exact sample-derived pts; the Xing/Info frame consumed as metadata; ADTS header strip + 2-byte ASC reconstruction with the 1..=6 channel screen; Ogg Opus pre-skip as negative pts; seeks refuse as typed Unsupported on all four; the 7.1 lane (B69): 8-channel FLAC demuxes and announces 8 channels, ADTS with channel_configuration 7 refuses typed at open | `cargo test -p media-demux --test raw_audio` (in CI) |
-| Software decode adapters | claxon FLAC decodes the demuxed fixture to exactly 6 s of PCM with frame-accurate pts, and the 7.1 fixture to eight-channel PCM (claxon's cap is 8); libopus Opus decodes all packets with pre-skip before the origin; surround Opus (mapping family ≠ 0) and broken headers refuse typed; rav1d decodes the AV1 WebM fixture completely with monotonic pts | `cargo test -p decode-sw` (in CI) |
-| MF adapter contracts | H.264 + AAC through the real in-box MFTs (priming pts, output ranking); MP3 through the in-box decoder on the same shared sync driver; VP9/AV1 through the Store-extension MFTs found by probe (rows skip loudly if an extension is absent — that absence is the diagnostic the engine reports) | `cargo test -p decode-mf` (in CI, Windows) |
-| Multichannel interleave order | the PCM ring's multichannel interleave is WAV/channel-mask order (FL FR C LFE BL BR) — the order every decoder route emits (MF's PCM convention, the Android AAC decoder's FDK default, FLAC's stored order) and the order the managed stereo downmix keys its ITU-coefficient matrix on: a 5.1 channel-marker fixture (one distinct sine per speaker) plays through the full session and each interleave slot carries its WAV-order tone | `cargo test -p media-engine --test session multichannel_interleave` (in CI, Windows); the fixture is `fixtures/sine-48k-51.m4a` |
-| PTS-annotated ring serve (R15) | the media timeline, not the sample count, masters the clock: the ring carries chunk pts markers, the playhead interpolates them, and the serve trims a head running >300 ms late against the session clock in bounded ≤1024-frame steps (narrated via the rate-limited AudioTrim event). Pinned: the ms-quantised passthrough pattern (1024-sample chunks, ~1010 samples of pts) keeps the playhead on the pts timeline; a chronically late head trims bounded and every pushed frame is served or trimmed; a completely full ring on an honest timeline (the VOD startup-burst shape) never trims | `cargo test -p media-engine --lib audio` (in CI); live repro: `bm-probe play rtspt://mr.town:8090/imax51 --duration 75` — master honest (the only snap is the loop-wrap splice), trims ≈ the lane's ~1.6% structural surplus, stereo twin zero trims |
-| A/V output-latency compensation (R11) | the managed sink's reported output latency shifts the audio master back so video paces to the *audible* position: the playhead subtracts the stored figure exactly; a mid-play 100 ms report engages the slew rung (never the snap) and the clock settles onto the compensated master within the dead band; the ABI setter clamps to 0..=500 ms; default 0 leaves every existing row byte-identical (the managed side sends it on Android only) | `cargo test -p media-engine --lib audio` + `--test session audio_latency` (in CI); on device: the fixture package pass + the rtspt stereo lane stay green, the sync itself is a listening judgement |
-| Render-event frame selection (R12) | presentation due-ness is decided in the Unity render event at display cadence, with one vsync of lookahead against a lock-free clock mirror, so the selection and display quantisers are the same clock: a synthesised 24 fps grid selected by 72 Hz events presents every frame exactly once at the ideal 3-event hold across a full phase sweep, with ±1.5 ms event jitter never producing the late/early pair signature; a parked clock (startup, seeks, pause) selects nothing; the interval EMA tracks cadence and rejects hitches; the 500 ms consumer-liveness window hands selection between the render event and the video thread's tick-paced fallback (headless sessions never see an event, so every headless row runs the unchanged fallback path) | `cargo test -p media-engine --lib present` (in CI); integrated: the Unity host autotest (the render-event mode on Windows); on device: the Steady-lane cadence row's hold-interval histogram |
-| Capability contract | the §6.11 engine-declared set: the JSON wire shape pinned byte-exact (versioned contract, field renames are breaking), the built set matching what this build actually routes (software rungs: H.264 + rav1d AV1 constant, VP9 present exactly when the Store-extension probe finds a decoder, every software entry stating the enforced R20 ceiling 1920/1088/60; hardware entries present exactly where the two-leg DXVA probe passes, with the resolution-ladder ceiling; the audio adapters' real channel screens, `rist` transport present iff the feature compiled in, no LPCM entry while no adapter exists), and `bm_capabilities`' size/fill calling convention over the ABI (short buffer untouched, length still returned) | `cargo test -p media-engine --test capabilities` + `cargo test -p media-ffi --test capabilities` (in CI, Windows); by hand: `cargo run -p bm-probe -- caps` prints the blob (`--compact` for the exact ABI bytes; add `--features rist` to see the rist row) |
+| Raw audio demuxer rows | sniffed routing for FLAC/Ogg/MP3/ADTS/WAV heads (+ ID3v2 → MP3); pinned AU counts against ffprobe's packet view on the sine fixtures; exact sample-derived pts; the Xing/Info frame consumed as metadata; ADTS header strip + 2-byte ASC reconstruction with the 1..=6 channel screen; Ogg Opus pre-skip as negative pts; MP3 parses its Xing/Info or VBRI frame for the length and seek table and Ogg Opus reads the tail page's granule for its own, so both report a duration and seek; FLAC takes its length from STREAMINFO and bisects for a position, landing on the sample number its frame headers state (the committed fixtures carry no SEEKTABLE, so the tests are the bisection arm, on frames from ~1.3 kB to ~52 kB); ADTS states nothing anywhere, so its length and its landing both come from the byte rate averaged over the leading frames, with the landing rounded down to a frame and the walk restarted on a confirmed header; WAV sniffs on RIFF/WAVE, reads WAVE_FORMAT_EXTENSIBLE through its SubFormat GUID and valid-bits field, serves every data byte once in order in ~20 ms whole-frame AUs, treats a stated data size of 0/0xFFFFFFFF as unknown and stops at EOF, caps the chunk walk, refuses non-integer PCM typed, and seeks to the exact frame; the 7.1 lane: 8-channel FLAC demuxes and announces 8 channels, ADTS with channel_configuration 7 refuses typed at open; a FLAC that states a SEEKTABLE lands by it rather than bisecting, reaching the same frame for fewer reads (the table is spliced in by the test, since nothing available writes one); embedded cover art surfaces from FLAC's PICTURE block, MP3's ID3v2 APIC and MP4's covr atom, and a file without one reports none | `cargo test -p media-demux --test raw_audio` + `cargo test -p media-demux --lib` (in CI) |
+| Embedded cover art | the picture every audio container can carry, extracted and never decoded: FLAC's `PICTURE` block, Ogg's base64 `METADATA_BLOCK_PICTURE` (the same structure, so one parser serves both), ID3v2's `APIC` across v2.2/v2.3/v2.4, and MP4's `moov/udta/meta/ilst/covr` (read from what the box parser already walks, with the format sniffed from the magic since `covr` states only "image"). The bytes cross the ABI compressed and Unity decodes them, so no image parser sits in the untrusted path. Unit rows pin the shapes that bite — v2.3's plain frame size read as v2.4's syncsafe one walks off the end of the frame, a UTF-16 description terminates on a null pair not a lone zero, an unsynchronised tag yields no art rather than a corrupt picture, and hostile lengths are refused not allocated. Where a file holds several pictures the front cover wins; the cap is 16 MB | `cargo test -p media-demux --lib artwork` + `--test raw_audio` (in CI). By hand: a source with no video puts its art on the output texture — use a **deliberately asymmetric** picture, since a symmetric one hides an inverted frame (that is how the sink flip was caught) |
 | MKV/WebM playback | EBML-sniffed routing; H.264+AAC in MKV plays end to end; VP9/Opus WebM plays both tracks; AV1/Opus WebM plays both; H.265+AAC in MKV plays through the hardware route (hvcC parsed, VPS/SPS/PPS converted to Annex-B — HEVC has no software rung, so machines without the DXVA profile refuse it typed) | `cargo run -p bm-probe -- play fixtures/mkv/h264-aac.mkv --duration 8`, `…/mkv/vp9-opus.webm`, `…/mkv/av1-opus.webm`, `…/mkv/h265-aac.mkv`; mr.town `/vod/` codec-batch lanes |
-| Windows hardware decode (R19) | the DXVA route: sync MFTs bound to a D3D11 device through the DXGI device manager, decoder-allocated NV12 texture-array slices flowing as opaque frames into the conversion pass (one GPU subresource copy, no CPU touch), presenter sharing the decode device. Conformance: hardware output byte-matches the software route over the visible frame for H.264 (including after a flush/restart), VP9 and AV1-vs-rav1d — the coded pad rows (360→368) are unspecified content and excluded; HEVC (no software oracle) pins count/dims/monotonic-pts. Ported C contracts pinned: sample released on every path (RAII payload), per-iteration `GetOutputStreamInfo`, subresource index honoured (the present-slice array test drives slice 1 before slice 0), aperture re-read at stream change, sizeless-HEVC refusal before the MFT is configured, AV1 config OBUs riding the first accepted AU, post-reset output floor | `cargo test -p decode-mf --test dxva_decode` + `cargo test -p media-present --test gpu_pass present_slice` (in CI; rows skip loudly where the GPU lacks a profile); integrated: every Windows session/smoke row now rides the hardware route where the GPU has one |
+| Audio track selection | multi-audio MP4 and Matroska offer every audio track in container order with the language the container states (and, for Matroska, the track name); a single-track source offers nothing, so a picker hides itself on an empty list; the requested index binds that track, and an out-of-range index falls back to the first with a note rather than failing the session. Verified end to end on a fixture carrying 440 Hz on track 0 and 880 Hz on track 1: `--audio-track 0` decodes 440 Hz and `--audio-track 1` decodes 880 Hz, measured by zero crossings over the pulled PCM | `cargo test -p media-demux --test audio_tracks` (in CI); `cargo run -p bm-probe -- play fixtures/h264-multiaudio.mp4 --audio-track {0,1} --audio-out out.f32` |
+| Audio tracks with no metadata (the recording shape) | a capture that puts the mix, the microphone and the desktop on separate tracks states neither a language nor a name, so enumeration must not depend on either and the labelling above it must not rely on language to tell rows apart. Pinned on a three-track fixture with no tags: all three are offered, each index binds its own track, and the managed label falls back to the 1-based position so the rows stay distinguishable. Matroska carries OBS's track names; MP4 does not, which is the case that would otherwise render three identical rows | `cargo test -p media-demux --test audio_tracks untagged` (in CI) |
+| HLS scheduler unit rows | playlist parse + refusals (EXT-X-KEY, BYTERANGE, I-frame-only), EXT-X-MAP carry-forward, live window advance/refresh cadence, window fall-out jump + discontinuity, stated-splice TS rebuild with trailing-PES flush, master variant choice, live join point, VOD seek-to-segment — all over a virtual fetcher, no sleeps | `cargo test -p media-demux --test hls` (in CI) |
+| CEA-608 caption lane | in-band captions (ATSC A/53 SEI in the H.264 AUs) decode through the media-bitstream SEI walker + 608 field-1 (CC1) state machine on the demux thread and surface as cues on arrival with their due PTS (managed side displays at position): the authored fixture's scripted sequence — pop-on, special + extended characters, EDM clear, two-row roll-up with CR — arrives complete with 2 s video-timeline spacing; unit rows cover the decoder's modes, doubling dedup, channel-2 rejection, the backwards-PTS epoch reset (clear cue emitted) and hostile SEI length prefixes; seeks reset the decoder and clear the display | `cargo test -p media-bitstream` + `cargo test -p media-engine --test session caption` (in CI); by hand: `bm-probe play fixtures/h264-608-640x360-30fps.ts --duration 10` prints the cue timeline; regenerate the fixture with `python tools/gen-caption-fixture.py` (gated on ffmpeg's own subcc decoder as oracle) |
+
+### Decode
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Software decode adapters | claxon FLAC decodes the demuxed fixture to exactly 6 s of PCM with frame-accurate pts, and the 7.1 fixture to eight-channel PCM (claxon's cap is 8); libopus Opus decodes all packets with pre-skip before the origin; surround Opus (mapping family ≠ 0) and broken headers refuse typed; rav1d decodes the AV1 WebM fixture completely with monotonic pts | `cargo test -p decode-sw` (in CI) |
+| PCM adapter | the one integer-PCM path serves both lanes: 16- and 24-bit widen to the ring's floats identically from little-endian (RIFF/WAVE) and big-endian (Blu-ray HDMV LPCM) bytes, with 24-bit sign extension pinned at full-scale negative; Blu-ray assignments 9/10/11 move the LFE off the end of the frame into its WAVE slot while assignment 0 passes straight through; a bits code, channel count or remap width the adapter cannot serve refuses typed; a torn tail frame yields no chunk | `cargo test -p decode-sw` (in CI) |
+| MF adapter contracts | H.264 + AAC through the real in-box MFTs (priming pts, output ranking); MP3 through the in-box decoder on the same shared sync driver; VP9/AV1 through the Store-extension MFTs found by probe (rows skip loudly if an extension is absent — that absence is the diagnostic the engine reports) | `cargo test -p decode-mf` (in CI, Windows) |
+| Windows hardware decode | the DXVA route: sync MFTs bound to a D3D11 device through the DXGI device manager, decoder-allocated NV12 texture-array slices flowing as opaque frames into the conversion pass (one GPU subresource copy, no CPU touch), presenter sharing the decode device. Conformance: hardware output byte-matches the software route over the visible frame for H.264 (including after a flush/restart), VP9 and AV1-vs-rav1d — the coded pad rows (360→368) are unspecified content and excluded; HEVC (no software oracle) pins count/dims/monotonic-pts. Ported C contracts pinned: sample released on every path (RAII payload), per-iteration `GetOutputStreamInfo`, subresource index honoured (the present-slice array test drives slice 1 before slice 0), aperture re-read at stream change, sizeless-HEVC refusal before the MFT is configured, AV1 config OBUs riding the first accepted AU, post-reset output floor | `cargo test -p decode-mf --test dxva_decode` + `cargo test -p media-present --test gpu_pass present_slice` (in CI; rows skip loudly where the GPU lacks a profile); integrated: every Windows session/smoke row now rides the hardware route where the GPU has one |
 | Forced hardware fallback | with `BASIS_MEDIA_DISABLE_HW_DECODE` set, every hardware probe reports absent: the default preference lands on the software rung with a `DecodeFallbackHwToSw` diagnostic and plays to a natural end; `hardware_only` instead refuses typed (CodecRefused — video mutes, audio owns Ended). The same env var is the field escape hatch for broken drivers. The runtime DXGI-backing signal (an output sample without GPU backing = the MFT silently fell back to CPU) reroutes mid-stream through the same ladder | `cargo test -p media-engine --test hw_fallback` (in CI; its own binary — the env var is process-wide) |
 | Decode preference | descriptor `decode_preference` (`hardware_with_fallback` default / `hardware_only` / `software_only`) → route ladder; a rung the platform lacks refuses typed (Android has no software rung; headless has no hardware rung); managed `BasisMediaPlayer.DecodePreference` static (never a serialised inspector field) appends it at open. `software_only` is the §11 CPU A/B lever | the hw_fallback rows above cover both non-default rungs; by hand: `bm-probe` lanes stay green either way once bm-probe grows a flag (engine-side the descriptor field is the surface) |
-| Software-route cap (R20) | software decode routes accept up to 1080p60 coded pixel rate (1920×1088×60; dimensions-only gate ≤1920×1088 while no demuxer states fps) and refuse above it in the CodecRefused posture before any decoder builds — on the direct `software_only` route and the fallback rung alike; software capability entries state the same ceiling the engine enforces. Tightens on field evidence (a one-constant change in `media-engine/src/route.rs`) | `cargo test -p media-engine --lib route` (in CI: the pixel-rate/dims policy rows + the over-cap refusal through the real Windows ladder) |
-| Audio-only file lanes | each raw audio container plays through the full engine to a natural End at its stored duration: FLAC and Opus in-process, MP3 and AAC(ADTS) through MF; audio thread owns the clock and position | `cargo run -p bm-probe -- play fixtures/sine-48k-stereo.{flac,mp3,aac,opus} --duration 9` |
-| Codec batch (mr.town /vod/) | the full breadth over real HTTPS: FLAC 16/24-bit, 5.1, embedded-art and variable-blocksize; MP3 CBR/VBR/ID3; Ogg Opus; VP9 WebM ×4 layouts + VP9-in-MP4; AV1 WebM, fragmented MP4 and 1080p60 AV1+AAC (rav1d holds 60 fps) — all play at 1x with zero pool drops | bring `tls443` up, `bm-probe play https://mr.town/vod/<lane>` per the endpoints doc, down after |
+| Software-route cap | software decode routes accept up to 1080p60 coded pixel rate (1920×1088×60; dimensions-only gate ≤1920×1088 while no demuxer states fps) and refuse above it in the CodecRefused posture before any decoder builds — on the direct `software_only` route and the fallback rung alike; software capability entries state the same ceiling the engine enforces. Tightens on field evidence (a one-constant change in `media-engine/src/route.rs`) | `cargo test -p media-engine --lib route` (in CI: the pixel-rate/dims policy rows + the over-cap refusal through the real Windows ladder) |
+| Capability contract | the §6.11 engine-declared set: the JSON wire shape pinned byte-exact (versioned contract, field renames are breaking), the built set matching what this build actually routes (software rungs: H.264 + rav1d AV1 constant, VP9 present exactly when the Store-extension probe finds a decoder, every software entry stating the enforced ceiling 1920/1088/60; hardware entries present exactly where the two-leg DXVA probe passes, with the resolution-ladder ceiling; the audio adapters' real channel screens, `rist` transport present iff the feature compiled in, one `pcm` entry at 8 channels covering both RIFF/WAVE and the LPCM carried in MPEG-TS), and `bm_capabilities`' size/fill calling convention over the ABI (short buffer untouched, length still returned) | `cargo test -p media-engine --test capabilities` + `cargo test -p media-ffi --test capabilities` (in CI, Windows); by hand: `cargo run -p bm-probe -- caps` prints the blob (`--compact` for the exact ABI bytes; add `--features rist` to see the rist row) |
+
+### Present, audio output and clock
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| GPU conversion pass | the §6.8 D3D11 NV12→BGRA pass agrees with the CPU reference converter (same maths, point-sampled chroma) across every stated matrix/range on synthetic sweeps and on decoded fixture frames through the full shared-texture handoff; the reference itself agrees with the integer maths the CPU path shipped with | `cargo test -p media-present --test gpu_pass` (in CI, Windows) |
+| Multichannel interleave order | the PCM ring's multichannel interleave is WAV/channel-mask order (FL FR C LFE BL BR) — the order every decoder route emits (MF's PCM convention, the Android AAC decoder's FDK default, FLAC's stored order) and the order the managed stereo downmix keys its ITU-coefficient matrix on: a 5.1 channel-marker fixture (one distinct sine per speaker) plays through the full session and each interleave slot carries its WAV-order tone | `cargo test -p media-engine --test session multichannel_interleave` (in CI, Windows); the fixture is `fixtures/sine-48k-51.m4a` |
+| PTS-annotated ring serve | the media timeline, not the sample count, masters the clock: the ring carries chunk pts markers, the playhead interpolates them, and the serve trims a head running >300 ms late against the session clock in bounded ≤1024-frame steps (narrated via the rate-limited AudioTrim event). Pinned: the ms-quantised passthrough pattern (1024-sample chunks, ~1010 samples of pts) keeps the playhead on the pts timeline; a chronically late head trims bounded and every pushed frame is served or trimmed; a completely full ring on an honest timeline (the VOD startup-burst shape) never trims | `cargo test -p media-engine --lib audio` (in CI); live repro: `bm-probe play rtspt://mr.town:8090/imax51 --duration 75` — master honest (the only snap is the loop-wrap splice), trims ≈ the lane's ~1.6% structural surplus, stereo twin zero trims |
+| A/V output-latency compensation | the managed sink's reported output latency shifts the audio master back so video paces to the *audible* position: the playhead subtracts the stored figure exactly; a mid-play 100 ms report engages the slew rung (never the snap) and the clock settles onto the compensated master within the dead band; the ABI setter clamps to 0..=500 ms; default 0 leaves every existing row byte-identical (the managed side sends it on Android only) | `cargo test -p media-engine --lib audio` + `--test session audio_latency` (in CI); on device: the fixture package pass + the rtspt stereo lane stay green, the sync itself is a listening judgement |
+| Render-event frame selection | presentation due-ness is decided in the Unity render event at display cadence, with one vsync of lookahead against a lock-free clock mirror, so the selection and display quantisers are the same clock: a synthesised 24 fps grid selected by 72 Hz events presents every frame exactly once at the ideal 3-event hold across a full phase sweep, with ±1.5 ms event jitter never producing the late/early pair signature; a parked clock (startup, seeks, pause) selects nothing; the interval EMA tracks cadence and rejects hitches; the 500 ms consumer-liveness window hands selection between the render event and the video thread's tick-paced fallback (headless sessions never see an event, so every headless row runs the unchanged fallback path) | `cargo test -p media-engine --lib present` (in CI); integrated: the Unity host autotest (the render-event mode on Windows); on device: the Steady-lane cadence row's hold-interval histogram |
+| Headless audio lane | decoded PCM as raw interleaved f32 | `bm-probe play <src> --audio-out out.f32`; inspect with `ffplay -f f32le -ar 48000 -ch_layout stereo out.f32` |
+
+### Buffering, pacing and resilience
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Live-vs-on-demand inference | the player decides from the source rather than the author: `finite && rangeable` is on-demand, anything else is a live edge, and the descriptor's liveness is an override (default Auto). Rangeable is a 206 *answer*, with an advertised `Accept-Ranges: bytes` accepted as a second arm for a server that answers 200 to a range request; the total on a 206 comes from `Content-Range` and never `Content-Length` (a range-capping proxy makes that the part). A known total is deliberately not required. Every other transport still settles it itself — RTSP/WHEP/RIST force Live, HLS takes it from the playlist. Inferring Live off the absence of both signals records a diagnostic, since that is the one-directional misread | `cargo test -p media-io --test http_source seekability` (in CI, four server shapes). Verified 2026-08-16 with no liveness set either side: VRCDN `https://stream.vrcdn.live/live/vrcdn.live.ts` inferred Live (the diagnostic fired, joined 767 ms, 401 decoded / 400 presented, 0 pool drops, duration 0); `https://mr.town/vod/scope.mp4` inferred Vod (duration 123 743 ms, read-ahead). **The `-listen 1` feeders on :8093/:8094 cannot serve this lane** — see Rig limitations |
+| Startup burst (VOD) | the Bank releases the leading `startup_burst` window (default 2 s) unpaced at every anchor — startup and post-seek — then returns to the 1x + lead schedule; steady-state pacing properties hold with the burst excluded | `cargo test -p media-bank` (in CI) |
+| Priming join (live) | live lanes overlap decoder priming with the startup hold: release runs ahead of 1x during the hold (bounded by `startup_burst` beyond the 1x line from the first arrival — a moving cap, so release can never wedge), presentation stays gated until the hold target has arrived (explicit depths hold to the full configured depth, cushion included, so the join delivers the depth the user asked for; Auto lanes hold to the estimator's lag only — join fast, grow on evidence; target-zero lanes lift immediately, preserving the §6.14 sub-second posture), and the 1x schedule anchors presentation-relative when the first frame reaches the viewer — the decoder's standing in-flight depth becomes the cushion and the lag lands on target; the debt bound and decay run unchanged after the anchor; `startup_burst: 0` restores the strict hold-then-1x startup | `cargo test -p media-bank --test priming` (in CI); integrated: the impairment rows below |
+| Per-track release | the release thread never blocks on a full decode channel: the target's messages park in order, the whole track gates in the Bank (`pop_due_gated` — Eos a barrier, cursor advances only in-order so banked/lag grade from the laggard, `pop_due` = the empty gate byte-for-byte), and the other track keeps releasing past it. Audio-leading live joins (RTSP: audio flows from SETUP, video waits ≤ ~10 s for an IDR) bank the audio upstream instead of wedging release; the audio thread sheds exactly the pre-join span once the presentation origin is known (one `AudioShed` diag event reports it), keeps everything at/after the join even against a full ring (a deep explicit hold's primed audio survives: the CI impair row's `audio_ring_drops` is 0), and stands the shed down after the first ring write so HLS wrap splices never re-shed | `cargo test -p media-bank --test gated` (in CI); integrated: the CI impair row's `audio_ring_drops` column + bench (not play — joins must be measured, GOP-phase luck hides wedges) on the mediamtx rtsp/rtspt stereo + slowjoin lanes |
+| Audio-leading start | opt-in per source (`audioLeadingStart` → descriptor `"audio_leading"` → `OpenRequest`), live lanes only, default off: the session starts audible at the first banked PCM (the audio-only clock-start path), video appears at its keyframe against the running clock; the pre-join shed is disabled (the first banked audio is the join); the picture can trail the sound by the video decoder's input depth — the documented trade for sources where the audio is the content | `bm-probe bench <rtsp-lane> --live --audio-lead` (startup then measures time-to-first-audio; ~2.07 s on the mediamtx slowjoin lane vs ~9 s video-gated, 2026-08-14) |
+| Impairment, CI lane | the worst phase-0 jitter profile (ts-rtt300-loss005) through the full engine at 3 s depth over a 1x-paced fixture; pass = session alive, presentation flowing, measured stall within the sizing model's residual | `bm-probe impair fixtures/h264-aac-320x180-30s.ts --profile ts-rtt300-loss005 --duration 25 --depth-ms 3000` (in CI, bounded to 25 s) |
+| Impairment, full profiles | every phase-0 capture full-length, VOD-file or live-URL lane (`--profile` × `--depth-ms` per the sizing table; the 0.5%-loss profile is the throughput regime — informational, not a gate, §3.4). URL lanes gate on survival + flow (the model's instant-recovery assumption doesn't hold over a real WAN); the deterministic file lane gates on the model | `bm-probe impair <file.ts\|live-url> --profile <name> [--depth-ms N] [--csv out.csv]` (release gate, by hand). VRCDN's 24/7 channel `https://stream.vrcdn.live/live/vrcdn.live.ts` is the authoritative live lane |
+| Reconnect/resilience | a dropped live connection (and live EOF — indistinguishable from a dropped connection-close body) rebuilds the transport with jittered backoff, keeps the Bank and generation, rejoins mid-GOP, and narrates itself as Reconnect events; exhausted attempts end the session (Ended for EOF, Error for I/O loss) | `cargo test -p media-engine --test reconnect` (in CI); by hand: play a feeder with `--live` and restart it mid-run |
+
+### Transports and sources
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
 | Headless playback, file | full pipeline at 1x: decode/present counts, zero pool drops, audio at hardware cadence | `cargo run -p media-engine --example smoke -- fixtures/h264-aac-640x360-30fps.mp4 5` |
 | Headless playback, TS file | the same through the ported TS demuxer (container sniffed, PIDs from the PMT) | `cargo run -p bm-probe -- play fixtures/h264-aac-640x360-30fps.ts --duration 5` |
 | Headless playback, HTTP | the same through media-io (ranges, pinned connect) | serve `fixtures/` locally, then `cargo run -p bm-probe -- play http://127.0.0.1:<port>/h264-aac-640x360-30fps.mp4 --duration 5 --allow-local` |
 | Headless playback, HTTP-TS live | the async I/O domain: sequential streaming source, per-read stall detection, Bank in lag mode (liveness stated via `--live`, never inferred) | `python tools/live-ts-server.py <file.ts> <duration_s> <port>`, then `cargo run -p bm-probe -- play http://127.0.0.1:<port>/live --live --allow-local --duration 12` |
-| HLS scheduler unit rows | playlist parse + refusals (EXT-X-KEY, BYTERANGE, I-frame-only), EXT-X-MAP carry-forward, live window advance/refresh cadence (B21), window fall-out jump + discontinuity, stated-splice TS rebuild with trailing-PES flush, master variant choice, live join point, VOD seek-to-segment — all over a virtual fetcher, no sleeps | `cargo test -p media-demux --test hls` (in CI) |
+| Live-source unit rows | sequential stream through the router, head-cache re-reads, stall as a typed error, cancellable connect, redirect re-vetting, gate | `cargo test -p media-io --test live_source` (in CI) |
 | HLS VOD playback | playlist-sniffed routing (file or HTTP), TS chaining through one demuxer / per-segment fMP4 with absolute tfdt timestamps, full pipeline to Ended with zero pool drops | `cargo run -p bm-probe -- play fixtures/hls/ts/index.m3u8 --duration 8` and `…/hls/fmp4/index.m3u8`; seek via `bench` on the same lanes |
 | HLS live | live playlist (no ENDLIST) ⇒ Bank lag mode from the playlist's own statement; join three segments back; window slides in real time; loop-point EXT-X-DISCONTINUITY splices play through; ENDLIST ends the session | `python tools/live-hls-server.py fixtures/hls/ts <duration_s> <port>`, then `bm-probe play http://127.0.0.1:<port>/live.m3u8 --allow-local --duration 25` |
 | HLS over real HTTPS | the VOD lanes against a real origin (206 ranges on segments, 5.1 audio) and a public multi-variant master playlist | mr.town `https://mr.town/vod/hls_imax/index.m3u8` + `…/hls_fmp4/index.m3u8` (bring `tls443` up first, down after); `https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8` for the master-playlist path |
-| Live-source unit rows | sequential stream through the router, head-cache re-reads, stall as a typed error, cancellable connect, redirect re-vetting, gate | `cargo test -p media-io --test live_source` (in CI) |
-| Impairment, CI lane | the worst phase-0 jitter profile (ts-rtt300-loss005) through the full engine at 3 s depth over a 1x-paced fixture; pass = session alive, presentation flowing, measured stall within the sizing model's residual | `bm-probe impair fixtures/h264-aac-320x180-30s.ts --profile ts-rtt300-loss005 --duration 25 --depth-ms 3000` (in CI, bounded to 25 s) |
-| Impairment, full profiles | every phase-0 capture full-length, VOD-file or live-URL lane (`--profile` × `--depth-ms` per the sizing table; the 0.5%-loss profile is the throughput regime — informational, not a gate, §3.4). URL lanes gate on survival + flow (the model's instant-recovery assumption doesn't hold over a real WAN); the deterministic file lane gates on the model | `bm-probe impair <file.ts\|live-url> --profile <name> [--depth-ms N] [--csv out.csv]` (release gate, by hand). VRCDN's 24/7 channel `https://stream.vrcdn.live/live/vrcdn.live.ts` is the authoritative live lane |
-| Reconnect/resilience | a dropped live connection (and live EOF — indistinguishable from a dropped connection-close body) rebuilds the transport with jittered backoff, keeps the Bank and generation, rejoins mid-GOP, and narrates itself as Reconnect events; exhausted attempts end the session (Ended for EOF, Error for I/O loss) | `cargo test -p media-engine --test reconnect` (in CI); by hand: play a feeder with `--live` and restart it mid-run |
 | RTSP lanes | `rtsp://` negotiates UDP first (media-rtp reorder/jitter/RTCP-RR layer under retina's signalling) and falls back to TCP-interleaved when SETUP fails or no datagram arrives within 5 s; `rtspt://` pins TCP (verify no UDP SETUP is attempted). Rows on both transports: stereo, 5.1 (mediamtx fragments its large AAC AUs — reassembly exercised, over reordered UDP delivery too), the adversarial ~10 s-GOP mid-GOP join, publisher-restart reconnect (RTCP BYE ends the session as source loss; failed re-opens consume the attempt budget; rejoin renegotiates UDP), and the forced-blackhole fallback (block the server's outbound RTP/RTCP, e.g. `iptables -I OUTPUT -p udp --sport 8000:8001 -j DROP` on the box, and confirm the TransportFallback event + TCP playback); RTCP-SR-based A/V alignment with a bounded join-skew fallback | mr.town `rtsp://mr.town:8090/{imaxstereo,imax51,imaxsilent,imaxslowjoin}` + the same paths via `rtspt://` (bring `mediamtx` + `mtx-pub-*` up first, down after; restart a publisher mid-run for the reconnect row); authoritative: `rtsp://stream.vrcdn.live/live/vrcdn` |
-| CEA-608 caption lane | in-band captions (ATSC A/53 SEI in the H.264 AUs) decode through the media-bitstream SEI walker + 608 field-1 (CC1) state machine on the demux thread and surface as cues on arrival with their due PTS (managed side displays at position): the authored fixture's scripted sequence — pop-on, special + extended characters, EDM clear, two-row roll-up with CR — arrives complete with 2 s video-timeline spacing; unit rows cover the decoder's modes, doubling dedup, channel-2 rejection, the backwards-PTS epoch reset (clear cue emitted) and hostile SEI length prefixes; seeks reset the decoder and clear the display | `cargo test -p media-bitstream` + `cargo test -p media-engine --test session caption` (in CI); by hand: `bm-probe play fixtures/h264-608-640x360-30fps.ts --duration 10` prints the cue timeline; regenerate the fixture with `python tools/gen-caption-fixture.py` (gated on ffmpeg's own subcc decoder as oracle) |
 | WHEP lanes | `whep://` / `wheps://` (§6.13, the sub-second lane): hand-rolled signalling over gate-vetted pinned HTTP — both the 201+answer and 406+counter-offer/PATCH flows, ICE gathered fully before the POST (host candidate rides in the offer, so PATCH-refusing servers work; the direct flow never PATCHes), `Link rel="ice-server"` parsed and surfaced (not used for gathering — a check-initiating receive-only client needs no srflx and TURN is out of scope), DELETE fired on teardown; str0m (sans-IO, RTP mode, wincrypto on Windows) runs ICE/DTLS/SRTP/RTCP on our socket; decrypted RTP goes through media-rtp's reorder, retina's H.264 depacketizer / RFC 7587 Opus, and the RTSP lanes' shared aligner/emit path (SR-based A/V alignment included); every media-path address str0m wants to reach is gate-checked at the transmit boundary (§9.3 — a blocked candidate's connectivity check is never sent); Bank rides at the decoder-cushion floor (§6.14 shallow posture, explicit depth still wins); publisher restart ⇒ feed stall ⇒ full re-signalling via the engine reconnect path. Codecs: H.264 + Opus only, offered as such (WebRTC carries neither B-frames nor AAC — a B-framed publisher's video track is closed by mediamtx server-side) | `cargo test -p media-whep` (in CI: signalling flows, PATCH discipline, redirect re-vet, Link parse, blocked-candidate row, feed stall); by hand: local mediamtx + `ffmpeg … -bf 0 … -c:a libopus -f rtsp rtsp://127.0.0.1:8554/test`, then `bm-probe play whep://127.0.0.1:8889/test/whep --allow-local`; mr.town: bring `mediamtx` + the transient `whepav` publisher up per the endpoints doc, `bm-probe play whep://mr.town:8091/whepav/whep`, down after |
 | RIST lanes | `rist://` (Main profile, caller) through librist behind the `rist` cargo feature: librist owns sockets/ARQ/jitter/PSK-AES and serves recovered TS into the ordinary live-TS pipeline; the host is resolved + gate-vetted and librist pinned to the vetted literal; plain and AES-128 (`?secret=…&aes-type=128`) both play 5.1 at 16 Mbps with zero pool drops; a wrong secret fails typed at the container sniff (librist delivers undecryptable bytes, nothing plays); a `rist`-less build refuses `rist://` with a typed "not built" error. Requires the staged librist static (`tools/build-librist.ps1`, pinned v0.2.11) — CI's rist rows skip loudly when it is absent | local loopback: `ffmpeg -re -stream_loop -1 -i fixtures/h264-aac-640x360-30fps.ts -c copy -f mpegts "rist://@127.0.0.1:11968"`, then `cargo run -p bm-probe --features rist -- play rist://127.0.0.1:11968 --duration 12 --allow-local` (AES: add `?secret=…&aes-type=128` on both sides); mr.town: bring `rist5000`/`rist5001` up (not in the preflight — verify with `ss -unlp` on the box), `bm-probe play rist://88.208.227.151:5000 --duration 20` + `…:5001?secret=<key>&aes-type=128`, down after |
-| Bench lane | the §11 budgets measured mechanically: startup-to-first-frame and seek-to-settled per lane, aggregated over runs (with the startup burst: ~133 ms TTFF / ~56 ms seek on the A/V MP4 fixture, vs ~880/~890 ms without) | `bm-probe bench <src\|url> [--runs N] [--seek-to-ms N] [--live]` |
-| Startup burst (VOD) | the Bank releases the leading `startup_burst` window (default 2 s) unpaced at every anchor — startup and post-seek — then returns to the 1x + lead schedule; steady-state pacing properties hold with the burst excluded | `cargo test -p media-bank` (in CI) |
-| Priming join (live) | live lanes overlap decoder priming with the startup hold: release runs ahead of 1x during the hold (bounded by `startup_burst` beyond the 1x line from the first arrival — a moving cap, so release can never wedge), presentation stays gated until the hold target has arrived (explicit depths hold to the full configured depth, cushion included, so the join delivers the depth the user asked for; Auto lanes hold to the estimator's lag only — join fast, grow on evidence; target-zero lanes lift immediately, preserving the §6.14 sub-second posture), and the 1x schedule anchors presentation-relative when the first frame reaches the viewer — the decoder's standing in-flight depth becomes the cushion and the lag lands on target; the debt bound and decay run unchanged after the anchor; `startup_burst: 0` restores the strict hold-then-1x startup | `cargo test -p media-bank --test priming` (in CI); integrated: the impairment rows below |
-| Per-track release | the release thread never blocks on a full decode channel: the target's messages park in order, the whole track gates in the Bank (`pop_due_gated` — Eos a barrier, cursor advances only in-order so banked/lag grade from the laggard, `pop_due` = the empty gate byte-for-byte), and the other track keeps releasing past it. Audio-leading live joins (RTSP: audio flows from SETUP, video waits ≤ ~10 s for an IDR) bank the audio upstream instead of wedging release; the audio thread sheds exactly the pre-join span once the presentation origin is known (one `AudioShed` diag event reports it), keeps everything at/after the join even against a full ring (a deep explicit hold's primed audio survives: the CI impair row's `audio_ring_drops` is 0), and stands the shed down after the first ring write so HLS wrap splices never re-shed | `cargo test -p media-bank --test gated` (in CI); integrated: the CI impair row's `audio_ring_drops` column + bench (not play — joins must be measured, GOP-phase luck hides wedges) on the mediamtx rtsp/rtspt stereo + slowjoin lanes |
-| Audio-leading start (R1) | opt-in per source (`audioLeadingStart` → descriptor `"audio_leading"` → `OpenRequest`), live lanes only, default off: the session starts audible at the first banked PCM (the audio-only clock-start path), video appears at its keyframe against the running clock; the pre-join shed is disabled (the first banked audio is the join); the picture can trail the sound by the video decoder's input depth — the documented trade for sources where the audio is the content | `bm-probe bench <rtsp-lane> --live --audio-lead` (startup then measures time-to-first-audio; ~2.07 s on the mediamtx slowjoin lane vs ~9 s video-gated, 2026-08-14) |
+| RIST on Android | the transport ships on Quest, not just Windows and Linux. `media-rist/build.rs` has an `android-arm64` arm, `tools/build-librist-android.sh` cross-builds the static against the NDK through a meson cross file, and **every** Android build path now passes `--features rist` (the staging script, the release job, and the CI clippy row when the static is staged) — the feature being off in every build path while the code was present is exactly why this was outstanding. Verified 2026-08-16 on this box: clippy green for `aarch64-linux-android --features rist`; the release `.so` links and stages at 9.6 MB (inside the <=12 MB budget) with `rist_receiver_create`/`rist_start`/`rist_destroy` and 346 vendored mbedTLS symbols in the unstripped artefact, and NEEDED unchanged (liblog/libmediandk/libdl/libm/libc — the static pulls in no new shared dependency) | `bash tools/build-librist-android.sh` then `.	ools\stage-android-plugin.ps1` |
+| Split sources | `audio_url` alongside `url`: a video-only source played against a separate audio-only one, which is how adaptive ladders serve every rung above their muxed fallback. Two demux threads feed the one Bank, so the buffering model, the clock and the release schedule stay the session's. The audio leg's track ids are namespaced (both demuxers number from zero and the Bank routes on the id alone), each leg contributes only its own kind of track, the video leg owns seek and the audio leg follows it to the same landing on the same generation, and the session's Eos is banked only once both legs are exhausted — re-offered on every idle tick rather than decided on one edge, so the handshake cannot be lost. Legs are held within `SPLIT_LEAD_CAP_US` (100 ms) of each other by dts: the Bank releases in arrival order on a dts schedule, so a leg that reads ahead puts not-yet-due events at the head and, if it outruns the Bank's read-ahead depth, fills it and locks the other leg out entirely — a deadlock, since the clock waits on the video leg. On-demand HTTP(S) and files only; a split request on a live transport, an HLS playlist or a caller-supplied source refuses typed | `cargo test -p media-engine --test split_source` (in CI: both legs to a natural end, seek taking both legs, per-leg track filtering with the same muxed file on both legs, the live-transport refusal). Integrated, and a CI row: `bm-probe play fixtures/split/h264-640x360-30fps-video.mp4 --audio-url fixtures/split/aac-48k-stereo-audio.m4a --duration 9` — expect 180/180 presented, 0 pool drops, ~287.7k audio frames, natural Ended. **Soak it**: this lane's failure mode is a timing-dependent wedge that instrumentation hides, so judge changes here by ~20 repeat runs, not one |
+| Audio-only file lanes | each raw audio container plays through the full engine to a natural End at its stored duration: FLAC, Opus and PCM in-process, MP3 and AAC(ADTS) through MF; audio thread owns the clock and position | `cargo run -p bm-probe -- play fixtures/sine-48k-stereo.{flac,mp3,aac,opus} --duration 9`; `... play fixtures/sine-48k-stereo.wav --duration 4` (96 000 frames @ 48 kHz x 2) and `... play fixtures/sine-48k-51.wav --duration 4` (48 000 @ 48 kHz x 6) |
+| Codec batch (mr.town /vod/) | the full breadth over real HTTPS: FLAC 16/24-bit, 5.1, embedded-art and variable-blocksize; MP3 CBR/VBR/ID3; Ogg Opus; VP9 WebM ×4 layouts + VP9-in-MP4; AV1 WebM, fragmented MP4 and 1080p60 AV1+AAC (rav1d holds 60 fps) — all play at 1x with zero pool drops | bring `tls443` up, `bm-probe play https://mr.town/vod/<lane>` per the endpoints doc, down after |
+
+### Shared playback and sync
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
 | Sync soft target (§8.4) | shared-playback receivers feed the owner's extrapolated position via `bm_session_set_sync_target` (negative clears) and the engine runs the ladder — dead band 150 ms (no action), then a ±2% slew, then a seek only past 2 s (the last rung, never the first); the wanted slew surfaces as the snapshot's `sync_rate_ppm`, which the managed audio pull applies through its resampler on audio-master lanes (a consumer that ignores it degrades to the seek rung); wall-master (video-only) lanes are slewed engine-side (`MediaClock::slew_wall`); live sessions ignore targets (§8.5); the target extrapolates at 1x between calls, so one call per received heartbeat converges | `cargo test -p media-clock` (slew_wall rows) + `cargo test -p media-engine --test session sync_target` + the `sync.rs` ladder units (in CI); `SyncSlew`/`SyncSeek` diag events carry the error and applied rate |
 | Divergence bound (§8.5) | live lanes state `max_divergence_ms` in the descriptor (managed `maxDivergenceMs`); it lands as a ceiling on the Bank's lag cap, which also clamps Auto's depth growth — an explicit depth beyond it fails typed through the Bank's own validation; live position is never chased peer-to-peer | covered by the Bank's config validation rows; by hand: open a live lane with `"max_divergence_ms"` set and confirm Auto depth stays inside it in the capture CSV |
-| Linux headless lane | the engine builds and runs headless on `linux-x64` (B7's CI half): software floors route (AV1 on rav1d without its non-PIC asm, FLAC, Opus), platform codecs refuse typed (H.264/H.265/AAC/MP3 — no VAAPI adapter yet), the sink consumes due frames (position/EOS/counters flow with no present target), and the capability blob claims only what the build decodes; the full test suite, conformance gate and the software-decode play row all pass on the GPU-less VPS | on a Linux host: `cargo fmt --check && cargo clippy --workspace --all-targets --examples -- -D warnings && cargo test --workspace`, then `bm-probe caps --compact` (expect the linux-x64 shape), `bm-probe play fixtures/mkv/av1-opus.webm --duration 8`, `bm-probe conformance fixtures` (needs ffprobe); `tools/ci.sh` runs the lot and skips the impair row loudly where H.264 decode is absent (debug-build rav1d without asm decodes below real time — the play row grades pipeline health, not rate) |
-| Split sources | `audio_url` alongside `url`: a video-only source played against a separate audio-only one, which is how adaptive ladders serve every rung above their muxed fallback. Two demux threads feed the one Bank, so the buffering model, the clock and the release schedule stay the session's. The audio leg's track ids are namespaced (both demuxers number from zero and the Bank routes on the id alone), each leg contributes only its own kind of track, the video leg owns seek and the audio leg follows it to the same landing on the same generation, and the session's Eos is banked only once both legs are exhausted — re-offered on every idle tick rather than decided on one edge, so the handshake cannot be lost. Legs are held within `SPLIT_LEAD_CAP_US` (100 ms) of each other by dts: the Bank releases in arrival order on a dts schedule, so a leg that reads ahead puts not-yet-due events at the head and, if it outruns the Bank's read-ahead depth, fills it and locks the other leg out entirely — a deadlock, since the clock waits on the video leg. On-demand HTTP(S) and files only; a split request on a live transport, an HLS playlist or a caller-supplied source refuses typed | `cargo test -p media-engine --test split_source` (in CI: both legs to a natural end, seek taking both legs, per-leg track filtering with the same muxed file on both legs, the live-transport refusal). Integrated, and a CI row: `bm-probe play fixtures/split/h264-640x360-30fps-video.mp4 --audio-url fixtures/split/aac-48k-stereo-audio.m4a --duration 9` — expect 180/180 presented, 0 pool drops, ~287.7k audio frames, natural Ended. **Soak it**: this lane's failure mode is a timing-dependent wedge that instrumentation hides, so judge changes here by ~20 repeat runs, not one |
-| Capture recorder | the diagnostics timeline as CSV (stable column contract) | `bm-probe play <src> --csv out.csv`; feed to the basis-buffer-analysis tooling |
-| Headless audio lane | decoded PCM as raw interleaved f32 | `bm-probe play <src> --audio-out out.f32`; inspect with `ffplay -f f32le -ar 48000 -ch_layout stereo out.f32` |
-| Unity host autotest | ABI v2 + managed component v2 end to end: presents via render event, audio on the Unity audio thread, mid-run seek | see "Unity host autotest" below |
-| Fuzz | demuxers never panic/overread on hostile bytes; the HLS playlist/scheduler surface never panics on hostile playlists; the caption SEI walker + 608 decoder never panic on hostile AU bytes | `cargo +nightly fuzz run mp4_stream` / `ts_stream` / `hls_playlist` / `mkv_stream` / `flac_stream` / `mp3_stream` / `adts_stream` / `ogg_stream` / `caption_scan` (not on the MSVC host: the VPS fuzz lane — ship via `git archive HEAD \| ssh … tar -x`, nightly + cargo-fuzz installed there — or a local Linux Docker container). `fuzz/corpus/ts_stream/` seeds include the C player's four pinned crash inputs; replay with `-- -runs=0`, campaign with `-- -fork=8 -max_total_time=600` |
 
-## Bench baseline (2026-08-14)
+### Platforms
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Linux headless lane | the engine builds and runs headless on `linux-x64` (the CI half of the Linux backend): software floors route (AV1 on rav1d without its non-PIC asm, FLAC, Opus), platform codecs refuse typed (H.264/H.265/AAC/MP3 — no VAAPI adapter yet), the sink consumes due frames (position/EOS/counters flow with no present target), and the capability blob claims only what the build decodes; the full test suite, conformance gate and the software-decode play row all pass on the GPU-less VPS | on a Linux host: `cargo fmt --check && cargo clippy --workspace --all-targets --examples -- -D warnings && cargo test --workspace`, then `bm-probe caps --compact` (expect the linux-x64 shape), `bm-probe play fixtures/mkv/av1-opus.webm --duration 8`, `bm-probe conformance fixtures` (needs ffprobe); `tools/ci.sh` runs the lot and skips the impair row loudly where H.264 decode is absent (debug-build rav1d without asm decodes below real time — the play row grades pipeline health, not rate) |
+
+The Quest matrix has its own section below — those rows are device rows and
+none of them run in CI.
+
+### Harness and instrumentation
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Bench lane | the §11 budgets measured mechanically: startup-to-first-frame and seek-to-settled per lane, aggregated over runs (with the startup burst: ~133 ms TTFF / ~56 ms seek on the A/V MP4 fixture, vs ~880/~890 ms without) | `bm-probe bench <src\|url> [--runs N] [--seek-to-ms N] [--live]` |
+| Capture recorder | the diagnostics timeline as CSV (stable column contract) | `bm-probe play <src> --csv out.csv`; feed to the basis-buffer-analysis tooling |
+| Unity host autotest | ABI v2 + managed component v2 end to end: presents via render event, audio on the Unity audio thread, mid-run seek | see "Unity host autotest" below |
+
+## Not yet run
+
+Surfaces that exist and have never been exercised. Each is a row in waiting, not
+a known-good one.
+
+| Row | What it would prove | How to run |
+| --- | --- | --- |
+| RIST on Android — device pass | mr.town `rist://mr.town:5000` (plain) and `rist://mr.town:5001` (AES-128), matching the desktop rows above. Needs a Quest client build, so it is a device session, not a desk one. Run the stream preflight first and take the lanes down after — they are on-demand | the media pass on a connected Quest |
+| Proton / Wine (standing row) | the inference is only as good as the headers it reads, and the C player's equivalent broke wholesale under Wine — its Content-Length query used `WINHTTP_QUERY_FLAG_NUMBER64`, which Wine omits from its query modifier mask, so every source looked non-seekable and every VOD fast-forwarded for Linux users. This engine goes through reqwest so it does not inherit that bug, but has never been exercised there. Two things to check rather than assume: (1) the 206 probe, `Content-Range` and `Content-Length` all read correctly under Proton, so the same URL classifies the same as on Windows; (2) https works at all — Windows builds use rustls with *native* roots, which under Wine means Wine's certificate store, and an empty one fails every https source before liveness is even reached (Android needed bundled roots for the same class of reason) | the Windows client under Proton on a Linux box, one ranged VOD and one live HTTP-TS lane |
+
+Two more sit inside the Android section rather than here, because their rows
+carry the detail: the https-on-device lane (the bundled trust anchors have never
+been confirmed on hardware) and the render-event re-grade (verified headless and
+in the autotest, never re-graded from a device hold histogram).
+
+The managed side's un-run work — shared playback with two clients, the session
+cap in a populated scene, the panel, the resolver's first real run — is listed in
+[`../TESTING.md`](../TESTING.md). None of it has an automated row either.
+
+## Rig limitations
+
+Fixtures and feeders that are wrong for a test, as opposed to the player being
+wrong. Recorded so the next session fixes the rig instead of redesigning the
+player around it.
+
+| Limitation | What it does | How it shows |
+| --- | --- | --- |
+| Single-slot live feeders | the mr.town `:8093` and `:8094` lanes are ffmpeg `-listen 1`, one client per slot with a systemd respawn, so the liveness probe's ranged GET takes the only slot and the handover connect is refused — measured 2026-08-16: the slot was still refusing a full second after the probe closed. This is the fixture being wrong for the test, not the player: every real live HTTP server (VRCDN, nginx, a CDN edge) accepts concurrent clients, and VRCDN infers correctly. Until those feeders grow a fan-out relay, drive them with `liveness = Live` set explicitly, and use VRCDN for anything exercising the inference | `bm-probe play http://mr.town:8094/imax.ts` on defaults fails with a connect error; with liveness forced Live it plays as it always has |
+
+## Android — the device matrix
+
+MediaCodec decode and the Vulkan present path, on Quest Pro. These are device
+rows: none of them run in CI, and each states its own verdict and date.
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Android build lane | the whole engine graph (media-ffi cdylib, decode-mediacodec, the Vulkan present module, decode-sw's Opus/FLAC floors cross-compiled via cmake+NDK) compiles clean for `aarch64-linux-android` with clippy `-D warnings`; the AV1 software floor is deliberately absent from this graph (rav1d's published crate cannot build its arm64 asm, and the present path has no CPU-frame upload) | in CI (`android check (aarch64)` row; skips loudly without an NDK). By hand: `. .\tools\android-env.ps1` then `cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec -- -D warnings` |
+| Engine .so | `libbasis_media.so` links against exactly `libmediandk`/`liblog` (+ libc/m/dl) and exports the ABI plus `UnityPluginLoad`/`JNI_OnLoad` | `. .\tools\android-env.ps1; cargo build --target aarch64-linux-android -p media-ffi --release`, then `llvm-readelf -d`/`--dyn-syms` on `target/aarch64-linux-android/release/libbasis_media.so` (the M0 DT_NEEDED lesson) |
+| On-device pass (Quest) | the M5 vertical slice on hardware: MediaCodec async decode (hardware AVC) → AImageReader → AHardwareBuffer → Vulkan import on Unity's device → compute convert into a Unity RenderTexture under OpenXR; audio via MediaCodec AAC through the ring; capability blob with hardware routes + MediaCodecList ceilings; mid-run seek (flush/restart in async mode); natural Ended | stage the `.so` into the package (`tools\stage-android-plugin.ps1`; the spike host loads it from there), then `UnityScratch\BasisMediaM0Quest\run-media-pass.ps1` — builds `bmmedia.apk`, deploys via adb, soaks ~25 s, prints the `BM_MEDIA_VERDICT` line (decode/present/ended/audio each PASS). **PASSED 2026-08-14 on Quest Pro** (repeat runs: ~300 decoded / ~275 presented, 0 errors, Playing at ~45 ms, seek + natural Ended; picture verified correct-side-up in stereo under URP; video decoder resolves to OMX.qcom.video.decoder.avc, audio to c2.android.aac.decoder). Known open item, root-caused: the harness's audio consumer pulls at ~half the hardware cadence, dragging the audio-master clock (~0.7 s snap-backs every ~1.5 s — play/freeze cycling); with the pull muted (`bm-no-audio` marker in the app's files dir, no rebuild needed) the engine paces exactly 1 s/s with zero snaps, so the engine is exonerated — the fix is the managed package's Android audio path (the row below). The OMX decoder also never delivers an EOS-flagged output (the bounded drain-timeout fallback ends the stream) |
+| Managed package pass (Quest) | `com.basis.mediaplayer`'s Android arm end to end: the component owns the Vulkan graphics contract (linear RGBA32 RenderTexture with `enableRandomWrite`, render events via `RenderPipelineManager.endCameraRendering` — URP ignores camera command buffers) and the DSP-rate-aware audio pull (the ring is consumed at the *stream* rate and linearly resampled to the device DSP rate; a raw 1:1 pull consumes at dspRate/streamRate of real time and drags the audio-master clock — the raw harness's half-cadence class). The verdict grades decode/present/ended plus **audio** (pulled frames per wall second ≈ stream rate) and **pacing** (position advances 1 s/s with zero backwards snaps after the seek settles, sampled at 4 Hz) | `UnityScratch\BasisMediaM0Quest\run-package-pass.ps1` — the host project references the package as a `file:` dependency and the `.so` ships inside the package (`tools\stage-android-plugin.ps1` after any repo change); builds `bmpackage.apk`, deploys via adb, soaks ~35 s, prints `BM_PKG_VERDICT decode/present/ended/audio/pacing`. A/B without rebuild: `bm-no-audio` marker in the app's files dir removes the AudioSource (wall clock master); `bm-url.txt` (line 1 = URL, later lines `live`/`audio-lead`) drives any lane — URL runs skip the seek and the Ended gate; `bm-hold` delays the open 15 s (a no-session `dumpsys meminfo` baseline window for the per-session A/B); `bm-two` opens a second session on the same source beside the first (per-second `s2` lines + a `BM_PKG_S2` counter line in the log). Unattended runs (no wearer): `adb shell am broadcast -a com.oculus.vrpowermanager.prox_close` fakes the proximity sensor so the app renders headset-on-desk (`…automation_disable` restores it) — note the eleventh session's ideal-hold percentages were measured worn; desk runs grade ~90–95% ideal with zero skips, so compare like with like. **Steady state PASSED 2026-08-15 on Quest Pro, in-headset confirmed** (smooth playback, continuous tone; no-seek run: position exactly 1 s/s, 175/175 presented, audio pulled at the stream rate to the content-bound total, natural Ended, zero snaps; boot log confirmed the device DSP rate is **24000 Hz** — the raw harness's half-cadence consumption was exactly dspRate/streamRate). **The full verdict including the seek is green since the seek-settle fix (2026-08-15, same day)**: the seek settles with a 28 ms presentation gap (was ~5 s — the OMX drain blocking the flush, a stale-frame clock restart, and the ring free-running through the settle), lands at the keyframe, 1 s/s after, natural Ended with the tail intact. The audio-led slowjoin lane still fails the pacing gate on its single join-window snap — the documented audio-led join shape (the audio-leading-start trade), not a defect; the gate is not join-aware on URL runs |
+| Android https | TLS trust anchors on Android come from the bundled webpki-roots CCADB set (no readable OS CA store there — the first device https attempt failed at connect with error 103; every other platform keeps the OS store): an `https://` lane connects and plays on device | **PENDING first device run** (code landed 2026-08-15): rebuild + `tools\stage-android-plugin.ps1`, `bm-url.txt` = `https://mr.town/vod/music_51.flac` (bring `tls443` up), `run-package-pass.ps1 -SkipBuild` |
+| Diagnostics captures | two layers, both CSV: (1) engine-side — `diag_csv` in the descriptor (managed `diagnosticsCsvPath`) makes an engine-owned thread sample the §12.4 capture recorder at 100 ms and write it on close, same pinned column contract as `bm-probe play --csv` (`cargo test -p media-engine --test session diag_csv_written_on_close` pins the surface); (2) display-side — the Quest package harness writes `bm-frames.csv`, one row per Unity frame (wall_dt, state, position, banked, decoded/presented, audio pulled — the C player's judder-relevant columns). The engine CSV sees flow/starvation; only the frame CSV sees display cadence (hold intervals) — the 2026-08-15 judder analysis needed both | on device: run any package pass, then `adb pull .../files/bm-diag.csv` + `bm-frames.csv`; scratch analysis scripts from the session live outside the repo |
+| Steady-lane cadence (Quest) | the master-observation filter holds presentation on the ideal 3-vsync hold through Quest's DSP-callback jitter episodes: post-join windows on the rtspt stereo lane grade 97.4–100% ideal holds with **zero newest-wins skips** across repeat soaks (pre-fix: ~74% with ~2 skips/s during episodes). One caveat when reading the histogram: the mediamtx stereo lane's re-encoder drops the odd frame (~one 83 ms pts gap per 20 s, ffprobe-verified) which displays as a correct 6-vsync hold. The residual 1–5 isolated one-vsync-late/early hold pairs per ~25 s (presentation-handoff quantisation) are what render-event selection targets: frame selection now runs in the render event itself with a vsync of lookahead, so those pair events should collapse to isolated occurrences minutes apart — **the on-device re-grade of this row on a render-event build is pending** (headless + autotest verified; the histogram is the device verdict) | bring the stereo lane up, `bm-url.txt` = `rtspt://mr.town:8090/imaxstereo` + `live`, `run-package-pass.ps1` (full build — the staged `.so` must be the render-event build), pull `bm-frames.csv`, grade hold intervals over a post-join window (scratch script; rewrite from the column contract) |
+| §11 budgets on device (first measurements, 2026-08-15, Quest Pro, 640×360 A/V fixture) | startup → first frame: decode and present both inside the first 100 ms sampler bucket of the engine capture (budget: ≤ C player −20%; the C-on-Quest baseline still needs its own run). Seek → settled: **28 ms presentation gap** (last pre-seek present to first post-seek present in the frame capture; was ~5 s before the seek-settle fix, and matches Windows' ~26 ms). Binary size: **inside the reset budget** — the §11 row is ≤12 MB per platform (reset from 8 MB, 2026-08-15): `libbasis_media.so` 9.2 MB (was 15.0; fat LTO + codegen-units 1 + staging strip-all) / `basis_media.dll` 10.7 MB (was 11.8; MSVC keeps debuginfo in the .pdb, so the dll is essentially all code). The remainder is the feature set's weight — the `cargo bloat` audit shows a long tail (std 1.5 MiB, rav1d 0.7 MiB, the WHEP stack ≈1.2 MiB including its unused SCTP, rustls 0.4 MiB), with the str0m SCTP feature-gate upstream PR as the named first move if size ever binds. Per-session memory (2026-08-15, twelfth session, `bm-hold` no-session baseline A/B): app no-session baseline ~310 MB PSS / EGL ~27 MB; one 640×360 session ≈ +21 MB PSS; one 1080p30 session ≈ +70–77 MB PSS with **EGL +53 MB** (RGBA RT + the 10-image AImageReader pool — inside the ≤80 MiB decoded-side row, first crude measurement); two 1080p30 sessions EGL +100 MB (≈50 MB/session, linear). Two simultaneous sessions (`bm-two`): **both full rate at 1080p30** — session 1 all gates PASS (900/896 @30 s, ratio 1.000, audio at rate), session 2 900/895 at 1 s/s with full audio; app CPU 37% of one core for one 1080p session, 44% for two (hardware decode keeps it flat). Unmeasured rows (per-stream CPU vs the C player, main/render-thread cost, C-on-Quest baselines) need C-player A/B runs | fixture package pass + mid-soak `adb shell top` / `dumpsys meminfo`; TTFF/seek from `bm-diag.csv` / `bm-frames.csv`; the 1080p lane is a generated fixture (ffmpeg testsrc2 1080p30 H.264 high + AAC, 60 s, timecode burn-in) pushed to the app files dir as `bm-1080p.mp4` and driven via `bm-url.txt` |
+| Live lanes on device (Quest) | the M5 live matrix over the package pass's `bm-url.txt` lane driver — **all run 2026-08-15 on Quest Pro, decode/present/audio green on every lane**: RTSP stereo (`rtsp://mr.town:8090/imaxstereo`, 655/651, ratio 1.000, in-headset smooth) · RTSP 5.1 (`…/imax51` UDP + `rtspt://` TCP, audio at rate through the managed stereo downmix — the downmix itself is listening-verified on the clean FLAC 5.1 VOD lane; the imax51 lane additionally pops and degrades over a soak on ANY build because its `-c copy` passthrough carries millisecond-quantised timestamps whose pts timeline runs slower than the sample count, saturating the PcmRing — reproduces headless on Windows, kept as the ring-serve repro lane; per-speaker mapping stays the managed multichannel work) · WHEP (`whep://mr.town:8091/whepav/whep`, **first Android WHEP run** — join <2 s, ratio 1.000, Bank grinding to the sub-second floor) · HLS live (local windowed server via `adb reverse tcp:8899`, wrap splices handled; the pacing gate's "snaps" are the documented splice timeline restarts, expected FAIL on this lane). Visual A/B: occasional macroblock pixellation on the UDP-carried lanes (RTSP-UDP, WHEP) heals at the next keyframe and vanishes on the TCP twins — transport loss, not the present path (WHEP NACK/PLI is unbuilt); no FOREIGN-barrier-class artefacts seen; the OMX drain-timeout stayed bounded throughout | bring the mr.town lanes up per the remote-servers notes (+ the transient `whepav` publisher), preflight, then per lane: write `bm-url.txt`, `run-package-pass.ps1 -SkipBuild` |
+
+Trust anchors on Android: there is no readable OS CA store, so the TLS stack
+bundles the webpki-roots CCADB set there while every other platform keeps the OS
+store. The code landed 2026-08-15; the device run that confirms an `https://`
+lane connects and plays is the pending half of the row above.
+
+The Vulkan graphics contract (normative, mirrors the D3D11 one): a
+**linear** (sRGB off) RGBA32 RenderTexture with `enableRandomWrite`,
+display-sized, registered via `bm_session_set_output_texture`; the plugin
+preloaded so the Vulkan-init interception registers before graphics init
+(the package's committed `.meta` sets `isPreloaded`); render events issued
+per frame as on D3D11. `BasisMediaPlayer` implements the contract on
+Android — the raw harness stays as the A/B reference consumer.
+
+## Measurements
+
+Where the healthy bands above come from. Dated, because they are readings rather
+than rules, and a later reading supersedes an earlier one on the same lane.
+
+### Bench baseline (2026-08-14)
 
 The §11 budget comparison against the C player measures from these
 numbers (medians of 3 via `bm-probe bench`, Windows dev host; raw
@@ -222,7 +356,7 @@ onto UDP; same-day `rtspt://` comparisons in brackets):
 | RTSP-UDP mediamtx 5.1 (live) | 6.25 s |
 | RTSP-UDP mediamtx slowjoin (adversarial ~10 s GOP) | 7.64 s |
 | RTSP-UDP VRCDN (live) | 3.96 s [TCP same day: degraded/variable — one 14 s join, one 30 s timeout; the 2.02 s baseline row was a healthier day] |
-| HTTP-TS VRCDN (live) | 1.97 s | — |
+| HTTP-TS VRCDN (live) | 1.97 s |
 
 RIST joins (2026-08-14, same method — mr.town broadcasters, 16 Mbps
 x264 + AAC 5.1, 2 s GOP, WAN):
@@ -255,6 +389,11 @@ time-to-first-audible-audio):
 | AV1 fragmented MP4 (mr.town HTTPS) | 1.5 s | 37 ms |
 | FLAC / MP3 / Ogg Opus (mr.town HTTPS, audio-only) | 148–162 ms | refuse |
 
+The two audio-only "refuse" rows are as measured on the day. Every raw-audio
+lane seeks since 2026-08-16 — see [Raw-audio seek,
+restored](#raw-audio-seek-restored-2026-08-16) for MP3 and Ogg Opus, and
+[FLAC and ADTS seek](#flac-and-adts-seek-2026-08-16) for the rest.
+
 Reading: the WebM/MP4 codec lanes match the container-independent
 ~130 ms local / ~300–400 ms remote pattern. The fragmented-MP4 outlier
 is open cost (the box walk visits every moof, spread across the file —
@@ -270,23 +409,7 @@ each other. The mediamtx joins carry their lanes' GOP structure (2 s
 and ~10 s respectively) plus the live hold — the adversarial lane's
 join cost passes through undamped, as it is designed to.
 
-## R19 hardware-route measurements (2026-08-15, desk box, NVIDIA)
-
-Release `bm-probe bench` on the A/V MP4 fixture, 5 runs: **hardware
-route TTFF median 154 ms (min 53, max 244 — device + DXVA MFT setup
-varies run to run), seek 15 ms; software route (via
-`BASIS_MEDIA_DISABLE_HW_DECODE`) TTFF 126 ms, seek 5 ms.** The ~30 ms
-median TTFF cost is the decode-device/manager creation; the payoff is
-the CPU row below.
-
-Per-stream CPU A/B (1080p30 H.264+AAC 20 s generated lane,
-`bm-probe play --duration 20`, process CPU time): **hardware 0.75 s
-(≈3.7% of one core), software 5.45 s (≈27%)** — a ~7× reduction; both
-routes ~597/594 decoded/presented, 0 pool drops. The remaining §11
-Windows rows (vs the C player on the same lane, VRAM per session with
-the decoder pool now GPU-side) still need the C-player A/B pass.
-
-## Live-join baseline after the priming join (2026-08-14)
+### Live-join baseline after the priming join (2026-08-14)
 
 Same-day before/after, medians of 3 via `bm-probe bench --live`
 (before = pre-priming build, same host, lanes up for both passes):
@@ -322,38 +445,139 @@ attributable to the change. Publisher-restart rejoined on attempt 3
 profiles passed with margins unchanged and `audio_ring_drops` 0 on the
 CI row (41 before the shed rework).
 
-## Android (M5, in progress)
+### Hardware-route measurements (2026-08-15, desk box, NVIDIA)
 
-The MediaCodec adapter + Vulkan present path. Rows join here as they
-become real; the parity matrix on Quest is the M5 artefact.
+Release `bm-probe bench` on the A/V MP4 fixture, 5 runs: **hardware
+route TTFF median 154 ms (min 53, max 244 — device + DXVA MFT setup
+varies run to run), seek 15 ms; software route (via
+`BASIS_MEDIA_DISABLE_HW_DECODE`) TTFF 126 ms, seek 5 ms.** The ~30 ms
+median TTFF cost is the decode-device/manager creation; the payoff is
+the CPU row below.
 
-| Row | What it proves | How to run |
+Per-stream CPU A/B (1080p30 H.264+AAC 20 s generated lane,
+`bm-probe play --duration 20`, process CPU time): **hardware 0.75 s
+(≈3.7% of one core), software 5.45 s (≈27%)** — a ~7× reduction; both
+routes ~597/594 decoded/presented, 0 pool drops. The remaining §11
+Windows rows (vs the C player on the same lane, VRAM per session with
+the decoder pool now GPU-side) still need the C-player A/B pass.
+
+### Raw-audio seek, restored (2026-08-16)
+
+MP3 and Ogg Opus seeks were regressions against the C player, which seeked both. Medians
+of 3 on the committed fixtures, after porting its arithmetic:
+
+| Lane | Duration reported | ffprobe says | Seek settle |
+| --- | --- | --- | --- |
+| `sine-48k-stereo.mp3` | 6.024 s | 6.000 s | 3 ms |
+| `sine-48k-stereo.opus` | 6.000 s | 6.007 s | 3 ms |
+
+Both differences are expected and are the C player's conventions. MP3's comes from the
+Xing frame count (251 x 1152 / 48 000), which is what the seek arithmetic is keyed on,
+while ffprobe applies the encoder's delay and padding. Ogg's is the other way round:
+ffprobe counts the priming samples, which never reach the output, and the reported
+duration subtracts pre-skip exactly as the packet timestamps already do.
+
+Two traps the Ogg path hit, both after a seek rather than during one: the reader holds a
+half-packet across a bisection unless `delete_unread_packets` is called, and a bisection
+towards the start re-reads `OpusHead`/`OpusTags`, whose first byte is not an Opus TOC.
+Either one surfaces as a malformed-TOC parse error, not as a bad landing.
+
+### WAV lane bench (2026-08-16)
+
+Medians of 3. `bench`'s seek-settle gate required a video presentation, so it timed out on
+*any* audio-only lane that seeks — MP4 audio (`.m4a`) has always been one, since
+`Mp4Demuxer::seek` lands straight on the target when there is no video track. Nothing had
+benched a seek on one until WAV arrived. The gate now falls back to the post-seek position
+where a session has no video: `aac-48k-stereo.m4a` settles in 2 ms and `sine-48k-51.m4a` in
+17 ms, so the fix is not WAV-specific.
+
+WAV is the raw-audio lane that seeks most cheaply, PCM being linear.
+
+| Lane | TTFF | Seek settle |
 | --- | --- | --- |
-| Android build lane | the whole engine graph (media-ffi cdylib, decode-mediacodec, the Vulkan present module, decode-sw's Opus/FLAC floors cross-compiled via cmake+NDK) compiles clean for `aarch64-linux-android` with clippy `-D warnings`; the AV1 software floor is deliberately absent from this graph (rav1d's published crate cannot build its arm64 asm, and the present path has no CPU-frame upload) | in CI (`android check (aarch64)` row; skips loudly without an NDK). By hand: `. .\tools\android-env.ps1` then `cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec -- -D warnings` |
-| Engine .so | `libbasis_media.so` links against exactly `libmediandk`/`liblog` (+ libc/m/dl) and exports the ABI plus `UnityPluginLoad`/`JNI_OnLoad` | `. .\tools\android-env.ps1; cargo build --target aarch64-linux-android -p media-ffi --release`, then `llvm-readelf -d`/`--dyn-syms` on `target/aarch64-linux-android/release/libbasis_media.so` (the M0 DT_NEEDED lesson) |
-| On-device pass (Quest) | the M5 vertical slice on hardware: MediaCodec async decode (hardware AVC) → AImageReader → AHardwareBuffer → Vulkan import on Unity's device → compute convert into a Unity RenderTexture under OpenXR; audio via MediaCodec AAC through the ring; capability blob with hardware routes + MediaCodecList ceilings; mid-run seek (flush/restart in async mode); natural Ended | stage the `.so` into the package (`tools\stage-android-plugin.ps1`; the spike host loads it from there), then `UnityScratch\BasisMediaM0Quest\run-media-pass.ps1` — builds `bmmedia.apk`, deploys via adb, soaks ~25 s, prints the `BM_MEDIA_VERDICT` line (decode/present/ended/audio each PASS). **PASSED 2026-08-14 on Quest Pro** (repeat runs: ~300 decoded / ~275 presented, 0 errors, Playing at ~45 ms, seek + natural Ended; picture verified correct-side-up in stereo under URP; video decoder resolves to OMX.qcom.video.decoder.avc, audio to c2.android.aac.decoder). Known open item, root-caused: the harness's audio consumer pulls at ~half the hardware cadence, dragging the audio-master clock (~0.7 s snap-backs every ~1.5 s — play/freeze cycling); with the pull muted (`bm-no-audio` marker in the app's files dir, no rebuild needed) the engine paces exactly 1 s/s with zero snaps, so the engine is exonerated — the fix is the managed package's Android audio path (the row below). The OMX decoder also never delivers an EOS-flagged output (the bounded drain-timeout fallback ends the stream) |
-| Managed package pass (Quest) | `com.basis.mediaplayer`'s Android arm end to end: the component owns the Vulkan graphics contract (linear RGBA32 RenderTexture with `enableRandomWrite`, render events via `RenderPipelineManager.endCameraRendering` — URP ignores camera command buffers) and the DSP-rate-aware audio pull (the ring is consumed at the *stream* rate and linearly resampled to the device DSP rate; a raw 1:1 pull consumes at dspRate/streamRate of real time and drags the audio-master clock — the raw harness's half-cadence class). The verdict grades decode/present/ended plus **audio** (pulled frames per wall second ≈ stream rate) and **pacing** (position advances 1 s/s with zero backwards snaps after the seek settles, sampled at 4 Hz) | `UnityScratch\BasisMediaM0Quest\run-package-pass.ps1` — the host project references the package as a `file:` dependency and the `.so` ships inside the package (`tools\stage-android-plugin.ps1` after any repo change); builds `bmpackage.apk`, deploys via adb, soaks ~35 s, prints `BM_PKG_VERDICT decode/present/ended/audio/pacing`. A/B without rebuild: `bm-no-audio` marker in the app's files dir removes the AudioSource (wall clock master); `bm-url.txt` (line 1 = URL, later lines `live`/`audio-lead`) drives any lane — URL runs skip the seek and the Ended gate; `bm-hold` delays the open 15 s (a no-session `dumpsys meminfo` baseline window for the per-session A/B); `bm-two` opens a second session on the same source beside the first (per-second `s2` lines + a `BM_PKG_S2` counter line in the log). Unattended runs (no wearer): `adb shell am broadcast -a com.oculus.vrpowermanager.prox_close` fakes the proximity sensor so the app renders headset-on-desk (`…automation_disable` restores it) — note the eleventh session's ideal-hold percentages were measured worn; desk runs grade ~90–95% ideal with zero skips, so compare like with like. **Steady state PASSED 2026-08-15 on Quest Pro, in-headset confirmed** (smooth playback, continuous tone; no-seek run: position exactly 1 s/s, 175/175 presented, audio pulled at the stream rate to the content-bound total, natural Ended, zero snaps; boot log confirmed the device DSP rate is **24000 Hz** — the raw harness's half-cadence consumption was exactly dspRate/streamRate). **The full verdict including the seek is green since the R8 fix (2026-08-15, same day)**: the seek settles with a 28 ms presentation gap (was ~5 s — the OMX drain blocking the flush, a stale-frame clock restart, and the ring free-running through the settle), lands at the keyframe, 1 s/s after, natural Ended with the tail intact. The audio-led slowjoin lane still fails the pacing gate on its single join-window snap — the documented audio-led join shape (R5/R1 trade), not a defect; the gate is not join-aware on URL runs |
-| Android https (R16) | TLS trust anchors on Android come from the bundled webpki-roots CCADB set (no readable OS CA store there — the first device https attempt failed at connect with error 103; every other platform keeps the OS store): an `https://` lane connects and plays on device | **PENDING first device run** (code landed 2026-08-15): rebuild + `tools\stage-android-plugin.ps1`, `bm-url.txt` = `https://mr.town/vod/music_51.flac` (bring `tls443` up), `run-package-pass.ps1 -SkipBuild` |
-| Diagnostics captures | two layers, both CSV: (1) engine-side — `diag_csv` in the descriptor (managed `diagnosticsCsvPath`) makes an engine-owned thread sample the §12.4 capture recorder at 100 ms and write it on close, same pinned column contract as `bm-probe play --csv` (`cargo test -p media-engine --test session diag_csv_written_on_close` pins the surface); (2) display-side — the Quest package harness writes `bm-frames.csv`, one row per Unity frame (wall_dt, state, position, banked, decoded/presented, audio pulled — the C player's judder-relevant columns). The engine CSV sees flow/starvation; only the frame CSV sees display cadence (hold intervals) — the 2026-08-15 judder analysis needed both | on device: run any package pass, then `adb pull .../files/bm-diag.csv` + `bm-frames.csv`; scratch analysis scripts from the session live outside the repo |
-| Steady-lane cadence (Quest, R10 + R12) | the master-observation filter holds presentation on the ideal 3-vsync hold through Quest's DSP-callback jitter episodes: post-join windows on the rtspt stereo lane grade 97.4–100% ideal holds with **zero newest-wins skips** across repeat soaks (pre-fix: ~74% with ~2 skips/s during episodes). One caveat when reading the histogram: the mediamtx stereo lane's re-encoder drops the odd frame (~one 83 ms pts gap per 20 s, ffprobe-verified) which displays as a correct 6-vsync hold. The residual 1–5 isolated one-vsync-late/early hold pairs per ~25 s (presentation-handoff quantisation) are R12's target: frame selection now runs in the render event itself with a vsync of lookahead, so those pair events should collapse to isolated occurrences minutes apart — **the on-device re-grade of this row on an R12 build is pending** (headless + autotest verified; the histogram is the device verdict) | bring the stereo lane up, `bm-url.txt` = `rtspt://mr.town:8090/imaxstereo` + `live`, `run-package-pass.ps1` (full build — the staged `.so` must be the R12 build), pull `bm-frames.csv`, grade hold intervals over a post-join window (scratch script; rewrite from the column contract) |
-| §11 budgets on device (first measurements, 2026-08-15, Quest Pro, 640×360 A/V fixture) | startup → first frame: decode and present both inside the first 100 ms sampler bucket of the engine capture (budget: ≤ C player −20%; the C-on-Quest baseline still needs its own run). Seek → settled: **28 ms presentation gap** (last pre-seek present to first post-seek present in the frame capture; was ~5 s pre-R8, and matches Windows' ~26 ms). Binary size: **inside the reset budget** — the §11 row is ≤12 MB per platform (reset from 8 MB, R13, 2026-08-15): `libbasis_media.so` 9.2 MB (was 15.0; fat LTO + codegen-units 1 + staging strip-all) / `basis_media.dll` 10.7 MB (was 11.8; MSVC keeps debuginfo in the .pdb, so the dll is essentially all code). The remainder is the feature set's weight — the `cargo bloat` audit shows a long tail (std 1.5 MiB, rav1d 0.7 MiB, the WHEP stack ≈1.2 MiB including its unused SCTP, rustls 0.4 MiB), with the str0m SCTP feature-gate upstream PR as the named first move if size ever binds. Per-session memory (2026-08-15, twelfth session, `bm-hold` no-session baseline A/B): app no-session baseline ~310 MB PSS / EGL ~27 MB; one 640×360 session ≈ +21 MB PSS; one 1080p30 session ≈ +70–77 MB PSS with **EGL +53 MB** (RGBA RT + the 10-image AImageReader pool — inside the ≤80 MiB decoded-side row, first crude measurement); two 1080p30 sessions EGL +100 MB (≈50 MB/session, linear). Two simultaneous sessions (`bm-two`): **both full rate at 1080p30** — session 1 all gates PASS (900/896 @30 s, ratio 1.000, audio at rate), session 2 900/895 at 1 s/s with full audio; app CPU 37% of one core for one 1080p session, 44% for two (hardware decode keeps it flat). Unmeasured rows (per-stream CPU vs the C player, main/render-thread cost, C-on-Quest baselines) need C-player A/B runs | fixture package pass + mid-soak `adb shell top` / `dumpsys meminfo`; TTFF/seek from `bm-diag.csv` / `bm-frames.csv`; the 1080p lane is a generated fixture (ffmpeg testsrc2 1080p30 H.264 high + AAC, 60 s, timecode burn-in) pushed to the app files dir as `bm-1080p.mp4` and driven via `bm-url.txt` |
-| Live lanes on device (Quest) | the M5 live matrix over the package pass's `bm-url.txt` lane driver — **all run 2026-08-15 on Quest Pro, decode/present/audio green on every lane**: RTSP stereo (`rtsp://mr.town:8090/imaxstereo`, 655/651, ratio 1.000, in-headset smooth) · RTSP 5.1 (`…/imax51` UDP + `rtspt://` TCP, audio at rate through the managed stereo downmix — the downmix itself is listening-verified on the clean FLAC 5.1 VOD lane; the imax51 lane additionally pops and degrades over a soak on ANY build because its `-c copy` passthrough carries millisecond-quantised timestamps whose pts timeline runs slower than the sample count, saturating the PcmRing — reproduces headless on Windows, kept as the R15 repro lane; per-speaker mapping stays the managed multichannel work) · WHEP (`whep://mr.town:8091/whepav/whep`, **first Android WHEP run** — join <2 s, ratio 1.000, Bank grinding to the sub-second floor) · HLS live (local windowed server via `adb reverse tcp:8899`, wrap splices handled; the pacing gate's "snaps" are the documented splice timeline restarts, expected FAIL on this lane). Visual A/B: occasional macroblock pixellation on the UDP-carried lanes (RTSP-UDP, WHEP) heals at the next keyframe and vanishes on the TCP twins — transport loss, not the present path (R9 files WHEP NACK/PLI); no FOREIGN-barrier-class artefacts seen; the OMX drain-timeout stayed bounded throughout | bring the mr.town lanes up per the remote-servers notes (+ the transient `whepav` publisher), preflight, then per lane: write `bm-url.txt`, `run-package-pass.ps1 -SkipBuild` |
+| `fixtures/sine-48k-stereo.wav` (16-bit stereo, local) | 23 ms | 34 ms |
+| `https://mr.town/vod/w.wav` (7.1 LPCM, 24.3 MB, HTTPS) | 135 ms | 4 ms |
 
-Known Android gap: https lanes fail at connect (error 103) — the TLS
-stack's native-roots loader finds no CA store on Android, so device runs
-use plain-http/rtsp/whep lanes until the webpki-roots fix lands (R16 in
-the engine backlog). First observed 2026-08-15 on the first device https
-attempt; every earlier device lane was rtsp/rist/whep/http/local.
+The remote lane also pins the real-content half of the WAV work: 8 channels at 48 kHz, a
+31.678 s duration derived from the byte rate, played through the PCM adapter.
 
-The Vulkan graphics contract (normative, mirrors the D3D11 one): a
-**linear** (sRGB off) RGBA32 RenderTexture with `enableRandomWrite`,
-display-sized, registered via `bm_session_set_output_texture`; the plugin
-preloaded so the Vulkan-init interception registers before graphics init
-(the package's committed `.meta` sets `isPreloaded`); render events issued
-per frame as on D3D11. `BasisMediaPlayer` implements the contract on
-Android — the raw harness stays as the A/B reference consumer.
+### FLAC and ADTS seek (2026-08-16)
 
-## Unity host autotest
+The last two raw-audio lanes that refused. Neither carries an index the MP3 and Ogg
+arithmetic could be pointed at, so each got the mechanism its container actually affords.
+
+FLAC frame headers state their own sample number, so the whole problem is finding a byte
+position: a SEEKTABLE states one outright, and without one the position is bisected over
+frame headers, each probe reading back the sample number that narrows the interval. The
+probe interpolates between the interval's known sample numbers rather than halving it, but
+is clamped to the middle half, so a mis-estimate still cuts the window by a quarter and the
+search cannot stall. Because the landing is read back rather than guessed, FLAC reports the
+exact instant playback resumes at — the only raw-audio lane that does.
+
+A probe only accepts a frame header that the frame *following* it confirms, and headers are
+now screened against the sample rate and channel count STREAMINFO announced. The CRC-8
+alone leaves roughly one false sync per 256 structurally valid candidates, which never
+mattered while the walk only ever started at the first frame and matters immediately once
+it starts mid-file.
+
+ADTS states neither a length nor a frame count, and its frames carry no timestamp, so both
+its duration and its landing rest on the byte rate averaged over the leading 128 frames
+(ffmpeg estimates the same way). The landing rounds down to a frame boundary — 21.3 ms at
+48 kHz — and the timeline re-anchors on it. That estimated duration is the reason the seek
+is reachable at all: without one there is no scrub bar to seek from.
+
+Medians of 3 on the committed fixtures. The FLAC fixtures carry STREAMINFO, VORBIS_COMMENT
+and PADDING but no SEEKTABLE (ffmpeg writes none), so these are all the bisection arm.
+
+| Lane | Duration reported | ffprobe says | TTFF | Seek settle |
+| --- | --- | --- | --- | --- |
+| `sine-48k-stereo.flac` (~1.3 kB frames) | 6.000 s | 6.000 s | 23 ms | 3 ms |
+| `sine-48k-71.flac` (~52 kB frames) | 6.000 s | 6.000 s | 9 ms | 3 ms |
+| `sine-48k-stereo.aac` | 6.023 s | 6.031 s | 24 ms | 2 ms |
+
+ADTS is the only estimated duration in that table, and ffmpeg estimates it the same way:
+ffprobe reports 6.031 s for the file off a 98 608 bps bitrate estimate, against the 6.037 s
+its 283 frames actually store. This lane's 6.023 s is the same calculation over a smaller
+window, so both land short — ffmpeg by 6 ms, this by 14 ms, on six seconds. `RATE_SAMPLE_FRAMES`
+is the knob: 32 frames gives 6.054 s, 128 gives 6.023 s, every frame in the file gives
+6.037 s. Expect the error to stay small on CBR and widen on a file whose opening seconds
+are not the rest of it.
+
+The error is confined to the far end of the scrub bar. Position is counted in frames, not
+estimated, so it stays exact until a seek — after which the landing carries whatever the
+byte estimate missed, exactly as MP3's does.
+
+**Measured over HTTPS (Editor pass, 2026-08-16).** A ranged source pays a round trip per
+probe, which is what the interpolation exists to keep down. Against nginx with keep-alive,
+on files that carry no SEEKTABLE so every seek runs the full bisection:
+
+| Lane | Seek → landing |
+| --- | --- |
+| `https://mr.town/vod/music_16.flac` | 235–418 ms |
+| `https://mr.town/vod/music_var.flac` (variable blocksize) | 202–366 ms |
+| `https://mr.town/vod/music_51.flac` (5.1) | 199–305 ms |
+
+Inaudible in all cases — the ring covers it, and the clock never dropped a sample (0 silent
+output rows across every seek, ≤3-frame audio gaps, `frame_dt_ms` never above 34 ms while
+playing). The seek does **not** block the caller: `bm_session_seek` posts to the demux
+thread.
+
+Two things this pass established that the fixtures could not:
+
+- **A seek costs one reposition on ADTS and about four on FLAC**, so FLAC is four times as
+  exposed to a slow source. Against a server with no keep-alive (~300 ms per read) rapid
+  scrubbing starved the bank for **7.9 s** on FLAC and **25 ms** on ADTS over the same
+  transport, the only variable being reads per seek. Against nginx the same scrubbing —
+  seeks 0.58 s apart, faster than the starving case — never left Buffering for longer than
+  19 ms. Not a defect, but the reason a SEEKTABLE matters: it cuts the seek to one read
+  (measured 2.6× faster end to end on an injected table).
+- **The 5.1 interleave survives a seek**: verified by ear with six discrete outputs bound,
+  not through the stereo downmix, which sums the channels and would hide a rotation. The
+  sine fixtures cannot show this at all — every channel carries the same tone.
+
+## Harnesses
+
+### Unity host autotest
 
 The disposable host project (`C:\Users\Matt\Documents\UnityScratch\BasisMediaM0Host`,
 Unity 6000.5.8f1, forced D3D11) references the `com.basis.mediaplayer`
@@ -380,36 +604,40 @@ below the fixture's 48 kHz, so the run exercises the component's
 stream→DSP resample path (the path Android devices hit for real) on
 Windows; the same pass bar applies.
 
-## Interactive pass in Basis (the M2 artefact proper)
+### Interactive pass in Basis
 
 The Basis checkout references the package as a local file dependency in
 `Packages/manifest.json`. In the Basis editor: open any scene, run
-**Basis → Media v2 → Create Test Player** (spawns a screen quad + player
-with the repo's A/V fixture prefilled), enter play mode, and drive it from
-the inspector (state readout, play/pause/seek). Swap the URL for the
+**Basis → Tools → Media Player → Test Scene → One Player (Stereo)** (the shipped
+prefab on Basis's initialization scene, a repo fixture prefilled and both
+captures armed), enter play mode, and drive it from the inspector (state
+readout, play/pause/seek). Swap the URL for the
 HTTP(S) rows. Run by hand; report state transitions, A/V sync, seek
 behaviour and teardown on scene exit.
+### The C player as differential oracle
 
-## The C player as differential oracle (M2 →)
-
-Both demuxers are diffed against the *same* ffprobe oracle semantics:
-this repo via `bm-probe conformance`, the C player via
-`Basis/tools/media-conformance` (`basis_demux_dump` + `demux_gate.py`).
-Running both over the same fixture set is the differential lane:
+The C engine this replaced is no longer in this repo. Where a demux question
+wants a second opinion, its conformance tool still runs from a checkout of the
+branch that carried it (`tools/media-conformance`: `basis_demux_dump` +
+`demux_gate.py`), against the same ffprobe oracle semantics `bm-probe
+conformance` uses here:
 
 ```
 # C side (Git Bash, needs cc + ffmpeg):
-cd <Basis>/tools/media-conformance && ./build.sh && python demux_gate.py <fixtures-dir>
+cd <checkout>/tools/media-conformance && ./build.sh && python demux_gate.py <fixtures-dir>
 # Rust side:
 cargo run -p bm-probe -- conformance <fixtures-dir>
 ```
 
-Divergence from ffprobe on either side fails its gate; passing both on one
-fixture set is byte-level agreement on every payload ffprobe hashes. The
-`gen_fixtures.sh` matrix (faststart / trailing-moov / fragmented and the
-codec spread) is the richer shared corpus as formats land here.
+Divergence from ffprobe fails either gate; passing both on one fixture set is
+byte-level agreement on every payload ffprobe hashes. That tool's
+`gen_fixtures.sh` matrix (faststart / trailing-moov / fragmented, and the codec
+spread) is the richer shared corpus.
 
-## Known gaps (M2/M3)
+## Known limitations
+
+Current state, not a plan. Each is something the engine does not do, phrased so
+a reader can tell a deliberate refusal from an unbuilt path.
 
 - The *VOD* HTTP source (ranged/blocking) still tears down by waiting out
   at most one request timeout; live sources cancel immediately via the
@@ -418,29 +646,33 @@ codec spread) is the richer shared corpus as formats land here.
 - The range-less VOD fallback (sequential 200 on the blocking client)
   remains untimed; a range-less server that stalls holds that one request
   open. Live sources don't use this path.
-- The 7.1 fixtures (B69: `sine-48k-71.flac` decodes 8ch through claxon;
-  `sine-48k-71.aac` pins the ADTS channel-screen refusal) stop at the
-  decoder: the PcmRing carries the 8-channel interleave and the managed
-  side's `OnAudioFilterRead` adapter downmixes it to stereo (ITU
-  coefficients over the WAV-order interleave; 4ch/7ch layouts fall back
-  to the front pair), but no per-speaker mapping/splitter exists yet —
-  that is the managed multichannel work, a dedicated session.
-- Raw TS file/stream seek still returns Unsupported (HLS-TS VOD seeks by
-  segment index — that landed with HLS); LPCM audio demuxes but has no
-  decode adapter yet (announce is refused as a diagnostic event; video
-  plays on).
+- The 7.1 fixtures stop at the decoder on the engine side:
+  `sine-48k-71.flac` decodes 8ch through claxon, `sine-48k-71.aac` pins
+  the ADTS channel-screen refusal, and the PcmRing carries the 8-channel
+  interleave. Everything above that is the managed side's — the
+  per-speaker splitter, the eight-output rig and the ITU-coefficient
+  stereo downmix (4ch/7ch layouts fall back to the front pair) — and is
+  covered by the package's own test document, not here.
+- Raw TS file/stream seek returns Unsupported; HLS-TS VOD seeks by
+  segment index, which landed with HLS.
 - HLS carries no EXT-X-KEY (encrypted), EXT-X-BYTERANGE, or I-frame-only
   playlists (typed refusals), no ABR (the master playlist's
   highest-bandwidth variant is chosen once), and fetches whole segments
   (bounded 64 MiB) rather than streaming them; live position reporting
   inherits the segment timeline's own offsets.
-- Raw FLAC/MP3/ADTS/Ogg-Opus demuxers refuse seeks (SEEKTABLE / Xing
-  TOC / granule bisection all unbuilt).
+- Every raw-audio lane seeks, none of them exactly. MP3 goes through its
+  Xing/VBRI table (CBR fallback where there is none) and Ogg Opus by
+  granule bisection, both reporting the landing at the request. FLAC
+  bisects over confirmed frame headers, or reads its SEEKTABLE where the
+  file carries one, and reports the sample number the landed header
+  states. ADTS has neither an index nor a stated length, so its duration
+  and its landing both come off the byte rate averaged over the leading
+  frames, and the landing rounds down to a frame.
 - Decode breadth gaps: no VP9 software floor (libvpx build infra on
   MSVC is unresolved — VP9 is platform-MFT-only, refused where the
   extension is absent); Opus is mono/stereo only (no multistream
   decoder — surround Opus refuses typed); AV1 output above 8-bit 4:2:0
-  refuses (no P010 path); LPCM still announces without an adapter. AV1
+  refuses (no P010 path). AV1
   hardware decode is future async/D3D11VA work — the Store AV1
   extension blocks inside ProcessInput under sync driving, so rav1d is
   the primary AV1 route.

@@ -3,6 +3,13 @@
 //! platform AAC decoder gets exactly what the MP4 lane feeds it (raw
 //! frames, payload type 0). The same channel screen applies: explicitly
 //! signalled 1..=6 channel configurations only.
+//!
+//! ADTS states neither a length nor a frame count anywhere, and frames
+//! carry no timestamp, so both the duration and the seek are keyed on the
+//! byte rate averaged over the leading frames. Landing is approximate, as
+//! it is in every player: the target maps to a byte offset, playback
+//! resumes at the first confirmed frame from there, and the timeline is
+//! re-anchored on the request.
 
 use media_clock::{Generation, MediaTime};
 
@@ -14,6 +21,9 @@ use crate::{
 
 const TRACK: TrackId = TrackId(1);
 const RESYNC_CAP: u64 = 256 * 1024;
+/// Leading frames averaged for the byte rate. ~2.7 s at 48 kHz, which is
+/// enough for the estimate to settle without holding much of the file.
+const RATE_SAMPLE_FRAMES: usize = 128;
 
 const SAMPLE_RATES: [u32; 13] = [
     96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
@@ -70,14 +80,24 @@ pub struct AdtsDemuxer {
     frames_out: u64,
     notes: Vec<String>,
     ended: bool,
+    /// Absolute offset of the first frame: what the byte estimate is
+    /// measured from.
+    first_frame: u64,
+    /// Total size where the source states one. Its absence is the seek
+    /// gate: a sequential live source serves forward reads only.
+    stream_len: Option<u64>,
+    /// Bytes per second over the leading frames, 0 where it could not be
+    /// measured.
+    byte_rate: u64,
 }
 
 impl AdtsDemuxer {
     pub fn open(
-        src: Box<dyn ByteSource>,
+        mut src: Box<dyn ByteSource>,
         _limits: DemuxLimits,
         generation: Generation,
     ) -> Result<Self, DemuxError> {
+        let stream_len = src.size().map_err(DemuxError::Source)?;
         let mut reader = SeqReader::new(src);
         let mut skipped = 0u64;
         let first = loop {
@@ -120,7 +140,33 @@ impl AdtsDemuxer {
                 "ADTS with multiple raw data blocks per frame",
             ));
         }
+        // Average the leading frames rather than trust the first: a VBR
+        // encoder's opening frame is not the file's rate, and everything
+        // this lane can say about length and position rests on this one
+        // number.
+        let mut measured = 0usize;
+        let mut bytes = 0u64;
+        let mut at = 0usize;
+        while measured < RATE_SAMPLE_FRAMES {
+            let data = reader.peek(at + 9).map_err(DemuxError::Source)?;
+            let Some(info) = data.get(at..).and_then(parse_frame_header) else {
+                break;
+            };
+            if info.sf_index != first.sf_index || info.channel_config != first.channel_config {
+                break;
+            }
+            at += info.frame_len;
+            bytes += info.frame_len as u64;
+            measured += 1;
+        }
+        let byte_rate = if measured > 0 {
+            bytes * u64::from(first.sample_rate) / (measured as u64 * 1_024)
+        } else {
+            0
+        };
+
         Ok(Self {
+            first_frame: reader.pos(),
             reader,
             generation,
             first,
@@ -128,7 +174,56 @@ impl AdtsDemuxer {
             frames_out: 0,
             notes: Vec::new(),
             ended: false,
+            stream_len,
+            byte_rate,
         })
+    }
+
+    fn pts_of(&self, frames: u64) -> MediaTime {
+        MediaTime::from_micros(
+            (frames as i64).saturating_mul(1_024 * 1_000_000) / i64::from(self.first.sample_rate),
+        )
+    }
+
+    /// The first frame at or after `from` that matches the stream and is
+    /// confirmed by the header the next frame starts with — the standard a
+    /// seek landing has to meet, since it starts reading mid-file where
+    /// the forward walk never does. Leaves the read position on the frame
+    /// it found; `None` = none before the source ended.
+    fn confirmed_frame_at_or_after(&mut self, from: u64) -> Result<Option<u64>, DemuxError> {
+        self.reader.reposition(from);
+        let mut skipped = 0u64;
+        loop {
+            let at = self.reader.pos();
+            let candidate = {
+                let data = self.reader.peek(9).map_err(DemuxError::Source)?;
+                if data.len() < 7 {
+                    return Ok(None);
+                }
+                parse_frame_header(data)
+            };
+            if let Some(info) = candidate
+                && info.sf_index == self.first.sf_index
+                && info.channel_config == self.first.channel_config
+            {
+                let data = self
+                    .reader
+                    .peek(info.frame_len + 9)
+                    .map_err(DemuxError::Source)?;
+                let confirmed = match data.get(info.frame_len..) {
+                    Some(next) if next.len() >= 7 => parse_frame_header(next).is_some(),
+                    _ => data.len() >= info.frame_len, // final frame before EOF
+                };
+                if confirmed {
+                    return Ok(Some(at));
+                }
+            }
+            self.reader.consume(1);
+            skipped += 1;
+            if skipped > RESYNC_CAP {
+                return Ok(None);
+            }
+        }
     }
 
     /// The 2-byte explicit AudioSpecificConfig the MF adapter contract
@@ -195,10 +290,7 @@ impl Demuxer for AdtsDemuxer {
             }
             let payload = data[info.header_len..info.frame_len].to_vec();
             self.reader.consume(info.frame_len);
-            let pts = MediaTime::from_micros(
-                (self.frames_out as i64).saturating_mul(1_024 * 1_000_000)
-                    / i64::from(info.sample_rate),
-            );
+            let pts = self.pts_of(self.frames_out);
             self.frames_out += 1;
             return Ok(StreamEvent::Au(Au {
                 track: TRACK,
@@ -211,16 +303,43 @@ impl Demuxer for AdtsDemuxer {
         }
     }
 
-    fn seek(
-        &mut self,
-        _target: MediaTime,
-        _generation: Generation,
-    ) -> Result<MediaTime, DemuxError> {
-        Err(DemuxError::Unsupported("seek on a raw ADTS stream"))
+    fn seek(&mut self, target: MediaTime, generation: Generation) -> Result<MediaTime, DemuxError> {
+        let Some(stream_len) = self.stream_len.filter(|_| self.byte_rate > 0) else {
+            return Err(DemuxError::Unsupported("seek on a streaming ADTS source"));
+        };
+        let micros = target.as_micros().max(0) as u64;
+        let offset =
+            (self.first_frame + micros.saturating_mul(self.byte_rate) / 1_000_000).min(stream_len);
+
+        // The estimate lands anywhere inside a frame, and a payload false
+        // sync taken for a frame start desynchronises everything after it,
+        // so the walk restarts on a confirmed header rather than the first
+        // plausible one. Past the end there is none, and the walk ends.
+        let landing = self.confirmed_frame_at_or_after(offset)?.unwrap_or(offset);
+        if self.reader.pos() != landing {
+            self.reader.reposition(landing);
+        }
+        self.generation = generation;
+        // Frames carry no timestamp of their own, so the timeline is
+        // re-anchored on the request. Without this the pts would keep
+        // counting from the frames emitted before the seek and run
+        // backwards.
+        self.frames_out =
+            micros.saturating_mul(u64::from(self.first.sample_rate)) / (1_024 * 1_000_000);
+        self.ended = false;
+        Ok(self.pts_of(self.frames_out))
     }
 
     fn duration(&self) -> Option<MediaTime> {
-        None
+        // Estimated from the byte rate, and gated on the same answer the
+        // seek is: a duration implies a working seek bar.
+        let len = self.stream_len?;
+        (self.byte_rate > 0).then(|| {
+            MediaTime::from_micros(
+                (len.saturating_sub(self.first_frame) as i64).saturating_mul(1_000_000)
+                    / self.byte_rate as i64,
+            )
+        })
     }
 
     fn audio_track(&self) -> Option<TrackId> {

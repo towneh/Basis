@@ -44,7 +44,16 @@ if ($androidTarget) {
                 Write-Host "SKIPPED: android check — no NDK found" -ForegroundColor Yellow
                 exit 0
             }
-            cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec -- -D warnings
+            # RIST rides the shipping Android build, so lint it there too
+            # when the static is staged — skipping it loudly is how the
+            # transport stayed absent from Quest while shipping elsewhere.
+            $rist = Join-Path (Get-Location) "third_party\librist\android-arm64\librist.a"
+            if (Test-Path $rist) {
+                cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec --features rist -- -D warnings
+            } else {
+                Write-Host "NOTE: android clippy without --features rist (no staged librist; run tools/build-librist-android.sh)" -ForegroundColor Yellow
+                cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec -- -D warnings
+            }
             exit $LASTEXITCODE
         } -args (Get-Location).Path
     }

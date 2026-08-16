@@ -6,7 +6,7 @@
         </engine:VisualElement>
 
         <engine:VisualElement name="TargetCard" class="bvp-card">
-            <editor:ObjectField label="Player" name="TargetPlayer" type="Basis.Media.BasisMediaPlayer, Basis.Media" allow-scene-objects="true"/>
+            <editor:ObjectField label="Player" name="TargetPlayer" type="BasisMediaPlayer, BasisMediaPlayer" allow-scene-objects="true"/>
             <engine:Label text="Enter Play Mode for live counters." name="EditModeHint" class="bvp-help-info"/>
             <engine:Label text="Diagnostics CSV" class="bvp-section-title" style="margin-top: 6px;"/>
             <engine:VisualElement name="DiagnosticsRow" class="bvp-actions-card">

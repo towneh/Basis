@@ -192,21 +192,22 @@ pub fn capabilities() -> CapabilitySet {
     let video_caps = platform_video_caps();
 
     // Audio ceilings are the adapters' real screens: AAC chan_conf 1..=6,
-    // MP3 mono/stereo, Opus mapping family 0 only, claxon's 8-channel cap.
-    // The screens hold on Android too — the demux-side AAC channel screen
-    // and the in-process Opus/FLAC floors are platform-free. Headless
-    // platforms carry only the in-process floors: AAC/MP3 ride platform
-    // decoders, which do not exist there, so listing them would be false
-    // will-decode claims.
+    // MP3 mono/stereo, Opus mapping family 0 only, claxon's 8-channel cap,
+    // and the PCM adapter's 1..=8. The screens hold on Android too — the
+    // demux-side AAC channel screen and the in-process Opus/FLAC/PCM floors
+    // are platform-free. Headless platforms carry only the in-process
+    // floors: AAC/MP3 ride platform decoders, which do not exist there, so
+    // listing them would be false will-decode claims.
     #[cfg(any(windows, target_os = "android"))]
     let audio_caps = vec![
         audio("aac", 6),
         audio("mp3", 2),
         audio("opus", 2),
         audio("flac", 8),
+        audio("pcm", 8),
     ];
     #[cfg(not(any(windows, target_os = "android")))]
-    let audio_caps = vec![audio("opus", 2), audio("flac", 8)];
+    let audio_caps = vec![audio("opus", 2), audio("flac", 8), audio("pcm", 8)];
 
     // The engine's routing table. `rist` appears iff the feature was
     // compiled in; the stub's typed refusal stays the runtime backstop.
@@ -224,7 +225,7 @@ pub fn capabilities() -> CapabilitySet {
     }
 
     let containers = [
-        "mp4", "ts", "m2ts", "mkv", "webm", "hls", "flac", "mp3", "adts", "ogg",
+        "mp4", "ts", "m2ts", "mkv", "webm", "hls", "wav", "flac", "mp3", "adts", "ogg",
     ]
     .map(String::from)
     .to_vec();

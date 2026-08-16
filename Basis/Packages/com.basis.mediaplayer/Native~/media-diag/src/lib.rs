@@ -259,8 +259,18 @@ impl CaptureRecorder {
         &self.rows
     }
 
-    pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
-        writeln!(w, "{}", Self::header())?;
+    pub fn write_csv<W: std::io::Write>(&self, w: W) -> std::io::Result<()> {
+        self.write_csv_rows(w, true)
+    }
+
+    /// As [`Self::write_csv`], with the header suppressed. Appending a
+    /// second capture to a file that already has one would otherwise put a
+    /// header row in the middle of the data, which every reader of this
+    /// format would take as a row.
+    pub fn write_csv_rows<W: std::io::Write>(&self, mut w: W, header: bool) -> std::io::Result<()> {
+        if header {
+            writeln!(w, "{}", Self::header())?;
+        }
         for row in &self.rows {
             writeln!(w, "{row}")?;
         }

@@ -1,8 +1,11 @@
 {
     "name": "BasisMediaPlayer.Editor",
-    "rootNamespace": "Basis.Media",
+    "rootNamespace": "",
     "references": [
-        "BasisMediaPlayer"
+        "BasisMediaPlayer",
+        "Basis Framework",
+        "BasisNetworkCore",
+        "BasisSDK"
     ],
     "includePlatforms": [
         "Editor"

@@ -203,8 +203,16 @@ fn bench_run(options: &Options) -> Result<RunResult, String> {
                     // Settled: a fresh present from the new timeline. The
                     // landed keyframe sits at most a GOP before the target,
                     // so the position gate separates it from stale frames.
+                    // An audio-only lane never presents (MP4 audio seeks
+                    // like any other MP4), so there the position on the new
+                    // timeline is the whole signal.
                     let position = shared.position_us.load(Ordering::Relaxed);
-                    if presented(&diag) > baseline && position >= target_us - 2_500_000 {
+                    let progressed = if px.video_active.load(Ordering::Relaxed) {
+                        presented(&diag) > baseline
+                    } else {
+                        true
+                    };
+                    if progressed && position >= target_us - 2_500_000 {
                         result.seek_settle = Some(seek_at.elapsed());
                         break;
                     }

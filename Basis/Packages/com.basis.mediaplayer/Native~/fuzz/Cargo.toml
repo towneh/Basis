@@ -63,6 +63,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "wav_stream"
+path = "fuzz_targets/wav_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "mp3_stream"
 path = "fuzz_targets/mp3_stream.rs"
 test = false

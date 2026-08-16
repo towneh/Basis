@@ -850,12 +850,12 @@ for (int i = 0; i < count; i++)
                 GroupKey = GroupMedia,
                 TitleKey = "sdk.cilbox.api.mediaPlayer.title",
                 SummaryKey = "sdk.cilbox.api.mediaPlayer.summary",
-                Requires = new[] { new CilboxApiRequirement("Basis.Media.BasisMediaPlayer", "get_Texture") },
+                Requires = new[] { new CilboxApiRequirement("BasisMediaPlayer", "get_OutputTexture") },
                 Example =
 @"// Read-only. There is no event, so poll it.
 void Update()
 {
-    Texture frame = mediaPlayer.Texture;
+    Texture frame = mediaPlayer.OutputTexture;
     if (frame != null && frame != lastFrame)
     {
         lastFrame = frame;
@@ -863,7 +863,7 @@ void Update()
     }
 }
 
-// LoadUrl, Play, Stop, Seek and CaptureScreenshot are blocked, so a scene cannot
+// Open, OpenUserUrl, Play, Pause, Seek and Close are blocked, so a scene cannot
 // step around the video URL trust prompt.",
             },
             new CilboxApiEntry

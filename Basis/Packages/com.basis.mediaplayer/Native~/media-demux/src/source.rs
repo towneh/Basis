@@ -193,6 +193,22 @@ impl SeqReader {
         self.off = (self.off + n).min(self.buf.len());
     }
 
+    /// Absolute offset of the next unread byte.
+    pub fn pos(&self) -> u64 {
+        self.start + self.off as u64
+    }
+
+    /// Move to an absolute position, discarding the window. Unlike
+    /// [`Self::seek_to`] this accepts backwards jumps of any distance, so
+    /// the source itself decides whether it can serve one — a sequential
+    /// live source fails the following read rather than here.
+    pub fn reposition(&mut self, pos: u64) {
+        self.buf.clear();
+        self.off = 0;
+        self.start = pos;
+        self.eof = false;
+    }
+
     /// Jump forward to an absolute position (tag skips); backwards jumps
     /// within the buffer are honoured, before it refused.
     pub fn seek_to(&mut self, pos: u64) -> Result<(), SourceError> {

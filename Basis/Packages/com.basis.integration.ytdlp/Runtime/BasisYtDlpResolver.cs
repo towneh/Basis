@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Basis.Integration.YtDlp.Core;
-using Basis.Media;
 using UnityEngine;
 
 namespace Basis.Integration.YtDlp
@@ -139,7 +138,7 @@ namespace Basis.Integration.YtDlp
             {
                 case YtDlpDelivery.Live: return BmLiveness.Live;
                 case YtDlpDelivery.OnDemand: return BmLiveness.Vod;
-                default: return BmLiveness.Unknown;
+                default: return BmLiveness.Auto;
             }
         }
 

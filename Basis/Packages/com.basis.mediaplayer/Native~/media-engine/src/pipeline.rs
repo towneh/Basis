@@ -141,6 +141,14 @@ pub struct PipelineShared {
     /// bypass the Bank's release schedule so the consumer gets the full
     /// pre-roll). Drop-oldest at [`CAPTION_RING`].
     pub captions: Mutex<std::collections::VecDeque<media_bitstream::CaptionCue>>,
+    /// Audio tracks the container offers instead of the bound one, filled
+    /// once the demuxer is open. Empty where there is no choice to make.
+    /// Read-mostly, so a plain mutex is right — a picker polls it, nothing
+    /// on a hot path touches it.
+    pub audio_tracks: Mutex<Vec<media_demux::AudioTrackInfo>>,
+    /// Cover art the container carried, read once at open. A property of
+    /// the file rather than the stream, like the duration.
+    pub artwork: Mutex<Option<media_demux::Artwork>>,
     /// Render-event selection state (§6.8): the render thread's
     /// clock mirror, its vsync estimate, and the consumer-liveness stamp
     /// that hands frame selection between it and the video thread.

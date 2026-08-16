@@ -523,7 +523,9 @@ impl TsDemuxer {
                     codec: AudioCodec::Pcm,
                     sample_rate: 48000,
                     channels: u32::from(channels),
-                    codec_private: vec![assign, bits_code],
+                    // Assignment + bits code + flags; bit 0 clear marks the
+                    // big-endian samples this lane carries.
+                    codec_private: vec![assign, bits_code, 0],
                 },
             ));
             self.audio_announced = true;

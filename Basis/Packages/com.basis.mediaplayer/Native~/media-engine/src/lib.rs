@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 
 use media_bank::{Bank, BankConfig, BufferDepth, Liveness};
 use media_clock::{ClockConfig, Generation, MediaClock, MediaTime};
-use media_demux::{ByteSource, DemuxError, DemuxLimits, SourceError};
+use media_demux::{ByteSource, DemuxError, DemuxLimits, DemuxOptions, SourceError};
 use media_diag::{EventCode, SessionDiag, Stage};
 use media_io::{AllowAllGate, FileSource, HttpSource, IoError, IoLimits, PublicAddressGate};
 
@@ -176,17 +176,21 @@ pub struct SessionShared {
     pub(crate) stop: AtomicBool,
 }
 
-/// Liveness as the descriptor states it (§6.11): the resolver knows, the
-/// engine never infers from transport quirks.
+/// Liveness (§6.11). Every transport bar bare http(s) settles this
+/// itself — RTSP/WHEP/RIST force Live, HLS takes it from the playlist,
+/// a resolver states it — so the descriptor field exists for the one
+/// case left: a plain HTTP URL that is not a playlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceLiveness {
+    /// Force the live path: lag the edge, never read ahead.
     Live,
+    /// Force the on-demand path: read ahead and seek.
     Vod,
-    /// The descriptor did not say. Treated as VOD (read-ahead); a live
-    /// source misdeclared as VOD still plays, it just banks by reading
-    /// ahead of the edge rather than lagging it.
+    /// Work it out from the source's own answer — finite and rangeable
+    /// is on-demand, anything else is a live edge. The default, and the
+    /// right answer for everything except a server whose headers lie.
     #[default]
-    Unknown,
+    Auto,
 }
 
 /// Decode-route preference (§6.7): a per-user machine setting, never
@@ -227,6 +231,13 @@ pub struct OpenRequest {
     /// `None` = Auto (the M1 sizing model's default).
     pub buffer_depth_ms: Option<u32>,
     pub liveness: SourceLiveness,
+    /// Which of the container's audio tracks to bind, as an index into
+    /// the offered list. Switching track re-opens the session at the
+    /// current position, so this is only ever read at open. Out of range
+    /// falls back to the first track with a note rather than failing —
+    /// an index remembered across a source change must not break
+    /// playback.
+    pub audio_track: usize,
     /// Audio-leading start (descriptor-stated, live lanes only): the
     /// session starts audible the moment banked audio is ready instead
     /// of gating presentation on the first video frame — for sources
@@ -242,6 +253,10 @@ pub struct OpenRequest {
     /// the recorder themselves (the managed ABI; bm-probe polls it
     /// in-process instead). `None` = off.
     pub diag_csv: Option<std::path::PathBuf>,
+    /// Append each session's capture to `diag_csv` instead of replacing it.
+    /// A session that opens and closes repeatedly — a player going dormant
+    /// and waking — otherwise leaves only the last one behind.
+    pub diag_csv_append: bool,
     /// Shared-playback divergence bound on live lanes (§8.5): the
     /// furthest behind the live edge this viewer may sit, applied as a
     /// ceiling on the Bank's lag cap (and so on Auto's depth growth).
@@ -262,8 +277,10 @@ impl OpenRequest {
             allow_local_addresses: false,
             buffer_depth_ms: None,
             liveness: SourceLiveness::default(),
+            audio_track: 0,
             audio_leading: false,
             diag_csv: None,
+            diag_csv_append: false,
             max_divergence_ms: None,
             decode_preference: DecodePreference::default(),
         }
@@ -317,7 +334,10 @@ impl Session {
         let bank_cfg = BankConfig {
             liveness: match request.liveness {
                 SourceLiveness::Live => Liveness::Live,
-                SourceLiveness::Vod | SourceLiveness::Unknown => Liveness::Vod,
+                // Auto is seeded on-demand and re-decided once the source
+                // has answered, the way the HLS lane re-decides from its
+                // playlist.
+                SourceLiveness::Vod | SourceLiveness::Auto => Liveness::Vod,
             },
             depth: match request.buffer_depth_ms {
                 Some(ms) => BufferDepth::Millis(ms),
@@ -374,6 +394,8 @@ impl Session {
             decode_preference: request.decode_preference,
             presentation_origin_us: AtomicI64::new(i64::MIN),
             captions: Mutex::new(std::collections::VecDeque::new()),
+            audio_tracks: Mutex::new(Vec::new()),
+            artwork: Mutex::new(None),
             present: present::PresentShared::new(),
             sync: sync::SyncShared::default(),
             sync_rate_ppm: AtomicI64::new(0),
@@ -389,9 +411,10 @@ impl Session {
         let threads = Arc::new(Mutex::new(Vec::new()));
         if let Some(path) = request.diag_csv.take() {
             let sampler_px = Arc::clone(&px);
+            let append = request.diag_csv_append;
             let sampler = std::thread::Builder::new()
                 .name("bm-diag".into())
-                .spawn(move || run_diag_sampler(sampler_px, path))
+                .spawn(move || run_diag_sampler(sampler_px, path, append))
                 .expect("spawn diag sampler thread");
             threads.lock().expect("threads lock").push(sampler);
         }
@@ -468,6 +491,28 @@ impl Session {
     /// each is the full displayed text as of its PTS (empty = display
     /// cleared). Surfaced on arrival — the consumer schedules display
     /// against the session position.
+    /// The audio tracks the source offers instead of the bound one, in
+    /// container order. Empty where there is nothing to choose between.
+    /// Switching is a re-open with `OpenRequest::audio_track` set, so this
+    /// is stable for the life of the session.
+    pub fn audio_tracks(&self) -> Vec<media_demux::AudioTrackInfo> {
+        self.pipeline()
+            .audio_tracks
+            .lock()
+            .expect("audio tracks lock")
+            .clone()
+    }
+
+    /// Cover art the container carried, where it carried one. The bytes
+    /// are compressed exactly as stored — the caller decodes them.
+    pub fn artwork(&self) -> Option<media_demux::Artwork> {
+        self.pipeline()
+            .artwork
+            .lock()
+            .expect("artwork lock")
+            .clone()
+    }
+
     pub fn drain_captions(px: &PipelineShared, max: usize) -> Vec<media_bitstream::CaptionCue> {
         let mut ring = px.captions.lock().expect("captions lock");
         let n = ring.len().min(max);
@@ -544,15 +589,25 @@ pub(crate) fn seek_px(px: &PipelineShared, to: MediaTime) {
 
 /// The engine-owned capture-recorder loop behind `OpenRequest::diag_csv`:
 /// sample every 100 ms until the session stops, then write the CSV.
-fn run_diag_sampler(px: Arc<PipelineShared>, path: std::path::PathBuf) {
+fn run_diag_sampler(px: Arc<PipelineShared>, path: std::path::PathBuf, append: bool) {
     let mut recorder = media_diag::CaptureRecorder::default();
     while !px.shared.stop.load(Ordering::Relaxed) {
         recorder.sample(px.wall.now(), &px.diag);
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     recorder.sample(px.wall.now(), &px.diag);
-    let written = std::fs::File::create(&path)
-        .and_then(|file| recorder.write_csv(std::io::BufWriter::new(file)));
+    // Only the first capture into a given file carries the header; a later
+    // one appends rows to it. An append to a file that is missing or empty
+    // still needs one, so this asks the filesystem rather than assuming.
+    let existing = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let header = !append || existing == 0;
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(&path)
+        .and_then(|file| recorder.write_csv_rows(std::io::BufWriter::new(file), header));
     if let Err(e) = written {
         eprintln!("[basis-media] diag csv {}: {e}", path.display());
     }
@@ -626,6 +681,102 @@ fn open_hls(
         }
         Err(e) => px.fail(EngineError::demux(e)),
     }
+}
+
+/// The live HTTP lane: build the streaming source once and sniff it — an
+/// HLS playlist routes to the HLS lane, anything else gets the resilience
+/// path, a factory that rebuilds source + demuxer when the demux thread
+/// sees transport loss.
+fn open_http_live(
+    px: Arc<PipelineShared>,
+    url: &str,
+    allow_local: bool,
+    bank_cfg: BankConfig,
+    threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    options: DemuxOptions,
+) {
+    let gate: Arc<dyn media_io::AddressGate> = if allow_local {
+        Arc::new(AllowAllGate)
+    } else {
+        Arc::new(PublicAddressGate)
+    };
+    let source = match media_io::HttpLiveSource::open(
+        url,
+        IoLimits::default(),
+        gate,
+        px.io_cancel.clone(),
+    ) {
+        Ok(source) => source,
+        Err(e) => {
+            px.fail(EngineError::io(e));
+            return;
+        }
+    };
+    let mut counted = CountedSource {
+        inner: source,
+        diag: Arc::clone(&px.diag),
+    };
+    let mut head = [0u8; 1024];
+    let filled = match read_head(&mut counted, &mut head) {
+        Ok(filled) => filled,
+        Err(e) => {
+            px.fail(EngineError::demux(DemuxError::Source(e)));
+            return;
+        }
+    };
+    if media_hls::looks_like_playlist(&head[..filled]) {
+        match read_all(&mut counted, PLAYLIST_CAP) {
+            Ok(playlist) => {
+                open_hls(px, url, playlist, allow_local, bank_cfg, threads);
+            }
+            Err(e) => px.fail(EngineError::demux(DemuxError::Source(e))),
+        }
+        return;
+    }
+    let demuxer = match media_demux::open_auto_with(
+        Box::new(counted),
+        DemuxLimits::default(),
+        Generation(0),
+        &options,
+    ) {
+        Ok(demuxer) => demuxer,
+        Err(e) => {
+            px.fail(EngineError::demux(e));
+            return;
+        }
+    };
+    let reconnect_factory: pipeline::DemuxFactory = {
+        let px = Arc::clone(&px);
+        let url = url.to_string();
+        let options = options.clone();
+        Box::new(move || {
+            let gate: Arc<dyn media_io::AddressGate> = if allow_local {
+                Arc::new(AllowAllGate)
+            } else {
+                Arc::new(PublicAddressGate)
+            };
+            let source = media_io::HttpLiveSource::open(
+                &url,
+                IoLimits::default(),
+                gate,
+                px.io_cancel.clone(),
+            )
+            .map_err(EngineError::io)?;
+            let counted = CountedSource {
+                inner: source,
+                diag: Arc::clone(&px.diag),
+            };
+            let generation = px.bank.bank.lock().expect("bank lock").generation();
+            media_demux::open_auto_with(
+                Box::new(counted),
+                DemuxLimits::default(),
+                generation,
+                &options,
+            )
+            .map_err(EngineError::demux)
+        })
+    };
+    finish_open(px, demuxer, bank_cfg, Some(reconnect_factory), threads);
 }
 
 /// RTSP lane: always live, UDP negotiated first for `rtsp://` (media-rtp
@@ -777,6 +928,7 @@ fn open_rist(
     allow_local: bool,
     mut bank_cfg: BankConfig,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    options: DemuxOptions,
 ) {
     bank_cfg.liveness = Liveness::Live;
     let gate: Arc<dyn media_io::AddressGate> = if allow_local {
@@ -829,7 +981,12 @@ fn open_rist(
         inner: Box::new(source) as Box<dyn ByteSource>,
         diag: Arc::clone(&px.diag),
     };
-    match media_demux::open_auto(Box::new(counted), DemuxLimits::default(), Generation(0)) {
+    match media_demux::open_auto_with(
+        Box::new(counted),
+        DemuxLimits::default(),
+        Generation(0),
+        &options,
+    ) {
         Ok(demuxer) => finish_open(px, demuxer, bank_cfg, None, threads),
         Err(e) => px.fail(EngineError::demux(e)),
     }
@@ -845,6 +1002,9 @@ fn open_and_run(
     let diag = Arc::clone(&px.diag);
     let url = request.url.clone();
     let is_http = url.starts_with("http://") || url.starts_with("https://");
+    let options = DemuxOptions {
+        audio_track: request.audio_track,
+    };
 
     // A separate audio leg is only meaningful where the primary is an
     // on-demand byte stream. Every live transport carries both tracks in
@@ -875,119 +1035,61 @@ fn open_and_run(
     }
 
     if source_override.is_none() && url.starts_with("rist://") {
-        open_rist(px, &url, request.allow_local_addresses, bank_cfg, threads);
-        return;
-    }
-
-    // Live HTTP lanes: build the streaming source once, sniff — an HLS
-    // playlist routes to the HLS lane, anything else gets the TS-style
-    // resilience path (a factory that rebuilds source + demuxer, driven
-    // by the demux thread on transport loss).
-    if source_override.is_none() && is_http && request.liveness == SourceLiveness::Live {
-        let gate: Arc<dyn media_io::AddressGate> = if request.allow_local_addresses {
-            Arc::new(AllowAllGate)
-        } else {
-            Arc::new(PublicAddressGate)
-        };
-        let source = match media_io::HttpLiveSource::open(
+        open_rist(
+            px,
             &url,
-            IoLimits::default(),
-            gate,
-            px.io_cancel.clone(),
-        ) {
-            Ok(source) => source,
-            Err(e) => {
-                px.fail(EngineError::io(e));
-                return;
-            }
-        };
-        let mut counted = CountedSource {
-            inner: source,
-            diag: Arc::clone(&diag),
-        };
-        let mut head = [0u8; 1024];
-        let filled = match read_head(&mut counted, &mut head) {
-            Ok(filled) => filled,
-            Err(e) => {
-                px.fail(EngineError::demux(DemuxError::Source(e)));
-                return;
-            }
-        };
-        if media_hls::looks_like_playlist(&head[..filled]) {
-            match read_all(&mut counted, PLAYLIST_CAP) {
-                Ok(playlist) => {
-                    open_hls(
-                        px,
-                        &url,
-                        playlist,
-                        request.allow_local_addresses,
-                        bank_cfg,
-                        threads,
-                    );
-                }
-                Err(e) => px.fail(EngineError::demux(DemuxError::Source(e))),
-            }
-            return;
-        }
-        let demuxer = match media_demux::open_auto(
-            Box::new(counted),
-            DemuxLimits::default(),
-            Generation(0),
-        ) {
-            Ok(demuxer) => demuxer,
-            Err(e) => {
-                px.fail(EngineError::demux(e));
-                return;
-            }
-        };
-        let reconnect_factory: pipeline::DemuxFactory = {
-            let px = Arc::clone(&px);
-            let url = url.clone();
-            let allow_local = request.allow_local_addresses;
-            Box::new(move || {
-                let gate: Arc<dyn media_io::AddressGate> = if allow_local {
-                    Arc::new(AllowAllGate)
-                } else {
-                    Arc::new(PublicAddressGate)
-                };
-                let source = media_io::HttpLiveSource::open(
-                    &url,
-                    IoLimits::default(),
-                    gate,
-                    px.io_cancel.clone(),
-                )
-                .map_err(EngineError::io)?;
-                let counted = CountedSource {
-                    inner: source,
-                    diag: Arc::clone(&px.diag),
-                };
-                let generation = px.bank.bank.lock().expect("bank lock").generation();
-                media_demux::open_auto(Box::new(counted), DemuxLimits::default(), generation)
-                    .map_err(EngineError::demux)
-            })
-        };
-        finish_open(px, demuxer, bank_cfg, Some(reconnect_factory), threads);
+            request.allow_local_addresses,
+            bank_cfg,
+            threads,
+            options,
+        );
         return;
     }
 
+    // Live HTTP lanes take the resilience path: a streaming source plus a
+    // factory that rebuilds source + demuxer on transport loss.
+    if source_override.is_none() && is_http && request.liveness == SourceLiveness::Live {
+        open_http_live(
+            px,
+            &url,
+            request.allow_local_addresses,
+            bank_cfg,
+            threads,
+            options,
+        );
+        return;
+    }
+
+    // Set by the HTTP arm below when the source reads as a live edge and
+    // the request left the call to us.
+    let mut inferred_live = false;
     let source: Box<dyn ByteSource> = if let Some(source) = source_override {
         Box::new(CountedSource {
             inner: source,
             diag: Arc::clone(&diag),
         })
     } else if is_http {
-        // Live HTTP took the factory path above; this is the ranged VOD
-        // source.
+        // Declared-live HTTP took the factory path above; this is the
+        // ranged on-demand source, which is also the probe that settles
+        // Auto.
         let gate: Arc<dyn media_io::AddressGate> = if request.allow_local_addresses {
             Arc::new(AllowAllGate)
         } else {
             Arc::new(PublicAddressGate)
         };
         match HttpSource::open(&url, IoLimits::default(), gate) {
-            Ok(source) => Box::new(CountedSource {
-                inner: source,
-                diag: Arc::clone(&diag),
-            }),
+            Ok(source) => {
+                // A split session is an on-demand shape by construction
+                // (the resolver states liveness for those), so the audio
+                // leg's own source keeps the declared answer.
+                inferred_live = request.liveness == SourceLiveness::Auto
+                    && request.audio_url.is_none()
+                    && !source.is_seekable();
+                Box::new(CountedSource {
+                    inner: source,
+                    diag: Arc::clone(&diag),
+                })
+            }
             Err(e) => {
                 px.fail(EngineError::io(e));
                 return;
@@ -1040,7 +1142,37 @@ fn open_and_run(
             return;
         }
     }
-    let demuxer = match media_demux::open_auto(source, DemuxLimits::default(), Generation(0)) {
+    // Not a playlist, and the source answered as a live edge: hand it to
+    // the live lane, which brings the read-stall timeout, the cancel token
+    // and the reconnect factory a live source needs. Costs one extra
+    // connect on live lanes that left this on Auto; on-demand — the common
+    // case — pays nothing.
+    if inferred_live {
+        drop(source);
+        px.diag.event(
+            px.wall.now(),
+            EventCode::CapabilityProbe,
+            Stage::Source,
+            format!(
+                "liveness inferred Live for {url}: the source states neither a usable length nor byte ranges"
+            ),
+        );
+        open_http_live(
+            px,
+            &url,
+            request.allow_local_addresses,
+            bank_cfg,
+            threads,
+            options,
+        );
+        return;
+    }
+    let demuxer = match media_demux::open_auto_with(
+        source,
+        DemuxLimits::default(),
+        Generation(0),
+        &options,
+    ) {
         Ok(demuxer) => demuxer,
         Err(e) => {
             px.fail(EngineError::demux(e));
@@ -1140,6 +1272,10 @@ fn finish_open_split(
             note,
         );
     }
+    // What a picker can offer instead of the bound track. Empty unless the
+    // container carries more than one audio track.
+    *px.audio_tracks.lock().expect("audio tracks lock") = demuxer.audio_tracks();
+    *px.artwork.lock().expect("artwork lock") = demuxer.artwork().cloned();
     if let Some(duration) = demuxer.duration() {
         px.shared
             .duration_us

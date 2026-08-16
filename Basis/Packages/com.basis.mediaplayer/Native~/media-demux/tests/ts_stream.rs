@@ -113,8 +113,9 @@ fn m2ts_lpcm_announces_and_flows() {
     assert_eq!(codec, AudioCodec::Pcm);
     assert_eq!(sample_rate, 48000);
     assert_eq!(channels, 2);
-    // [channel_assignment, bits_code]: stereo is assignment 3; 16-bit is 1.
-    assert_eq!(codec_private, vec![3, 1]);
+    // [channel_assignment, bits_code, flags]: stereo is assignment 3,
+    // 16-bit is 1, and flags bit 0 clear says the samples are big-endian.
+    assert_eq!(codec_private, vec![3, 1, 0]);
     assert!(
         events
             .iter()

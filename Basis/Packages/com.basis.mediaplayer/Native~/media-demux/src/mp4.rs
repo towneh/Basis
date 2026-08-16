@@ -13,7 +13,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use media_clock::{Generation, MediaTime};
 
-use crate::demuxer::{DemuxLimits, Demuxer};
+use crate::demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer};
 use crate::source::{ByteSource, SourceReader};
 use crate::{Au, AudioCodec, DemuxError, EosReason, Format, StreamEvent, TrackId, VideoCodec};
 
@@ -63,6 +63,9 @@ pub struct Mp4Demuxer {
     aidx: usize,
     notes: Vec<String>,
     emit_raw_video: bool,
+    audio_tracks: Vec<AudioTrackInfo>,
+    /// Cover art from `moov/udta/meta/ilst/covr`.
+    artwork: Option<crate::Artwork>,
 }
 
 impl Mp4Demuxer {
@@ -70,6 +73,15 @@ impl Mp4Demuxer {
         src: Box<dyn ByteSource>,
         limits: DemuxLimits,
         generation: Generation,
+    ) -> Result<Self, DemuxError> {
+        Self::open_with(src, limits, generation, &DemuxOptions::default())
+    }
+
+    pub fn open_with(
+        src: Box<dyn ByteSource>,
+        limits: DemuxLimits,
+        generation: Generation,
+        options: &DemuxOptions,
     ) -> Result<Self, DemuxError> {
         // Cached reads: the box walk revisits headers and fragmented
         // files interleave per-track sample runs, both of which thrash a
@@ -111,8 +123,10 @@ impl Mp4Demuxer {
             aidx: 0,
             notes: Vec::new(),
             emit_raw_video: false,
+            audio_tracks: Vec::new(),
+            artwork: artwork_from_moov(&mp4),
         };
-        this.extract_tracks(&mp4)?;
+        this.extract_tracks(&mp4, options)?;
 
         if this.video.is_none() && this.audio.is_none() {
             return Err(DemuxError::Unsupported(
@@ -144,8 +158,41 @@ impl Mp4Demuxer {
         self.audio.as_ref().map(|a| a.id)
     }
 
-    fn extract_tracks(&mut self, mp4: &re_mp4::Mp4) -> Result<(), DemuxError> {
+    fn extract_tracks(
+        &mut self,
+        mp4: &re_mp4::Mp4,
+        options: &DemuxOptions,
+    ) -> Result<(), DemuxError> {
         let mut duration = MediaTime::ZERO;
+
+        // The audio tracks a caller could pick between, in container
+        // order, before any of them is bound. Only offered when there is
+        // more than one: a picker with a single entry is not a choice.
+        let audio_ids: Vec<u32> = mp4
+            .tracks()
+            .iter()
+            .filter(|(_, track)| track.kind == Some(re_mp4::TrackKind::Audio))
+            .map(|(id, _)| *id)
+            .collect();
+        // Bind the requested track, or the first when the index is out of
+        // range; an undecodable choice falls through to the next below.
+        if audio_ids.len() > 1 {
+            self.audio_tracks = audio_ids
+                .iter()
+                .filter_map(|id| {
+                    let track = mp4.tracks().get(id)?;
+                    Some(describe_audio(mp4, track, TrackId(*id)))
+                })
+                .collect();
+        }
+        let wanted = audio_ids.get(options.audio_track).copied();
+        if wanted.is_none() && options.audio_track != 0 {
+            self.notes.push(format!(
+                "audio track {} requested, container has {}; using the first",
+                options.audio_track,
+                audio_ids.len()
+            ));
+        }
 
         for (id, track) in mp4.tracks() {
             let track_id = TrackId(*id);
@@ -156,7 +203,13 @@ impl Mp4Demuxer {
                         None => continue,
                     }
                 }
-                Some(re_mp4::TrackKind::Audio) if self.audio.is_none() => {
+                // Skip past the unwanted tracks until the chosen one is
+                // reached; if that one turns out undecodable the next
+                // decodable track takes over, which is why this is not an
+                // equality test.
+                Some(re_mp4::TrackKind::Audio)
+                    if self.audio.is_none() && wanted.is_none_or(|w| *id >= w) =>
+                {
                     if self.extract_audio(mp4, track, track_id).is_none() {
                         continue;
                     }
@@ -455,6 +508,69 @@ impl Mp4Demuxer {
     }
 }
 
+/// What a picker needs to show for one audio track, read straight from
+/// the container rather than from a bound decoder — a track that is never
+/// selected still has to be describable.
+fn describe_audio(mp4: &re_mp4::Mp4, track: &re_mp4::Track, id: TrackId) -> AudioTrackInfo {
+    let trak = track.trak(mp4);
+    // ISO 639-2/T, with the unset marker spelled out rather than shown.
+    let language = match trak.mdia.mdhd.language.as_str() {
+        "und" | "" => None,
+        other => Some(other.to_string()),
+    };
+    let (sample_rate, channels) = match &trak.mdia.minf.stbl.stsd.contents {
+        re_mp4::StsdBoxContent::Mp4a(mp4a) => {
+            let rate = mp4a
+                .esds
+                .as_ref()
+                .and_then(|esds| {
+                    AAC_RATES
+                        .get(esds.es_desc.dec_config.dec_specific.freq_index as usize)
+                        .copied()
+                })
+                .unwrap_or_else(|| u32::from(mp4a.samplerate.value()));
+            (rate, u32::from(mp4a.channelcount))
+        }
+        _ => (0, 0),
+    };
+    AudioTrackInfo {
+        id,
+        language,
+        label: None,
+        codec: AudioCodec::Aac,
+        sample_rate,
+        channels,
+    }
+}
+
+/// Cover art from the iTunes-style metadata atom. The box parser already
+/// walks `udta`, so this reads what it found rather than opening a second
+/// path through the same untrusted bytes.
+fn artwork_from_moov(mp4: &re_mp4::Mp4) -> Option<crate::Artwork> {
+    let udta = mp4.moov.udta.as_ref()?;
+    let re_mp4::MetaBox::Mdir { ilst } = udta.meta.as_ref()? else {
+        return None;
+    };
+    let item = ilst.as_ref()?.items.get(&re_mp4::MetadataKey::Poster)?;
+    let data = &item.data.data;
+    if data.is_empty() || data.len() > crate::artwork::MAX_ARTWORK_BYTES {
+        return None;
+    }
+    // `covr` states only "image"; the format is in the bytes, so it is
+    // sniffed rather than trusted.
+    let mime = if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if data.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else {
+        return None;
+    };
+    Some(crate::Artwork {
+        mime: mime.to_string(),
+        data: data.clone(),
+    })
+}
+
 impl Demuxer for Mp4Demuxer {
     fn next_event(&mut self) -> Result<StreamEvent, DemuxError> {
         if let Some(event) = self.pending.pop_front() {
@@ -541,6 +657,14 @@ impl Demuxer for Mp4Demuxer {
 
     fn audio_track(&self) -> Option<TrackId> {
         Mp4Demuxer::audio_track(self)
+    }
+
+    fn audio_tracks(&self) -> Vec<AudioTrackInfo> {
+        self.audio_tracks.clone()
+    }
+
+    fn artwork(&self) -> Option<&crate::Artwork> {
+        self.artwork.as_ref()
     }
 
     fn take_notes(&mut self) -> Vec<String> {

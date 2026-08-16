@@ -91,6 +91,14 @@ pub struct HttpSource {
     limits: IoLimits,
     len: Option<u64>,
     ranges: bool,
+    /// Whether the server will serve byte ranges at all, which is a wider
+    /// question than [`Self::ranges`]: that one records a 206 we actually
+    /// got and so drives the reads, while a server can answer 200 to a
+    /// range request and still advertise `Accept-Ranges: bytes`.
+    rangeable: bool,
+    /// Whether the response stated any length — the total, or just this
+    /// body's. Chunked delivery with no length at all is the live shape.
+    finite: bool,
     stream: Option<StreamState>,
 }
 
@@ -152,7 +160,12 @@ impl HttpSource {
             }
 
             if status == 206 {
+                // On a 206 the total can only come from Content-Range: a
+                // range-capping proxy makes Content-Length the part, not
+                // the whole. A 206 that states no total still paces as
+                // on-demand, it just reports an unknown size.
                 let len = content_range_total(&response);
+                let finite = len.is_some() || response.content_length().is_some();
                 let end = response.content_length().map(|n| n.min(limits.chunk_bytes));
                 return Ok(Self {
                     client,
@@ -160,6 +173,8 @@ impl HttpSource {
                     limits,
                     len,
                     ranges: true,
+                    rangeable: true,
+                    finite,
                     stream: Some(StreamState {
                         response,
                         pos: 0,
@@ -171,6 +186,13 @@ impl HttpSource {
             // No range support: switch to an untimed client so the one
             // long-lived body is not cut off by the request timeout.
             let len = response.content_length();
+            // A server can decline this range request and still honour
+            // ranges generally; the advertised header is the second arm.
+            let advertises_ranges = response
+                .headers()
+                .get("accept-ranges")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"));
             drop(response);
             let client = build_pinned_client(&current, &limits, gate.as_ref(), false)?;
             let response = client
@@ -184,12 +206,15 @@ impl HttpSource {
                     detail: format!("GET {current}"),
                 });
             }
+            let len = len.or(response.content_length());
             return Ok(Self {
                 client,
                 url: current,
                 limits,
-                len: len.or(response.content_length()),
+                len,
                 ranges: false,
+                rangeable: advertises_ranges,
+                finite: len.is_some(),
                 stream: Some(StreamState {
                     response,
                     pos: 0,
@@ -206,6 +231,15 @@ impl HttpSource {
     /// The URL the source actually reads from (after redirects).
     pub fn final_url(&self) -> &Url {
         &self.url
+    }
+
+    /// Whether this source reads as on-demand rather than a live edge:
+    /// finite and rangeable. A known total is deliberately not required —
+    /// that is a separate question from whether the source can be paced
+    /// and seeked, and demanding one misclassifies servers that serve
+    /// ranges without stating a total.
+    pub fn is_seekable(&self) -> bool {
+        self.finite && self.rangeable
     }
 
     fn reopen_at(&mut self, offset: u64) -> Result<(), IoError> {

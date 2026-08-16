@@ -43,6 +43,7 @@ pub fn run(url: &str, decode: bool, allow_local: bool) -> ExitCode {
             Some(ContainerKind::Ogg) => "ogg",
             Some(ContainerKind::Mp3) => "mp3",
             Some(ContainerKind::Adts) => "adts",
+            Some(ContainerKind::Wav) => "wav",
             None => "unknown",
         }
     );

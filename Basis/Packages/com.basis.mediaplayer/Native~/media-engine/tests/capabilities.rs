@@ -115,8 +115,9 @@ fn built_set_matches_this_build() {
     assert_eq!(channels("mp3"), Some(2));
     assert_eq!(channels("opus"), Some(2));
     assert_eq!(channels("flac"), Some(8));
-    // No LPCM adapter yet — a pcm entry would be a false will-decode claim.
-    assert_eq!(channels("pcm"), None);
+    // Integer PCM: RIFF/WAVE and the LPCM carried in MPEG-TS, one adapter,
+    // 1..=8 channels.
+    assert_eq!(channels("pcm"), Some(8));
 
     let scheme = |s: &str| set.transports.iter().any(|t| t.scheme == s);
     for s in ["file", "http", "https", "rtsp", "rtspt"] {
@@ -125,7 +126,7 @@ fn built_set_matches_this_build() {
     assert_eq!(scheme("rist"), cfg!(feature = "rist"));
 
     for c in [
-        "mp4", "ts", "m2ts", "mkv", "webm", "hls", "flac", "mp3", "adts", "ogg",
+        "mp4", "ts", "m2ts", "mkv", "webm", "hls", "wav", "flac", "mp3", "adts", "ogg",
     ] {
         assert!(set.containers.iter().any(|x| x == c), "{c}");
     }
@@ -166,7 +167,9 @@ fn built_set_matches_this_build() {
     };
     assert_eq!(channels("opus"), Some(2));
     assert_eq!(channels("flac"), Some(8));
-    for absent in ["aac", "mp3", "pcm"] {
+    // PCM needs no platform decoder, so it is present here too.
+    assert_eq!(channels("pcm"), Some(8));
+    for absent in ["aac", "mp3"] {
         assert_eq!(channels(absent), None, "{absent}");
     }
 

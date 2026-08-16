@@ -1,11 +1,16 @@
 {
     "name": "BasisMediaPlayer",
-    "rootNamespace": "Basis.Media",
+    "rootNamespace": "",
     "references": [
         "Basis Framework",
         "BasisCommon",
+        "BasisEventDriver",
         "BasisDebug",
         "BasisSettings",
+        "BasisNetworkCore",
+        "BasisSDK",
+        "Unity.Addressables",
+        "Unity.ResourceManager",
         "UnityEngine.UI",
         "Unity.TextMeshPro"
     ],

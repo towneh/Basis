@@ -625,3 +625,53 @@ fn sync_target_slews_the_wall_clock_on_video_only() {
     assert_eq!(px.clock.lock().unwrap().rate_ppm(), 0);
     session.close();
 }
+
+/// `diag_csv_append` keeps every session's capture in one file instead of the
+/// last one only — the shape a player that goes dormant and wakes needs. The
+/// header belongs to the file, not to each capture, so a second run adds rows
+/// and nothing else: a header row in the middle would read as data to anything
+/// consuming this format.
+#[test]
+fn diag_csv_appends_without_a_second_header() {
+    let dir = std::env::temp_dir().join(format!("bm-diag-append-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("capture.csv");
+    let _ = std::fs::remove_file(&path);
+
+    let run = || {
+        let mut request = OpenRequest::new(fixture_path());
+        request.diag_csv = Some(path.clone());
+        request.diag_csv_append = true;
+        let mut session = Session::open(request);
+        let shared = session.shared().clone();
+        assert!(
+            wait_for(Duration::from_secs(10), || {
+                shared.state.load(Ordering::Relaxed) == State::Playing as u32
+            }),
+            "never reached Playing"
+        );
+        std::thread::sleep(Duration::from_millis(600));
+        session.close();
+        std::fs::read_to_string(&path).expect("csv written on close")
+    };
+
+    let first = run();
+    let first_lines = first.lines().count();
+    assert!(first_lines > 1, "first run wrote no rows");
+
+    let second = run();
+    let header = media_diag::CaptureRecorder::header();
+    assert_eq!(
+        second.lines().filter(|l| *l == header).count(),
+        1,
+        "the header belongs to the file, once"
+    );
+    assert!(
+        second.lines().count() > first_lines,
+        "the second run replaced the first instead of appending"
+    );
+    // The first run's rows survive verbatim.
+    assert!(second.starts_with(&first), "earlier rows were rewritten");
+
+    let _ = std::fs::remove_file(&path);
+}

@@ -31,6 +31,38 @@
       "value": "Software only"
     },
     {
+      "key": "settings.media.maxActive",
+      "value": "Media players at once"
+    },
+    {
+      "key": "settings.media.maxActive.tooltip",
+      "value": "How many media players may play at once. The furthest ones stop and start again when you go back to them. 0 removes the limit, which on a headset will cost you bandwidth and frame rate."
+    },
+    {
+      "key": "settings.media.bufferDepth",
+      "value": "Default buffer depth (ms)"
+    },
+    {
+      "key": "settings.media.bufferDepth.tooltip",
+      "value": "How much media is held back before playing, to ride out a patchy connection. Applies to every media player you have not tuned individually from the Media Players panel. 0 is Auto, which works it out from the connection and is the right answer for almost everyone. Raising it makes playback steadier and slower to start."
+    },
+    {
+      "key": "settings.media.captions",
+      "value": "Captions on by default"
+    },
+    {
+      "key": "settings.media.captions.tooltip",
+      "value": "Whether captions are drawn on a media player you have not decided individually. Any one player can be switched on or off from the Media Players panel without changing this."
+    },
+    {
+      "key": "settings.media.captionTextOpacity",
+      "value": "Default caption text opacity"
+    },
+    {
+      "key": "settings.media.captionBackgroundOpacity",
+      "value": "Default caption background opacity"
+    },
+    {
       "key": "settings.media.engine.title",
       "value": "Engine"
     },

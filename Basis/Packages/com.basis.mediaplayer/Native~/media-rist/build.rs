@@ -23,6 +23,7 @@ fn main() {
     ) {
         (Ok("windows"), Ok("x86_64")) => "win-x64",
         (Ok("linux"), Ok("x86_64")) => "linux-x64",
+        (Ok("android"), Ok("aarch64")) => "android-arm64",
         (os, arch) => panic!("media-rist/librist: no staged librist for {os:?}/{arch:?}"),
     };
 
@@ -32,12 +33,18 @@ fn main() {
     } else {
         "librist.a"
     };
+    let builder = match rid {
+        "win-x64" => "tools/build-librist.ps1",
+        "android-arm64" => "tools/build-librist-android.sh",
+        _ => "tools/build-librist.sh",
+    };
     assert!(
         lib_dir.join(lib_name).exists(),
         "media-rist/librist: {} not found in {}. Build it from source first: \
-         run tools/build-librist.ps1 (see that script's header).",
+         run {} (see that script's header).",
         lib_name,
-        lib_dir.display()
+        lib_dir.display(),
+        builder
     );
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());

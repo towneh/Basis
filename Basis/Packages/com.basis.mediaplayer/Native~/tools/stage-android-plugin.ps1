@@ -14,9 +14,19 @@ if ($env:BM_ANDROID_ENV_OK -ne "1") {
     exit 1
 }
 
+# The shipping build carries RIST, so the staged binary must too — a
+# feature that is on for Windows and Linux and off here would refuse
+# rist:// on Quest alone. Needs the static staged first; see that script.
+$rist = Join-Path $root "third_party\librist\android-arm64\librist.a"
+if (-not (Test-Path $rist)) {
+    Write-Host "stage-android-plugin: no staged librist for android-arm64." -ForegroundColor Red
+    Write-Host "  Build it first:  bash tools/build-librist-android.sh" -ForegroundColor Red
+    exit 1
+}
+
 Push-Location $root
 try {
-    cargo build --target aarch64-linux-android -p media-ffi --release
+    cargo build --target aarch64-linux-android -p media-ffi --release --features rist
     if ($LASTEXITCODE -ne 0) { exit 1 }
 } finally {
     Pop-Location

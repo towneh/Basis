@@ -18411,6 +18411,62 @@
     {
       "key": "settings.graphics.renderer.restart.later",
       "value": "Later"
+    },
+    {
+      "key": "mediaPlayer.bufferDepth",
+      "value": "Buffer depth (ms)"
+    },
+    {
+      "key": "mediaPlayer.bufferDepth.description",
+      "value": "How much video this player holds back before playing, so a patchy connection does not stutter. Set it per player: a stream from nearby can run shallow and stay responsive, while one from the other side of the world plays better with more behind it. 0 lets the player work it out. Changing it reloads that player, for you only."
+    },
+    {
+      "key": "settings.media.title",
+      "value": "Media Player"
+    },
+    {
+      "key": "settings.media.description",
+      "value": "How this machine plays video. These describe your computer rather than the world you are in, so they apply everywhere and are not saved into anything you build."
+    },
+    {
+      "key": "settings.media.decode",
+      "value": "Decoding"
+    },
+    {
+      "key": "settings.media.decode.tooltip",
+      "value": "Whether video is decoded by the graphics hardware or the processor. Hardware is faster and far cheaper on battery; the software path exists for machines whose decoder is missing or misbehaving. A route this machine does not have is refused rather than silently swapped."
+    },
+    {
+      "key": "settings.media.decode.hardwareFallback",
+      "value": "Hardware, falling back to software"
+    },
+    {
+      "key": "settings.media.decode.hardwareOnly",
+      "value": "Hardware only"
+    },
+    {
+      "key": "settings.media.decode.softwareOnly",
+      "value": "Software only"
+    },
+    {
+      "key": "settings.media.maxActive",
+      "value": "Players decoding at once"
+    },
+    {
+      "key": "settings.media.maxActive.tooltip",
+      "value": "How many media players may hold a session at the same time. Anyone can spawn more, and each one costs bandwidth, memory and decoding whether you are watching it or not — so the nearest few keep playing and the rest wait, resuming where they would have been when you come back. 0 removes the limit."
+    },
+    {
+      "key": "settings.media.engine.title",
+      "value": "This machine"
+    },
+    {
+      "key": "settings.media.engine.available",
+      "value": "{0} — {1} codecs on the graphics hardware, {2} in software."
+    },
+    {
+      "key": "settings.media.engine.unavailable",
+      "value": "The media engine has not reported yet."
     }
   ]
 }

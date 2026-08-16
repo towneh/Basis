@@ -6,7 +6,7 @@
         </engine:VisualElement>
 
         <engine:Foldout text="Binding" name="BindingFoldout" value="true" class="bvp-foldout">
-            <editor:ObjectField label="Player" name="PlayerField" type="Basis.Media.BasisMediaPlayer, Basis.Media" allow-scene-objects="true"/>
+            <editor:ObjectField label="Player" name="PlayerField" type="BasisMediaPlayer, BasisMediaPlayer" allow-scene-objects="true"/>
             <editor:ObjectField label="Target Renderer" name="TargetRendererField" type="UnityEngine.Renderer, UnityEngine.CoreModule" allow-scene-objects="true"/>
             <engine:IntegerField label="Material Index" name="MaterialIndexField"/>
             <engine:TextField label="Texture Property Name" name="TexturePropertyField" tooltip="URP uses _BaseMap; legacy BiRP uses _MainTex."/>

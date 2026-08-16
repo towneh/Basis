@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod adts;
+mod artwork;
 mod avc;
 mod demuxer;
 mod event;
@@ -16,9 +17,11 @@ mod mp4;
 mod ogg_opus;
 mod source;
 mod ts;
+mod wav;
 
 pub use adts::AdtsDemuxer;
-pub use demuxer::{DemuxLimits, Demuxer};
+pub use artwork::Artwork;
+pub use demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer};
 pub use event::{
     Au, AudioCodec, CaptionEvent, DiscontinuityReason, EosReason, Format, MetadataEvent,
     StreamEvent, TrackId, VideoCodec,
@@ -30,6 +33,7 @@ pub use mp4::Mp4Demuxer;
 pub use ogg_opus::OggOpusDemuxer;
 pub use source::{ByteSource, MemSource, SourceError};
 pub use ts::TsDemuxer;
+pub use wav::WavDemuxer;
 
 use media_clock::Generation;
 
@@ -44,6 +48,7 @@ pub enum ContainerKind {
     Ogg,
     Mp3,
     Adts,
+    Wav,
 }
 
 /// Sniff the container from the first bytes of the stream. MP4 announces
@@ -53,6 +58,10 @@ pub fn sniff_container(head: &[u8]) -> Option<ContainerKind> {
     // EBML magic: Matroska/WebM.
     if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         return Some(ContainerKind::Mkv);
+    }
+    // RIFF is a container family; only the WAVE form is ours.
+    if head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WAVE" {
+        return Some(ContainerKind::Wav);
     }
     if head.len() >= 8
         && matches!(
@@ -109,9 +118,20 @@ pub fn sniff_container(head: &[u8]) -> Option<ContainerKind> {
 
 /// Open the right demuxer for a source by sniffing its head.
 pub fn open_auto(
+    src: Box<dyn ByteSource>,
+    limits: DemuxLimits,
+    generation: Generation,
+) -> Result<Box<dyn Demuxer>, DemuxError> {
+    open_auto_with(src, limits, generation, &DemuxOptions::default())
+}
+
+/// As [`open_auto`], with the open-time choices the engine passes through
+/// from the session descriptor.
+pub fn open_auto_with(
     mut src: Box<dyn ByteSource>,
     limits: DemuxLimits,
     generation: Generation,
+    options: &DemuxOptions,
 ) -> Result<Box<dyn Demuxer>, DemuxError> {
     let mut head = [0u8; 1024];
     let mut filled = 0usize;
@@ -125,15 +145,20 @@ pub fn open_auto(
         filled += n;
     }
     match sniff_container(&head[..filled]) {
-        Some(ContainerKind::Mp4) => Ok(Box::new(Mp4Demuxer::open(src, limits, generation)?)),
+        Some(ContainerKind::Mp4) => Ok(Box::new(Mp4Demuxer::open_with(
+            src, limits, generation, options,
+        )?)),
         Some(ContainerKind::MpegTs) => Ok(Box::new(TsDemuxer::open(src, limits, generation)?)),
-        Some(ContainerKind::Mkv) => Ok(Box::new(MkvDemuxer::open(src, limits, generation)?)),
+        Some(ContainerKind::Mkv) => Ok(Box::new(MkvDemuxer::open_with(
+            src, limits, generation, options,
+        )?)),
         Some(ContainerKind::Flac) => Ok(Box::new(FlacDemuxer::open(src, limits, generation)?)),
         Some(ContainerKind::Ogg) => Ok(Box::new(OggOpusDemuxer::open(src, limits, generation)?)),
         Some(ContainerKind::Mp3) => Ok(Box::new(Mp3Demuxer::open(src, limits, generation)?)),
         Some(ContainerKind::Adts) => Ok(Box::new(AdtsDemuxer::open(src, limits, generation)?)),
+        Some(ContainerKind::Wav) => Ok(Box::new(WavDemuxer::open(src, limits, generation)?)),
         None => Err(DemuxError::Unsupported(
-            "unrecognised container (expected MP4, MPEG-TS, Matroska, FLAC, Ogg, MP3 or ADTS)",
+            "unrecognised container (expected MP4, MPEG-TS, Matroska, WAV, FLAC, Ogg, MP3 or ADTS)",
         )),
     }
 }
