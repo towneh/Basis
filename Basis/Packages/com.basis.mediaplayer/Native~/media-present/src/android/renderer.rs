@@ -98,6 +98,18 @@ impl Imported {
     }
 }
 
+/// A view over the Unity output image, and what it was built for. Unity
+/// owns the image: it is free to destroy it and hand a later one the same
+/// handle value, so the value alone is not an identity. `generation` is
+/// the output-texture registration the view belongs to, which only the
+/// managed side can advance, and a new image always arrives through one.
+struct DstView {
+    generation: u64,
+    image: u64,
+    format: vk::Format,
+    view: vk::ImageView,
+}
+
 enum Retired {
     Frame(#[allow(dead_code)] VideoFrame),
     Import(Imported),
@@ -116,7 +128,7 @@ pub struct SessionRenderer {
     convert_key: Option<ConvertKey>,
     conv_gen: u64,
     imports: HashMap<usize, Imported>,
-    dst_views: HashMap<u64, vk::ImageView>,
+    dst_view: Option<DstView>,
     /// (frame number the item was last referenced in, item).
     retired: VecDeque<(u64, Retired)>,
     warned_no_ctx: bool,
@@ -136,7 +148,7 @@ impl SessionRenderer {
             convert_key: None,
             conv_gen: 0,
             imports: HashMap::new(),
-            dst_views: HashMap::new(),
+            dst_view: None,
             retired: VecDeque::new(),
             warned_no_ctx: false,
             warned_no_recording: false,
@@ -149,12 +161,27 @@ impl SessionRenderer {
     /// true when a fresh frame was recorded. Failures log (once per
     /// cause where repetitive) and drop the frame — the render thread
     /// never blocks and never panics.
-    pub fn render(
+    ///
+    /// # Safety
+    /// `unity_texture` must be the `GetNativeTexturePtr()` value of a live
+    /// Unity texture created on the same `VkDevice` as the context this
+    /// renderer captured, and it must stay live for the duration of the
+    /// call. Unity's `access_texture` dereferences it and writes back the
+    /// `VkImage`, layout and extent that drive the view and the dispatch
+    /// below, so a stale or fabricated pointer is a use-after-free inside
+    /// Unity's own resource tracker before it is anything of ours. The
+    /// null check inside rejects the one value that cannot do that.
+    pub unsafe fn render(
         &mut self,
         frame: Option<VideoFrame>,
         unity_texture: *mut core::ffi::c_void,
+        generation: u64,
     ) -> bool {
-        let mut guard = CTX.lock().expect("ctx lock");
+        // The body below holds this guard across sites that can panic, and
+        // the ABI fence above catches those without clearing the poison, so
+        // recovering here is what keeps one caught panic from disabling the
+        // present path (and the device event) for the rest of the process.
+        let mut guard = CTX.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ctx) = guard.as_mut() else {
             if !self.warned_no_ctx {
                 self.warned_no_ctx = true;
@@ -168,10 +195,9 @@ impl SessionRenderer {
         // call site for both.
         let recording = unsafe {
             let mut state = core::mem::zeroed::<unity::UnityVulkanRecordingState>();
-            if !((*ctx.vulkan_iface).command_recording_state)(
-                &mut state,
-                unity::QUEUE_ACCESS_DONT_CARE,
-            ) || state.command_buffer == vk::CommandBuffer::null()
+            let recording_state = (*ctx.vulkan_iface).command_recording_state;
+            if !recording_state.is_some_and(|f| f(&mut state, unity::QUEUE_ACCESS_DONT_CARE))
+                || state.command_buffer == vk::CommandBuffer::null()
             {
                 if !self.warned_no_recording {
                     self.warned_no_recording = true;
@@ -207,7 +233,7 @@ impl SessionRenderer {
             return false;
         }
 
-        let drew = self.draw(ctx, &recording, opaque, unity_texture);
+        let drew = self.draw(ctx, &recording, opaque, unity_texture, generation);
         // The frame's buffer must outlive the submitted command buffer.
         self.retired
             .push_back((recording.current_frame_number, Retired::Frame(frame)));
@@ -220,6 +246,7 @@ impl SessionRenderer {
         recording: &unity::UnityVulkanRecordingState,
         frame: &media_decode::OpaqueFrame,
         unity_texture: *mut core::ffi::c_void,
+        generation: u64,
     ) -> bool {
         let buffer = frame.image.hardware_buffer();
         if buffer.is_null() {
@@ -323,11 +350,18 @@ impl SessionRenderer {
         // thread against live handles; barriers/descriptors follow the
         // §6.8 contract described inline.
         unsafe {
-            ((*ctx.vulkan_iface).ensure_outside_render_pass)();
+            let (Some(ensure_outside_render_pass), Some(access_texture), Some(recording_state)) = (
+                (*ctx.vulkan_iface).ensure_outside_render_pass,
+                (*ctx.vulkan_iface).access_texture,
+                (*ctx.vulkan_iface).command_recording_state,
+            ) else {
+                return false;
+            };
+            ensure_outside_render_pass();
 
             // Unity handles the destination's transition + tracking.
             let mut dst = core::mem::zeroed::<unity::UnityVulkanImage>();
-            if !((*ctx.vulkan_iface).access_texture)(
+            if !access_texture(
                 unity_texture,
                 core::ptr::null(),
                 vk::ImageLayout::GENERAL,
@@ -357,18 +391,29 @@ impl SessionRenderer {
 
             // Access calls invalidate the recording state: re-fetch.
             let mut state = core::mem::zeroed::<unity::UnityVulkanRecordingState>();
-            if !((*ctx.vulkan_iface).command_recording_state)(
-                &mut state,
-                unity::QUEUE_ACCESS_DONT_CARE,
-            ) || state.command_buffer == vk::CommandBuffer::null()
+            if !recording_state(&mut state, unity::QUEUE_ACCESS_DONT_CARE)
+                || state.command_buffer == vk::CommandBuffer::null()
             {
                 return false;
             }
             let cb = state.command_buffer;
 
-            let dst_view = match self.dst_views.entry(dst.image.as_raw()) {
-                std::collections::hash_map::Entry::Occupied(e) => *e.get(),
-                std::collections::hash_map::Entry::Vacant(e) => {
+            let wanted = (generation, dst.image.as_raw(), dst.format);
+            let cached = self
+                .dst_view
+                .as_ref()
+                .filter(|v| (v.generation, v.image, v.format) == wanted)
+                .map(|v| v.view);
+            let dst_view = match cached {
+                Some(view) => view,
+                None => {
+                    // The image this view was made for is gone (or was
+                    // never this one): the old view goes through the frame
+                    // queue rather than being reused or dropped in flight.
+                    if let Some(stale) = self.dst_view.take() {
+                        self.retired
+                            .push_back((state.current_frame_number, Retired::DstView(stale.view)));
+                    }
                     let view_ci = vk::ImageViewCreateInfo {
                         image: dst.image,
                         view_type: vk::ImageViewType::TYPE_2D,
@@ -393,7 +438,13 @@ impl SessionRenderer {
                         logf!("render: dst view {result:?}");
                         return false;
                     }
-                    *e.insert(view)
+                    self.dst_view = Some(DstView {
+                        generation,
+                        image: wanted.1,
+                        format: dst.format,
+                        view,
+                    });
+                    view
                 }
             };
 
@@ -558,8 +609,8 @@ impl Drop for SessionRenderer {
         for (_, imported) in self.imports.drain() {
             items.push(Retired::Import(imported));
         }
-        for (_, view) in self.dst_views.drain() {
-            items.push(Retired::DstView(view));
+        if let Some(dst_view) = self.dst_view.take() {
+            items.push(Retired::DstView(dst_view.view));
         }
         for (_, item) in self.retired.drain(..) {
             items.push(item);
@@ -934,39 +985,50 @@ mod graveyard {
 
     static GRAVE: Mutex<Vec<(Option<u64>, Vec<Retired>)>> = Mutex::new(Vec::new());
 
+    /// Reached from `SessionRenderer::drop`, so it must not panic: a
+    /// destructor unwinding while another panic is in flight aborts the
+    /// process rather than meeting the ABI's fences.
     pub fn bury(items: Vec<Retired>) {
         if items.is_empty() {
             return;
         }
-        GRAVE.lock().expect("grave lock").push((None, items));
+        GRAVE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((None, items));
     }
 
     /// Called from render events: stamp new burials with the current
     /// frame, destroy those safely past.
     pub fn collect(ctx: &VkCtx, current_frame: u64, safe_frame: u64) {
-        let mut grave = GRAVE.lock().expect("grave lock");
-        for (stamp, _) in grave.iter_mut() {
-            stamp.get_or_insert(current_frame);
-        }
-        let mut index = 0;
-        while index < grave.len() {
-            if grave[index].0.is_some_and(|stamp| stamp <= safe_frame) {
-                let (_, items) = grave.swap_remove(index);
-                for item in items {
-                    match item {
-                        Retired::Frame(frame) => drop(frame),
-                        Retired::Import(imported) => imported.destroy(ctx.device, &ctx.fns),
-                        Retired::Convert(convert) => convert.destroy(ctx.device, &ctx.fns),
-                        Retired::DstView(view) => {
-                            // SAFETY: safe-frame discipline as above.
-                            unsafe {
-                                (ctx.fns.destroy_image_view)(ctx.device, view, core::ptr::null())
-                            };
-                        }
-                    }
+        // The destruction below is the panic-capable half, so it runs
+        // after the guard is released: nothing can poison the lock that
+        // `bury` has to take from a destructor.
+        let due: Vec<Retired> = {
+            let mut grave = GRAVE.lock().unwrap_or_else(|e| e.into_inner());
+            for (stamp, _) in grave.iter_mut() {
+                stamp.get_or_insert(current_frame);
+            }
+            let mut due = Vec::new();
+            let mut index = 0;
+            while index < grave.len() {
+                if grave[index].0.is_some_and(|stamp| stamp <= safe_frame) {
+                    due.extend(grave.swap_remove(index).1);
+                } else {
+                    index += 1;
                 }
-            } else {
-                index += 1;
+            }
+            due
+        };
+        for item in due {
+            match item {
+                Retired::Frame(frame) => drop(frame),
+                Retired::Import(imported) => imported.destroy(ctx.device, &ctx.fns),
+                Retired::Convert(convert) => convert.destroy(ctx.device, &ctx.fns),
+                Retired::DstView(view) => {
+                    // SAFETY: safe-frame discipline as above.
+                    unsafe { (ctx.fns.destroy_image_view)(ctx.device, view, core::ptr::null()) };
+                }
             }
         }
     }

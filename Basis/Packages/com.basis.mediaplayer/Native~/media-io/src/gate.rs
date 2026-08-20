@@ -96,20 +96,64 @@ pub fn resolve_vetted(
     port: u16,
     gate: &dyn AddressGate,
 ) -> Result<std::net::SocketAddr, crate::IoError> {
-    use std::net::ToSocketAddrs;
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if !gate.permit(ip) {
-            return Err(crate::IoError::new(
-                crate::IoErrorKind::Blocked,
-                format!("{ip} blocked"),
-            ));
+    match literal_vetted(host, port, gate)? {
+        Some(addr) => Ok(addr),
+        None => {
+            let addrs = crate::resolve::resolve_blocking(host, port)?;
+            first_vetted(host, addrs, gate)
         }
-        return Ok(std::net::SocketAddr::new(ip, port));
     }
-    let addrs: Vec<std::net::SocketAddr> = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| crate::IoError::new(crate::IoErrorKind::Resolve, format!("{host}: {e}")))?
-        .collect();
+}
+
+/// [`resolve_vetted`] for callers already in an async context: the
+/// resolve is a real await point, so a `select!` racing this against a
+/// cancel token can observe the cancel.
+pub async fn resolve_vetted_async(
+    host: &str,
+    port: u16,
+    gate: &dyn AddressGate,
+) -> Result<std::net::SocketAddr, crate::IoError> {
+    match literal_vetted(host, port, gate)? {
+        Some(addr) => Ok(addr),
+        None => {
+            let addrs = crate::resolve::resolve_async(host, port).await?;
+            first_vetted(host, addrs, gate)
+        }
+    }
+}
+
+/// `Some` when the host needed no lookup at all; the literal is settled
+/// against the gate here rather than by the caller.
+fn literal_vetted(
+    host: &str,
+    port: u16,
+    gate: &dyn AddressGate,
+) -> Result<Option<std::net::SocketAddr>, crate::IoError> {
+    // A URL's host is the serialised form, so an IPv6 literal arrives
+    // bracketed and parses as nothing. Left as it was it is not a literal
+    // at all: it goes to the resolver, which has no name to look up, so
+    // every IPv6 literal fails to open rather than being vetted here.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    let Ok(ip) = literal.parse::<std::net::IpAddr>() else {
+        return Ok(None);
+    };
+    if !gate.permit(ip) {
+        return Err(crate::IoError::new(
+            crate::IoErrorKind::Blocked,
+            format!("{ip} blocked"),
+        ));
+    }
+    Ok(Some(std::net::SocketAddr::new(ip, port)))
+}
+
+fn first_vetted(
+    host: &str,
+    addrs: Vec<std::net::SocketAddr>,
+    gate: &dyn AddressGate,
+) -> Result<std::net::SocketAddr, crate::IoError> {
     if addrs.is_empty() {
         return Err(crate::IoError::new(
             crate::IoErrorKind::Resolve,
@@ -166,6 +210,38 @@ mod tests {
         ] {
             assert!(blocked(addr), "{addr} must be blocked");
         }
+    }
+
+    /// `Url::host_str` serialises an IPv6 host with its brackets, which is
+    /// what every caller hands the gate. Unbracketed it parses as nothing,
+    /// and a literal that is not recognised as one is sent to a resolver
+    /// that has no name to resolve.
+    #[test]
+    fn a_bracketed_ipv6_literal_is_still_a_literal() {
+        // Recognised as a literal at all. Left bracketed it parses as
+        // nothing, and a host that is not a literal goes to a resolver
+        // with no name to look up.
+        let addr = literal_vetted("[2606:4700:4700::1111]", 443, &AllowAllGate)
+            .expect("a public literal is permitted")
+            .expect("a bracketed literal is a literal");
+        assert_eq!(addr.port(), 443);
+        assert_eq!(
+            addr.ip(),
+            "2606:4700:4700::1111".parse::<std::net::IpAddr>().unwrap()
+        );
+
+        // And settled against the gate here rather than passed on.
+        assert!(
+            literal_vetted("[::1]", 443, &PublicAddressGate).is_err(),
+            "the loopback literal is refused rather than resolved"
+        );
+
+        // A bracket that does not wrap the whole host is a name, and must
+        // not be trimmed into a literal.
+        assert!(
+            matches!(literal_vetted("[::1", 443, &PublicAddressGate), Ok(None)),
+            "an unclosed bracket is a name, not a literal"
+        );
     }
 
     #[test]

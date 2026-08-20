@@ -22,10 +22,10 @@ use media_bank::{Bank, PushOutcome};
 use media_clock::{Correction, Generation, Master, MediaClock, MediaTime};
 use media_decode::{AudioDecoder, SubmitOutcome, VideoDecoder, VideoFrame};
 use media_demux::{Au, Demuxer, Format, StreamEvent};
-use media_diag::{EventCode, SessionDiag, Stage};
+use media_diag::{EventCode, SessionDiag, Stage, diag_log};
 
 use crate::audio::{
-    AudioConsumer, AudioFormatInfo, AudioProducer, audio_pair, frames_before_origin,
+    AudioConsumer, AudioFormatInfo, AudioProducer, frames_before_origin, install_audio_generation,
 };
 use crate::pool::FramePool;
 use crate::present::PresentShared;
@@ -229,15 +229,30 @@ pub struct SplitLegs {
     /// Set by whichever leg carried the Eos through, so two legs finishing
     /// together still bank exactly one.
     eos_carried: std::sync::atomic::AtomicBool,
-    /// The dts each leg has most recently banked, video first. Two
-    /// producers share one bounded Bank, so without this the leg that
-    /// reads faster — a small audio file against a large video one — fills
-    /// it on its own and blocks the other leg out. That is a deadlock, not
-    /// just waste: the clock will not start until the video leg lands a
-    /// frame, release will not drain until the clock starts, and the Bank
-    /// will not take the video leg's frame until release drains.
+    /// The dts each leg has most recently banked, video first, or
+    /// `UNSET` before its first. Two producers share one bounded Bank,
+    /// so without this the leg that reads faster — a small audio file
+    /// against a large video one — fills it on its own and blocks the
+    /// other leg out. That is a deadlock, not just waste: the clock will
+    /// not start until the video leg lands a frame, release will not drain
+    /// until the clock starts, and the Bank will not take the video leg's
+    /// frame until release drains.
     banked_dts_us: [std::sync::atomic::AtomicI64; 2],
+    /// Where each leg is measured from, video first, or `UNSET` until it
+    /// offers its first dts. Container timelines start where they like —
+    /// an arbitrary 33-bit clock on MPEG-TS, a `baseMediaDecodeTime` on
+    /// fMP4, the first cluster timestamp on Matroska — and the two legs
+    /// need not agree on where zero is, nor on where a landed seek
+    /// position sits. The cap is a distance between the legs, so it meters
+    /// how far each has come from its own baseline rather than absolute
+    /// dts, which would otherwise read a disagreement about the origin as
+    /// one leg being a whole timeline ahead of the other. A seek moves
+    /// both baselines: each leg clears its own as its own demuxer moves.
+    origin_us: [std::sync::atomic::AtomicI64; 2],
 }
+
+/// `banked_dts_us` / `origin_us` before a leg has banked or seen anything.
+const UNSET: i64 = i64::MIN;
 
 /// How far ahead of the other leg a leg may bank before it waits.
 ///
@@ -262,32 +277,109 @@ impl SplitLegs {
             ],
             eos_carried: std::sync::atomic::AtomicBool::new(false),
             banked_dts_us: [
-                std::sync::atomic::AtomicI64::new(0),
-                std::sync::atomic::AtomicI64::new(0),
+                std::sync::atomic::AtomicI64::new(UNSET),
+                std::sync::atomic::AtomicI64::new(UNSET),
             ],
+            origin_us: [
+                std::sync::atomic::AtomicI64::new(UNSET),
+                std::sync::atomic::AtomicI64::new(UNSET),
+            ],
+        }
+    }
+
+    /// Latch this leg's baseline from the first dts it offers after a
+    /// start or a seek. Only that leg's own demux thread writes its slot.
+    fn note_origin(&self, leg: Leg, dts_us: i64) {
+        let slot = &self.origin_us[Self::index(leg)];
+        if slot.load(Ordering::Relaxed) == UNSET && dts_us != UNSET {
+            slot.store(dts_us, Ordering::Relaxed);
         }
     }
 
     /// Whether this leg has to wait for the other one to catch up before
     /// banking `dts`. A leg that has reached the end of its source never
     /// holds the other back, since it has nothing left to catch up with.
+    ///
+    /// The distance is measured between how far each leg has come from its
+    /// own origin, never between absolute dts: a leg that has banked
+    /// nothing has come no distance rather than sitting at the
+    /// placeholder, so a timeline origin above the cap cannot read as both
+    /// legs already being ahead of each other.
     fn must_wait_for_other(&self, leg: Leg, dts_us: i64) -> bool {
-        let other = 1 - Self::index(leg);
+        let me = Self::index(leg);
+        let other = 1 - me;
         if self.eos[other].load(Ordering::Relaxed) {
             return false;
         }
-        dts_us - self.banked_dts_us[other].load(Ordering::Relaxed) > SPLIT_LEAD_CAP_US
+        let my_origin = self.origin_us[me].load(Ordering::Relaxed);
+        if my_origin == UNSET {
+            return false;
+        }
+        let their_origin = self.origin_us[other].load(Ordering::Relaxed);
+        let their_banked = self.banked_dts_us[other].load(Ordering::Relaxed);
+        let their_progress = if their_origin == UNSET || their_banked == UNSET {
+            0
+        } else {
+            their_banked.saturating_sub(their_origin)
+        };
+        // Saturating: both terms are container dts, scaled by a timescale
+        // the container also states, so the distance between two of them
+        // is not bounded by anything this side. A wrap here would invert
+        // the decision and hold a leg out of the Bank for good, which is
+        // the wedge this gate was rewritten to remove.
+        dts_us
+            .saturating_sub(my_origin)
+            .saturating_sub(their_progress)
+            > SPLIT_LEAD_CAP_US
+    }
+
+    /// How far apart the two legs measure their timelines from, once
+    /// both have latched a baseline. `None` until then.
+    ///
+    /// Saturating for the same reason the lead cap is: both terms are
+    /// container dts on timelines this side does not choose, so their
+    /// difference is not bounded by anything.
+    fn origin_gap_us(&self) -> Option<i64> {
+        let video = self.origin_us[0].load(Ordering::Relaxed);
+        let audio = self.origin_us[1].load(Ordering::Relaxed);
+        if video == UNSET || audio == UNSET {
+            return None;
+        }
+        Some(video.saturating_sub(audio).saturating_abs())
     }
 
     fn note_banked(&self, leg: Leg, dts_us: i64) {
         self.banked_dts_us[Self::index(leg)].store(dts_us, Ordering::Relaxed);
     }
 
-    /// Both legs restart from the same place after a seek.
-    fn rebase(&self, position_us: i64) {
+    /// Neither leg has come any distance from a seek it has only just
+    /// landed, so what either banked on the old timeline says nothing
+    /// about the distance between them now.
+    fn rebase(&self) {
         for slot in &self.banked_dts_us {
-            slot.store(position_us, Ordering::Relaxed);
+            slot.store(UNSET, Ordering::Relaxed);
         }
+    }
+
+    /// Forget this leg's baseline so its first dts after a seek
+    /// re-establishes it. Each leg calls this for itself once its own
+    /// demuxer has moved: the landed position is absolute, and the legs
+    /// need not agree on where it falls on their own timelines, so it is
+    /// not a baseline either of them can be given. Doing it on the leg's
+    /// own thread is also what stops a pre-seek AU still in hand from
+    /// latching the new baseline at the position the leg is leaving.
+    fn reset_origin(&self, leg: Leg) {
+        let slot = Self::index(leg);
+        self.origin_us[slot].store(UNSET, Ordering::Relaxed);
+        // What this leg banked was measured from the baseline it is
+        // forgetting, so it goes with it. The two are read as a pair, and
+        // the window where they can disagree is real: the video leg
+        // rebases both slots as it lands the seek, and the audio leg can
+        // bank one more pre-seek access unit before it observes that seek
+        // and re-latches. The other leg's progress would then be a
+        // difference across two timelines, which holds it out of the Bank
+        // until the audio leg banks again.
+        self.banked_dts_us[slot].store(UNSET, Ordering::Relaxed);
     }
 
     fn index(leg: Leg) -> usize {
@@ -401,7 +493,7 @@ impl PipelineShared {
             error.stage,
             error.detail.clone(),
         );
-        eprintln!("[basis-media] session error: {}", error.detail);
+        diag_log!("session error: {}", error.detail);
         self.set_state(State::Error);
         self.shared.stop.store(true, Ordering::Relaxed);
         self.bank.changed.notify_all();
@@ -499,6 +591,16 @@ pub fn run_demux_leg(
     // consumer). One scanner per session; seeks reset it.
     let mut caption_scanner = media_bitstream::CaptionScanner::new();
     let mut caption_track: Option<media_demux::TrackId> = None;
+    // The floor on how much media the Bank will hold before it refuses a
+    // push. Read once: a session's Bank config is settled at open.
+    let decoder_cushion_us = px
+        .bank
+        .bank
+        .lock()
+        .expect("bank lock")
+        .config()
+        .decoder_cushion
+        .as_micros();
     loop {
         if px.stopping() {
             return;
@@ -526,6 +628,7 @@ pub fn run_demux_leg(
                         return;
                     }
                 }
+                split.reset_origin(leg);
                 pending = None;
                 eos_reached = false;
                 carries_eos = false;
@@ -594,7 +697,8 @@ pub fn run_demux_leg(
                     // reach the end again on the new timeline.
                     if let Some(split) = px.split.get() {
                         split.clear_eos();
-                        split.rebase(landed.as_micros());
+                        split.rebase();
+                        split.reset_origin(leg);
                         *split.seek.lock().expect("split seek lock") = Some((generation, landed));
                     }
                     px.bank.changed.notify_all();
@@ -743,6 +847,33 @@ pub fn run_demux_leg(
         let banked_dts_us = match (&event, px.split.get()) {
             (StreamEvent::Au(au), Some(split)) => {
                 let dts_us = au.dts.as_micros();
+                split.note_origin(leg, dts_us);
+                // Two separately muxed sources need not agree on where
+                // their timelines start, and the Bank measures how much
+                // it holds as one span from the first event either leg
+                // pushed to the newest either has: a gap between the
+                // origins is counted as media it is holding. Past the
+                // cushion that is enough on its own to make the Bank read
+                // as full from the trailing leg's first access unit
+                // onwards — both legs then park on a full Bank, release
+                // cannot advance the cursor because the clock waits on a
+                // video frame the decoder never gets the input to make,
+                // and the session sits in Buffering until it is closed.
+                // Refuse the pair instead. Only before the first seek: a
+                // landed seek re-latches both baselines wherever each
+                // demuxer could stop, which is no longer a statement
+                // about where either container begins.
+                if px.shared.generation.load(Ordering::Relaxed) == 0
+                    && let Some(gap_us) = split.origin_gap_us()
+                    && gap_us > decoder_cushion_us
+                {
+                    px.fail(EngineError::split_origin_mismatch(format!(
+                        "the two sources start {} ms apart on their own timelines, past the {} ms of media the buffer can hold",
+                        gap_us / 1000,
+                        decoder_cushion_us / 1000
+                    )));
+                    return;
+                }
                 if split.must_wait_for_other(leg, dts_us) {
                     pending = Some(event);
                     let bank = px.bank.bank.lock().expect("bank lock");
@@ -809,8 +940,8 @@ fn reconnect(
             Stage::Source,
             format!("attempt {attempt}/{RECONNECT_ATTEMPTS} in {backoff:?} after: {cause}"),
         );
-        eprintln!(
-            "[basis-media] transport lost ({cause}); reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} in {backoff:?}"
+        diag_log!(
+            "transport lost ({cause}); reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} in {backoff:?}"
         );
 
         let deadline = Instant::now() + backoff;
@@ -829,7 +960,7 @@ fn reconnect(
                     Stage::Source,
                     format!("reconnected on attempt {attempt}"),
                 );
-                eprintln!("[basis-media] reconnected on attempt {attempt}");
+                diag_log!("reconnected on attempt {attempt}");
                 return Some(demuxer);
             }
             Err(e) => {
@@ -1078,10 +1209,7 @@ fn reroute_hw_fallback(
                 Stage::Decode,
                 format!("{error}; decoding {codec:?} on {}", route.label),
             );
-            eprintln!(
-                "[basis-media] {error}; decoding {codec:?} on {}",
-                route.label
-            );
+            diag_log!("{error}; decoding {codec:?} on {}", route.label);
             Some(route.decoder)
         }
         Err(refused) => {
@@ -1343,10 +1471,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                                 Stage::Decode,
                                 format!("{reason}; decoding {codec:?} on {}", route.label),
                             );
-                            eprintln!(
-                                "[basis-media] {reason}; decoding {codec:?} on {}",
-                                route.label
-                            );
+                            diag_log!("{reason}; decoding {codec:?} on {}", route.label);
                         }
                         decode_device = route.decode_device;
                         decoder = Some(route.decoder);
@@ -1370,7 +1495,12 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 px.shared.height.store(display_height, Ordering::Relaxed);
                 // The output target carries the coded size; the consumer
                 // crops to display size when it samples (M0 contract).
-                if let Err(e) = sink.configure(px, coded_width, coded_height, decode_device) {
+                // SAFETY: `decode_device` is the hardware route's own
+                // device pointer. The decoder that owns it was moved into
+                // `decoder` above, which outlives this call.
+                let configured =
+                    unsafe { sink.configure(px, coded_width, coded_height, decode_device) };
+                if let Err(e) = configured {
                     px.fail(EngineError::present(e));
                     return;
                 }
@@ -1874,19 +2004,18 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     Ok(d) => {
                         let (out_rate, out_channels) = d.output_format();
                         decoder = Some(d);
-                        let (new_producer, consumer) = audio_pair(
+                        producer = Some(install_audio_generation(
+                            &px.audio_consumer,
                             AudioFormatInfo {
                                 sample_rate: out_rate,
                                 channels: out_channels,
                             },
                             Arc::clone(&px.audio_shared),
-                        );
-                        producer = Some(new_producer);
+                        ));
                         px.shared.audio_rate.store(out_rate, Ordering::Relaxed);
                         px.shared
                             .audio_channels
                             .store(out_channels, Ordering::Relaxed);
-                        *px.audio_consumer.lock().expect("consumer slot") = Some(consumer);
                     }
                     Err(e) => {
                         // The C player's posture: refused audio mutes, video
@@ -1898,6 +2027,22 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                             format!("{codec:?} decoder: {e}"),
                         );
                         decoder = None;
+                        // With it: the flush arm installs a fresh ring
+                        // only where there is a decoder to size it from,
+                        // so a producer left over from the format before
+                        // this one would outlive its timeline and the
+                        // end-of-stream check would read drain state off
+                        // a ring that no longer matches.
+                        producer = None;
+                        // And the consumer half, as the flush arm does in
+                        // the same no-decoder case. Left installed it
+                        // serves the retired format's tail and keeps
+                        // writing a playhead for a lane the session now
+                        // treats as muted — while the drain check, seeing
+                        // no producer, reads the lane as finished. Those
+                        // two together declare an end over samples still
+                        // reachable from the pull path.
+                        *px.audio_consumer.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     }
                 }
             }
@@ -1933,19 +2078,27 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     px.fail(EngineError::decode(e));
                     return;
                 }
-                // Fresh ring for the new timeline; the consumer slot swaps
-                // under its lock, never on the pull path.
+                // Fresh ring for the new timeline, reset and swapped under
+                // the slot lock so a pull in flight cannot undo it.
                 if let Some(active) = decoder.as_ref() {
                     let (out_rate, out_channels) = active.output_format();
-                    let (new_producer, consumer) = audio_pair(
+                    producer = Some(install_audio_generation(
+                        &px.audio_consumer,
                         AudioFormatInfo {
                             sample_rate: out_rate,
                             channels: out_channels,
                         },
                         Arc::clone(&px.audio_shared),
-                    );
-                    producer = Some(new_producer);
-                    *px.audio_consumer.lock().expect("consumer slot") = Some(consumer);
+                    ));
+                } else {
+                    // No decoder to size a ring from, so the swap that
+                    // would retire the old consumer never happens and it
+                    // keeps serving: samples and a base pts from the
+                    // timeline the session has just left, against a
+                    // clock about to restart on the new one. Retire it
+                    // here instead. The lane is muted by construction —
+                    // this is the tail of it, not its audio.
+                    *px.audio_consumer.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 }
             }
             Ok(MediaMsg::Eos) => {
@@ -2016,5 +2169,140 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 px.set_state(State::Ended);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dts either side of the subtraction is the container's, scaled
+    /// by a timescale the container also states, so nothing bounds the
+    /// distance between two of them. Wrapping would invert the comparison
+    /// and hold a leg out of the Bank permanently.
+    #[test]
+    fn an_out_of_range_dts_cannot_wrap_the_cap() {
+        let split = SplitLegs::new();
+        split.note_origin(Leg::Video, i64::MAX / 2);
+        split.note_banked(Leg::Video, i64::MAX / 2);
+        split.note_origin(Leg::Audio, i64::MAX / 2);
+
+        // Far enough ahead to wait, and far enough behind not to — both
+        // out of range of the subtraction that decides it.
+        assert!(split.must_wait_for_other(Leg::Audio, i64::MAX));
+        assert!(!split.must_wait_for_other(Leg::Audio, i64::MIN + 1));
+    }
+
+    /// Whether a pair can play at all turns on how far apart its two
+    /// sources measure their timelines from, so that has to be a
+    /// distance rather than a signed difference — either source may be
+    /// the later one — and it has to survive origins far enough apart to
+    /// overflow the subtraction, where a wrap would report a wide pair as
+    /// a close one and let it wedge the Bank after all.
+    #[test]
+    fn the_origin_gap_is_a_distance_and_cannot_wrap() {
+        const GAP: i64 = 1_470_000;
+
+        let split = SplitLegs::new();
+        assert_eq!(split.origin_gap_us(), None, "neither leg has a baseline");
+        split.note_origin(Leg::Video, GAP);
+        assert_eq!(split.origin_gap_us(), None, "only one leg has one");
+        split.note_origin(Leg::Audio, 0);
+        assert_eq!(split.origin_gap_us(), Some(GAP));
+
+        let reversed = SplitLegs::new();
+        reversed.note_origin(Leg::Video, 0);
+        reversed.note_origin(Leg::Audio, GAP);
+        assert_eq!(
+            reversed.origin_gap_us(),
+            Some(GAP),
+            "the later leg is the audio one here"
+        );
+
+        let extreme = SplitLegs::new();
+        extreme.note_origin(Leg::Video, i64::MAX);
+        extreme.note_origin(Leg::Audio, i64::MIN + 1);
+        assert_eq!(extreme.origin_gap_us(), Some(i64::MAX));
+    }
+
+    /// The legs observe a seek at their own pace, so the audio leg can
+    /// bank one more access unit from the timeline it is leaving *after*
+    /// the video leg landed the seek and rebased. What it banked is then
+    /// measured from a baseline it is about to forget, and pairing it
+    /// with the one it latches at the landing makes the video leg's view
+    /// of its progress a difference across two timelines — which holds
+    /// the video leg out of the Bank until the audio leg banks again.
+    ///
+    /// Seeking forwards is the direction that bites: the stale dts sits
+    /// below the new baseline, so the progress reads negative and is
+    /// subtracted from the video leg's own lead.
+    #[test]
+    fn a_leg_forgetting_its_origin_forgets_what_it_banked_on_it() {
+        const STALE: i64 = 500_000;
+        const LANDED: i64 = 30_000_000;
+
+        let split = SplitLegs::new();
+        for leg in [Leg::Video, Leg::Audio] {
+            split.note_origin(leg, 0);
+            split.note_banked(leg, 0);
+        }
+
+        // The video leg lands the seek and hands it over.
+        split.rebase();
+        split.reset_origin(Leg::Video);
+        // The audio leg is still on the old timeline for one more AU,
+        // and only then observes the seek.
+        split.note_banked(Leg::Audio, STALE);
+        split.reset_origin(Leg::Audio);
+
+        // Both resume at the landing.
+        for leg in [Leg::Video, Leg::Audio] {
+            split.note_origin(leg, LANDED);
+        }
+        assert!(
+            !split.must_wait_for_other(Leg::Video, LANDED),
+            "the video leg was held by an audio dts banked on the timeline it left"
+        );
+    }
+
+    /// The lead cap measures how far each leg has come from its own
+    /// origin, so a seek has to re-establish both origins rather than
+    /// leave a landing behind in a field read as progress. The two legs
+    /// need not agree on where that landing sits on their own timelines —
+    /// an adaptive ladder's renditions are separately muxed — and the
+    /// difference would otherwise read as one leg being permanently that
+    /// far ahead of the other, which holds the video leg out of the Bank
+    /// while the audio leg fills it.
+    #[test]
+    fn a_seek_rebaselines_legs_whose_timelines_disagree() {
+        const VIDEO_ORIGIN: i64 = 0;
+        const AUDIO_ORIGIN: i64 = 1_470_000;
+        const LANDED: i64 = 5_000_000;
+
+        let split = SplitLegs::new();
+        for (leg, origin) in [(Leg::Video, VIDEO_ORIGIN), (Leg::Audio, AUDIO_ORIGIN)] {
+            split.note_origin(leg, origin);
+            split.note_banked(leg, origin);
+        }
+
+        // The seek. Each leg forgets its own origin as its own demuxer
+        // moves, so no pre-seek AU can latch the new baseline.
+        split.rebase();
+        split.reset_origin(Leg::Video);
+        split.reset_origin(Leg::Audio);
+
+        // Both resume at the landing, each on its own timeline.
+        for leg in [Leg::Video, Leg::Audio] {
+            split.note_origin(leg, LANDED);
+            assert!(
+                !split.must_wait_for_other(leg, LANDED),
+                "{leg:?} was held out of the Bank at the landing it just seeked to"
+            );
+            split.note_banked(leg, LANDED);
+        }
+
+        // And the ratchet is back, measured from the landing.
+        assert!(!split.must_wait_for_other(Leg::Video, LANDED + SPLIT_LEAD_CAP_US));
+        assert!(split.must_wait_for_other(Leg::Video, LANDED + SPLIT_LEAD_CAP_US + 1));
     }
 }

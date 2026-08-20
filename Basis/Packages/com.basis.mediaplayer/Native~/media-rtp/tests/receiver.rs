@@ -1,9 +1,11 @@
 //! Table-driven receive rows over injectable schedules — no sleeps, no
 //! sockets; `now` is handed in per call (§12.1).
 
+use std::num::NonZeroU32;
+
 use bytes::Bytes;
 use media_clock::MediaTime;
-use media_rtp::{PacketRejected, ReceiverConfig, RtpReceiver};
+use media_rtp::{PacketRejected, ReceiverConfig, RtpReceiver, ntp_at_zero, units_to_us};
 use rtcp::sender_report::SenderReport;
 use webrtc_util::marshal::Marshal;
 
@@ -323,4 +325,65 @@ fn malformed_datagrams_are_counted_not_fatal() {
     assert_eq!(rx.stats().malformed, 1);
     // A good packet still flows afterwards.
     assert_eq!(feed(&mut rx, ms(1), &rtp_datagram(1, 0, SSRC, b"ok")), [1]);
+}
+
+/// A sender picks its own RTP timestamps and each packet can move the
+/// unwrapped total by up to 2^31, so the span handed to the µs conversion
+/// has no ceiling. Scaled in i64 it wraps a few thousand hostile packets
+/// in — and silently, without overflow checks — leaving an arbitrary
+/// signed value as a frame's presentation timestamp or as a stream's
+/// alignment anchor.
+#[test]
+fn a_hostile_timestamp_span_saturates_rather_than_wrapping() {
+    let rate = NonZeroU32::new(90_000).expect("nonzero");
+    assert_eq!(units_to_us(i64::MAX, rate), i64::MAX);
+    assert_eq!(units_to_us(i64::MIN, rate), i64::MIN);
+    // The first span past what an i64 multiply survives: the conversion
+    // still lands on the exact answer, which only fits once widened.
+    let overflows = i64::MAX / 1_000_000 + 1;
+    assert!(overflows.checked_mul(1_000_000).is_none());
+    let exact = (i128::from(overflows) * 1_000_000 / 90_000) as i64;
+    assert_eq!(units_to_us(overflows, rate), exact);
+
+    // Ordinary spans are unchanged, sign included.
+    assert_eq!(units_to_us(90_000, rate), 1_000_000);
+    assert_eq!(units_to_us(-90_000, rate), -1_000_000);
+    assert_eq!(units_to_us(0, rate), 0);
+    let opus = NonZeroU32::new(48_000).expect("nonzero");
+    assert_eq!(units_to_us(960, opus), 20_000);
+}
+
+/// The alignment anchor is a sender report's NTP shifted back by how far
+/// into the stream it was taken, in 32.32 fixed point. The shift has to
+/// survive what `units_to_us` hands it, whose saturated ends are exactly
+/// the values a float conversion rounds off and an `as u64` truncates.
+#[test]
+fn the_alignment_anchor_survives_a_saturated_elapsed() {
+    const NTP: u64 = 0xE0FF_1234_5678_9ABC;
+    // One second in, the anchor sits exactly 2^32 ticks earlier.
+    assert_eq!(ntp_at_zero(NTP, 1_000_000), NTP - (1 << 32));
+    // A report at elapsed zero is the anchor.
+    assert_eq!(ntp_at_zero(NTP, 0), NTP);
+    // Negative elapsed moves it the other way by the same magnitude.
+    assert_eq!(ntp_at_zero(NTP, -1_000_000), NTP + (1 << 32));
+
+    // Saturated ends clamp the offset rather than truncating it, and stay
+    // on the correct side. i64::MIN is the edge that negating a magnitude
+    // would overflow on.
+    assert_eq!(ntp_at_zero(NTP, i64::MAX), NTP.wrapping_sub(u64::MAX));
+    assert_eq!(ntp_at_zero(NTP, i64::MIN), NTP.wrapping_add(u64::MAX));
+
+    // Exact at magnitudes where scaling through a f64 no longer is. The
+    // divergence is sub-nanosecond and only past ~11 days of elapsed, so
+    // this pins the helper's contract rather than standing for a defect
+    // an alignment anchor would ever have shown. Only the exact value is
+    // asserted: the two paths differ by about one ULP at this magnitude,
+    // so a row demanding they differ rests on the compiler not having
+    // contracted or widened the intermediate arithmetic. The equality
+    // catches a switch to the float path on its own.
+    let long_us = 1_000_000_000_001_i64;
+    assert_eq!(
+        ntp_at_zero(NTP, long_us),
+        NTP - ((u128::from(long_us as u64) << 32) / 1_000_000) as u64
+    );
 }

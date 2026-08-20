@@ -21,7 +21,7 @@ mod wav;
 
 pub use adts::AdtsDemuxer;
 pub use artwork::Artwork;
-pub use demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer};
+pub use demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer, MAX_NOTES, push_note};
 pub use event::{
     Au, AudioCodec, CaptionEvent, DiscontinuityReason, EosReason, Format, MetadataEvent,
     StreamEvent, TrackId, VideoCodec,

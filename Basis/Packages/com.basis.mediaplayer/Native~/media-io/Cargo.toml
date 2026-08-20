@@ -2,10 +2,12 @@
 name = "media-io"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 media-demux = { workspace = true }
+media-diag = { workspace = true }
 media-hls = { workspace = true }
 bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
@@ -24,13 +26,11 @@ url = "2"
 # error 103 on device), so Android bundles the webpki-roots CCADB set.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = [
-    "blocking",
     "rustls-tls-native-roots",
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = [
-    "blocking",
     "rustls-tls-webpki-roots",
 ] }
 

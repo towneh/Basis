@@ -649,6 +649,7 @@ dependencies = [
  "media-clock",
  "media-decode",
  "media-demux",
+ "media-diag",
  "windows",
 ]
 
@@ -1667,6 +1668,7 @@ version = "0.1.0"
 dependencies = [
  "decode-mediacodec",
  "media-clock",
+ "media-diag",
  "media-engine",
  "media-present",
  "serde",
@@ -1690,6 +1692,7 @@ dependencies = [
  "bytes",
  "media-clock",
  "media-demux",
+ "media-diag",
  "media-hls",
  "reqwest",
  "tokio",
@@ -1714,6 +1717,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "media-demux",
+ "media-diag",
  "url",
 ]
 
@@ -1736,6 +1740,7 @@ dependencies = [
  "futures",
  "media-clock",
  "media-demux",
+ "media-diag",
  "media-rtp",
  "retina",
  "tokio",
@@ -1757,6 +1762,7 @@ dependencies = [
  "bytes",
  "media-clock",
  "media-demux",
+ "media-diag",
  "media-io",
  "media-rtp",
  "media-rtsp",
@@ -2431,9 +2437,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "futures-channel",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",

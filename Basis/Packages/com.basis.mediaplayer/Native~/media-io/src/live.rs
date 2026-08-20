@@ -20,7 +20,7 @@ use media_demux::{ByteSource, SourceError};
 use url::Url;
 
 use crate::cancel::CancelToken;
-use crate::http::{REDIRECT_STATUSES, vet_url};
+use crate::http::{REDIRECT_STATUSES, vet_url_async};
 use crate::runtime::runtime;
 use crate::{AddressGate, IoError, IoErrorKind, IoLimits};
 
@@ -72,14 +72,26 @@ impl HttpLiveSource {
         let cancel = cancel.child();
         let open_cancel = cancel.clone();
         let open_limits = limits.clone();
-        let (response, final_url) = runtime().block_on(async move {
+        let opened = runtime().block_on(async move {
             tokio::select! {
                 _ = open_cancel.cancelled() => {
                     Err(IoError::new(IoErrorKind::Connect, "open cancelled"))
                 }
                 opened = open_streaming(parsed, &open_limits, gate.as_ref()) => opened,
             }
-        })?;
+        });
+        let (response, final_url) = match opened {
+            Ok(opened) => opened,
+            Err(e) => {
+                // No source is constructed, so no drop retires the child
+                // token, and its forwarder task would park on the shared
+                // runtime for the rest of the session. A playlist lane
+                // re-opens per segment, so a failing host accumulates
+                // one per refresh.
+                cancel.cancel();
+                return Err(e);
+            }
+        };
 
         let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CHUNKS);
         let reader_cancel = cancel.clone();
@@ -198,7 +210,7 @@ async fn open_streaming(
             .connect_timeout(limits.connect_timeout)
             .no_proxy()
             .user_agent("basis-media/0.1");
-        if let Some((domain, addrs)) = vet_url(&url, gate)? {
+        if let Some((domain, addrs)) = vet_url_async(&url, gate).await? {
             builder = builder.resolve_to_addrs(&domain, &addrs);
         }
         let client = builder
@@ -276,5 +288,59 @@ async fn read_loop(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct BlockAll;
+    impl AddressGate for BlockAll {
+        fn permit(&self, _ip: std::net::IpAddr) -> bool {
+            false
+        }
+    }
+
+    /// A failing open still has a child token to retire; nothing else
+    /// will, because the source that would have owned it was never
+    /// built.
+    #[test]
+    fn a_failed_open_leaves_no_forwarder_behind() {
+        // Tied together on purpose: a flat threshold beside a loop count
+        // lets a leak on one open in five pass unnoticed.
+        const OPENS: usize = 50;
+        const TOLERATED: usize = OPENS / 5;
+
+        let session = CancelToken::new();
+        let before = runtime().metrics().num_alive_tasks();
+        for _ in 0..OPENS {
+            HttpLiveSource::open(
+                "http://10.0.0.1/stream.ts",
+                IoLimits::default(),
+                Arc::new(BlockAll),
+                session.clone(),
+            )
+            .map(|_| ())
+            .expect_err("the gate refuses every address");
+        }
+        // Sampled rather than settled: a cancelled forwarder still has to
+        // be scheduled before it exits, the multi-threaded runtime's count
+        // is documented as approximate, and the runtime is process-wide so
+        // sibling rows contribute to it. Poll until it comes down — the
+        // leak this guards against is permanent, so a bounded wait cannot
+        // hide one, it only stops a scheduling delay reading as one.
+        let mut grew = usize::MAX;
+        for _ in 0..20 {
+            grew = runtime().metrics().num_alive_tasks().saturating_sub(before);
+            if grew < TOLERATED {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            grew < TOLERATED,
+            "{grew} forwarder tasks outlived their {OPENS} opens"
+        );
     }
 }

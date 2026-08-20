@@ -149,16 +149,21 @@ pub fn run(options: &Options) -> ExitCode {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
-    if let Some(path) = &options.csv {
-        match std::fs::File::create(path) {
-            Ok(file) => {
-                if let Err(e) = recorder.write_csv(std::io::BufWriter::new(file)) {
-                    eprintln!("impair: csv: {e}");
-                }
+    // A capture that did not land fails the run rather than logging it:
+    // the exit status is what a harness reads to decide whether there is
+    // an artefact to collect.
+    let captured = match &options.csv {
+        None => true,
+        Some(path) => match std::fs::File::create(path)
+            .and_then(|file| recorder.write_csv(std::io::BufWriter::new(file)))
+        {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("impair: csv: {e}");
+                false
             }
-            Err(e) => eprintln!("impair: csv: {e}"),
-        }
-    }
+        },
+    };
 
     // Grade against the analytic model at the *achieved* total depth
     // (target lag + decoder cushion, matching the sizing table's axis),
@@ -207,7 +212,7 @@ pub fn run(options: &Options) -> ExitCode {
     let deterministic_lane =
         !options.url.starts_with("http://") && !options.url.starts_with("https://");
     let model_ok = !deterministic_lane || measured <= analytic + margin;
-    let ok = !errored && decoded > 0 && presented >= min_presented && model_ok;
+    let ok = !errored && decoded > 0 && presented >= min_presented && model_ok && captured;
     println!("{}", if ok { "IMPAIR PASS" } else { "IMPAIR FAIL" });
     session.close();
     if ok {

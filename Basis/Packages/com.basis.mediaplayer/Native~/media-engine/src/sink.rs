@@ -28,7 +28,15 @@ impl VideoSink {
     /// hardware route's D3D11 device — the presenter builds on it so
     /// decoded slices bind straight into the conversion pass; `None`
     /// (software routes) keeps the presenter's own device.
-    pub fn configure(
+    ///
+    /// # Safety
+    /// `decode_device`, when `Some`, must be a live `ID3D11Device*` that
+    /// stays live for the duration of the call. The presenter clones its
+    /// own reference, so the caller's may drop once this returns; what it
+    /// cannot survive is the device going away underneath the call, which
+    /// turns the vtable dispatch inside `new_on_device` into a read of
+    /// freed memory as a function pointer.
+    pub unsafe fn configure(
         &mut self,
         px: &PipelineShared,
         coded_width: u32,
@@ -36,9 +44,8 @@ impl VideoSink {
         decode_device: Option<*mut std::ffi::c_void>,
     ) -> Result<(), media_present::PresentError> {
         let presenter = match decode_device {
-            // SAFETY: the route holds the decoder (and so the device)
-            // alive across this call; new_on_device clones its own
-            // reference.
+            // SAFETY: the contract above admits only a device live
+            // across this call; new_on_device clones its own reference.
             Some(device) => unsafe {
                 media_present::SharedTexturePresenter::new_on_device(
                     device,
@@ -119,7 +126,10 @@ impl VideoSink {
         Self { configured: false }
     }
 
-    pub fn configure(
+    /// # Safety
+    /// As the Windows implementation, so the signature is the same on
+    /// every target. This one never dereferences `decode_device`.
+    pub unsafe fn configure(
         &mut self,
         _px: &PipelineShared,
         _coded_width: u32,
@@ -164,7 +174,10 @@ impl VideoSink {
         Self { configured: false }
     }
 
-    pub fn configure(
+    /// # Safety
+    /// As the Windows implementation, so the signature is the same on
+    /// every target. This one never dereferences `decode_device`.
+    pub unsafe fn configure(
         &mut self,
         _px: &PipelineShared,
         _coded_width: u32,

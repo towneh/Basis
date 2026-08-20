@@ -10,12 +10,19 @@ use core::ffi::{c_char, c_int, c_void};
 
 use ash::vk;
 
+/// Every function slot Unity fills in is declared `Option`: the tables and
+/// the structs returned from them are foreign values, and a bare `fn`
+/// pointer in Rust may not be null even before it is called, so a Unity
+/// build that leaves a slot empty would make the value itself invalid.
+/// `Option<fn(..)>` has the same size and ABI through the null niche.
 #[repr(C)]
 pub struct IUnityInterfaces {
-    pub get_interface: unsafe extern "C" fn(guid: UnityInterfaceGUID) -> *mut c_void,
-    pub register_interface: unsafe extern "C" fn(guid: UnityInterfaceGUID, ptr: *mut c_void),
-    pub get_interface_split: unsafe extern "C" fn(high: u64, low: u64) -> *mut c_void,
-    pub register_interface_split: unsafe extern "C" fn(high: u64, low: u64, ptr: *mut c_void),
+    pub get_interface: Option<unsafe extern "C" fn(guid: UnityInterfaceGUID) -> *mut c_void>,
+    pub register_interface:
+        Option<unsafe extern "C" fn(guid: UnityInterfaceGUID, ptr: *mut c_void)>,
+    pub get_interface_split: Option<unsafe extern "C" fn(high: u64, low: u64) -> *mut c_void>,
+    pub register_interface_split:
+        Option<unsafe extern "C" fn(high: u64, low: u64, ptr: *mut c_void)>,
 }
 
 #[repr(C)]
@@ -26,10 +33,12 @@ pub struct UnityInterfaceGUID {
 
 #[repr(C)]
 pub struct IUnityGraphics {
-    pub get_renderer: unsafe extern "C" fn() -> c_int,
-    pub register_device_event_callback: unsafe extern "C" fn(cb: unsafe extern "C" fn(c_int)),
-    pub unregister_device_event_callback: unsafe extern "C" fn(cb: unsafe extern "C" fn(c_int)),
-    pub reserve_event_id_range: unsafe extern "C" fn(count: c_int) -> c_int,
+    pub get_renderer: Option<unsafe extern "C" fn() -> c_int>,
+    pub register_device_event_callback:
+        Option<unsafe extern "C" fn(cb: unsafe extern "C" fn(c_int))>,
+    pub unregister_device_event_callback:
+        Option<unsafe extern "C" fn(cb: unsafe extern "C" fn(c_int))>,
+    pub reserve_event_id_range: Option<unsafe extern "C" fn(count: c_int) -> c_int>,
 }
 
 #[repr(C)]
@@ -40,7 +49,7 @@ pub struct UnityVulkanInstance {
     pub physical_device: vk::PhysicalDevice,
     pub device: vk::Device,
     pub graphics_queue: vk::Queue,
-    pub get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
+    pub get_instance_proc_addr: Option<vk::PFN_vkGetInstanceProcAddr>,
     pub queue_family_index: u32,
     pub reserved: [*mut c_void; 8],
 }
@@ -92,45 +101,51 @@ pub type UnityVulkanGraphicsQueueAccess = c_int;
 pub const QUEUE_ACCESS_DONT_CARE: UnityVulkanGraphicsQueueAccess = 0;
 
 pub type UnityVulkanInitCallback = unsafe extern "C" fn(
-    get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
+    get_instance_proc_addr: Option<vk::PFN_vkGetInstanceProcAddr>,
     userdata: *mut c_void,
-) -> vk::PFN_vkGetInstanceProcAddr;
+) -> Option<vk::PFN_vkGetInstanceProcAddr>;
 
 #[repr(C)]
 pub struct IUnityGraphicsVulkanV2 {
     pub intercept_initialization:
-        unsafe extern "C" fn(func: UnityVulkanInitCallback, userdata: *mut c_void) -> bool,
+        Option<unsafe extern "C" fn(func: UnityVulkanInitCallback, userdata: *mut c_void) -> bool>,
     pub intercept_vulkan_api: *mut c_void,
     pub configure_event: *mut c_void,
-    pub instance: unsafe extern "C" fn() -> UnityVulkanInstance,
-    pub command_recording_state: unsafe extern "C" fn(
-        out: *mut UnityVulkanRecordingState,
-        queue_access: UnityVulkanGraphicsQueueAccess,
-    ) -> bool,
-    pub access_texture: unsafe extern "C" fn(
-        native_texture: *mut c_void,
-        sub_resource: *const vk::ImageSubresource,
-        layout: vk::ImageLayout,
-        pipeline_stage_flags: vk::PipelineStageFlags,
-        access_flags: vk::AccessFlags,
-        access_mode: UnityVulkanResourceAccessMode,
-        out_image: *mut UnityVulkanImage,
-    ) -> bool,
+    pub instance: Option<unsafe extern "C" fn() -> UnityVulkanInstance>,
+    pub command_recording_state: Option<
+        unsafe extern "C" fn(
+            out: *mut UnityVulkanRecordingState,
+            queue_access: UnityVulkanGraphicsQueueAccess,
+        ) -> bool,
+    >,
+    pub access_texture: Option<
+        unsafe extern "C" fn(
+            native_texture: *mut c_void,
+            sub_resource: *const vk::ImageSubresource,
+            layout: vk::ImageLayout,
+            pipeline_stage_flags: vk::PipelineStageFlags,
+            access_flags: vk::AccessFlags,
+            access_mode: UnityVulkanResourceAccessMode,
+            out_image: *mut UnityVulkanImage,
+        ) -> bool,
+    >,
     pub access_render_buffer_texture: *mut c_void,
     pub access_render_buffer_resolve_texture: *mut c_void,
     pub access_buffer: *mut c_void,
-    pub ensure_outside_render_pass: unsafe extern "C" fn(),
+    pub ensure_outside_render_pass: Option<unsafe extern "C" fn()>,
     pub ensure_inside_render_pass: *mut c_void,
     pub access_queue: *mut c_void,
     pub configure_swapchain: *mut c_void,
     pub access_texture_by_id: *mut c_void,
-    pub add_intercept_initialization: unsafe extern "C" fn(
-        func: UnityVulkanInitCallback,
-        userdata: *mut c_void,
-        priority: i32,
-    ) -> bool,
+    pub add_intercept_initialization: Option<
+        unsafe extern "C" fn(
+            func: UnityVulkanInitCallback,
+            userdata: *mut c_void,
+            priority: i32,
+        ) -> bool,
+    >,
     pub remove_intercept_initialization:
-        unsafe extern "C" fn(func: UnityVulkanInitCallback) -> bool,
+        Option<unsafe extern "C" fn(func: UnityVulkanInitCallback) -> bool>,
 }
 
 pub const GUID_VULKAN_V2: (u64, u64) = (0x329334C09DCA4787, 0xB347DD92A0097FFC);

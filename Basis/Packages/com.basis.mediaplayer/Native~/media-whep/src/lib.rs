@@ -21,6 +21,7 @@ mod signal;
 
 pub use signal::{AnswerFlow, WhepError, ice_servers_from_links, signalling_url};
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +41,10 @@ use url::Url;
 /// No frames for this long is a dead session (the transport-loss class;
 /// the engine's reconnect path takes it from there).
 const FEED_STALL: Duration = Duration::from_secs(10);
+/// How often the engine's teardown probe is sampled while signalling is
+/// driven on the runtime. The probe is a poll rather than a future, so a
+/// close lands within one tick of being asked for.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 pub struct WhepDemuxer {
     rx: mpsc::Receiver<Result<StreamEvent, String>>,
@@ -68,18 +73,48 @@ impl WhepDemuxer {
         cancelled: CancelProbe,
         gate: Arc<dyn AddressGate>,
     ) -> Result<Self, DemuxError> {
+        // A cancel that lands after the server created the session but
+        // before its answer is read leaves that session with no Location
+        // to DELETE, so the teardown in `Drop` has nothing to send and
+        // the server holds it until its own idle timeout. That is
+        // inherent to abandoning a POST in flight — the resource exists
+        // and its name arrived nowhere — and the server-side timeout is
+        // the recovery path.
+        //
+        // Signalling is driven by blocking this thread on the runtime
+        // (see `drive`), which panics on a runtime worker. This is
+        // public, so refuse by name here rather than let tokio's own
+        // assertion be how a caller finds out.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(DemuxError::Source(
+                "whep open blocks its thread and cannot run on a runtime worker".into(),
+            ));
+        }
         let endpoint = signalling_url(url).map_err(whep_err)?;
         let limits = IoLimits::default();
 
         // The socket binds on the interface that routes to the
         // signalling host — the media peer is normally the same box or
         // at least the same route.
-        let signal_addr = media_io::resolve_vetted(
-            endpoint.host_str().unwrap_or_default(),
-            endpoint.port_or_known_default().unwrap_or(443),
-            gate.as_ref(),
-        )
-        .map_err(|e| DemuxError::Source(e.into()))?;
+        // Named rather than defaulted to the empty string: the scheme
+        // screen above should make a hostless URL unreachable, and
+        // resolving "" if it is not turns a URL fault into a resolver
+        // one and reports the wrong thing.
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| WhepError::Url("signalling url has no host".into()))
+            .map_err(whep_err)?
+            .to_string();
+        let signal_addr = drive(&runtime, &cancelled, async {
+            media_io::resolve_vetted_async(
+                &host,
+                endpoint.port_or_known_default().unwrap_or(443),
+                gate.as_ref(),
+            )
+            .await
+            .map_err(WhepError::Io)
+        })
+        .map_err(whep_err)?;
         let (socket, local_addr) = bind_media_socket(signal_addr)?;
 
         // Fully gathered before POST: the one host candidate is in the
@@ -95,14 +130,28 @@ impl WhepDemuxer {
             .ok_or_else(|| DemuxError::Parse("no changes to offer".into()))?;
         let _ = (audio_mid, video_mid);
 
-        let outcome = runtime
-            .block_on(signal::post_offer(
-                &endpoint,
-                &offer.to_sdp_string(),
-                &limits,
-                &gate,
-            ))
-            .map_err(whep_err)?;
+        let outcome = drive(
+            &runtime,
+            &cancelled,
+            signal::post_offer(&endpoint, &offer.to_sdp_string(), &limits, &gate),
+        )
+        .map_err(whep_err)?;
+
+        // The server has created a session by now, and every failure
+        // from here returns before `Self` exists — so `Drop`, which owns
+        // the teardown, never runs and the server holds the session
+        // until its own idle timeout. Its name is known here, unlike a
+        // POST abandoned in flight, so the DELETE goes out on the way
+        // past: the same fire-and-forget call `Drop` makes, with its own
+        // bounded timeout.
+        let abandon = |resource: &Url, e: DemuxError| -> DemuxError {
+            let resource = resource.clone();
+            let gate = Arc::clone(&gate);
+            runtime.spawn(async move {
+                let _ = signal::delete_resource(&resource, &gate).await;
+            });
+            e
+        };
 
         let (resource, ice_servers, flow) = match outcome {
             signal::PostOutcome::Answer {
@@ -111,10 +160,12 @@ impl WhepDemuxer {
                 answer_sdp,
             } => {
                 let answer = SdpAnswer::from_sdp_string(&answer_sdp)
-                    .map_err(|e| DemuxError::Parse(format!("whep answer sdp: {e}")))?;
+                    .map_err(|e| DemuxError::Parse(format!("whep answer sdp: {e}")))
+                    .map_err(|e| abandon(&resource, e))?;
                 rtc.sdp_api()
                     .accept_answer(pending, answer)
-                    .map_err(|e| DemuxError::Parse(format!("whep answer: {e}")))?;
+                    .map_err(|e| DemuxError::Parse(format!("whep answer: {e}")))
+                    .map_err(|e| abandon(&resource, e))?;
                 (resource, ice_servers, AnswerFlow::Direct)
             }
             signal::PostOutcome::CounterOffer {
@@ -125,27 +176,30 @@ impl WhepDemuxer {
                 // The server offers; answer from a fresh Rtc (ours never
                 // completed its own negotiation).
                 let server_offer = SdpOffer::from_sdp_string(&offer_sdp)
-                    .map_err(|e| DemuxError::Parse(format!("whep counter-offer sdp: {e}")))?;
+                    .map_err(|e| DemuxError::Parse(format!("whep counter-offer sdp: {e}")))
+                    .map_err(|e| abandon(&resource, e))?;
                 let mut fresh = rtc_config(provider).build(std::time::Instant::now());
-                add_host_candidate(&mut fresh, local_addr)?;
+                add_host_candidate(&mut fresh, local_addr).map_err(|e| abandon(&resource, e))?;
                 let answer = fresh
                     .sdp_api()
                     .accept_offer(server_offer)
-                    .map_err(|e| DemuxError::Parse(format!("whep counter-offer: {e}")))?;
-                runtime
-                    .block_on(signal::patch_answer(
-                        &resource,
-                        &answer.to_sdp_string(),
-                        &limits,
-                        &gate,
-                    ))
-                    .map_err(whep_err)?;
+                    .map_err(|e| DemuxError::Parse(format!("whep counter-offer: {e}")))
+                    .map_err(|e| abandon(&resource, e))?;
+                drive(
+                    &runtime,
+                    &cancelled,
+                    signal::patch_answer(&resource, &answer.to_sdp_string(), &limits, &gate),
+                )
+                .map_err(whep_err)
+                .map_err(|e| abandon(&resource, e))?;
                 rtc = fresh;
                 (resource, ice_servers, AnswerFlow::CounterOffer)
             }
         };
 
-        let lanes = build_lanes(&mut rtc).map_err(DemuxError::Parse)?;
+        let lanes = build_lanes(&mut rtc)
+            .map_err(DemuxError::Parse)
+            .map_err(|e| abandon(&resource, e))?;
 
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
         let ready = SessionReady {
@@ -268,6 +322,39 @@ fn rtc_config(provider: Arc<str0m::config::CryptoProvider>) -> RtcConfig {
         .clear_codecs()
         .enable_h264(true)
         .enable_opus(true)
+}
+
+/// Drive one signalling exchange on the I/O runtime, abandoning it as
+/// soon as the engine's teardown probe goes true.
+///
+/// Signalling is a chain of server-chosen requests — up to six redirect
+/// hops, each at the connect and request timeouts — and the thread
+/// running it is one `bm_session_close` joins from the client's main
+/// thread. Without this the close waits the whole chain out.
+///
+/// The `block_on` that makes the polling possible is also a constraint
+/// on where the open may be called from: a runtime worker thread panics
+/// on it. `WhepDemuxer::open` is public, so it screens for that itself
+/// and refuses by name — open it from a thread of its own, as the
+/// engine's opener does, and never from inside a spawned task.
+fn drive<T>(
+    runtime: &tokio::runtime::Handle,
+    cancelled: &CancelProbe,
+    work: impl Future<Output = Result<T, WhepError>>,
+) -> Result<T, WhepError> {
+    runtime.block_on(async {
+        tokio::pin!(work);
+        loop {
+            if cancelled() {
+                return Err(WhepError::Cancelled);
+            }
+            tokio::select! {
+                biased;
+                outcome = &mut work => return outcome,
+                () = tokio::time::sleep(CANCEL_POLL) => {}
+            }
+        }
+    })
 }
 
 fn whep_err(e: WhepError) -> DemuxError {

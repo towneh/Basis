@@ -12,7 +12,7 @@ use ogg::PacketReader;
 use crate::artwork;
 use crate::{
     Artwork, Au, AudioCodec, ByteSource, DemuxError, DemuxLimits, Demuxer, EosReason, Format,
-    StreamEvent, TrackId,
+    StreamEvent, TrackId, push_note,
 };
 
 const TRACK: TrackId = TrackId(1);
@@ -295,10 +295,12 @@ impl Demuxer for OggOpusDemuxer {
                 // the contract here.
                 if !self.foreign_noted {
                     self.foreign_noted = true;
-                    self.notes.push(format!(
-                        "ignoring packets from Ogg stream serial {:#x}",
-                        packet.stream_serial()
-                    ));
+                    push_note(&mut self.notes, || {
+                        format!(
+                            "ignoring packets from Ogg stream serial {:#x}",
+                            packet.stream_serial()
+                        )
+                    });
                 }
                 continue;
             }

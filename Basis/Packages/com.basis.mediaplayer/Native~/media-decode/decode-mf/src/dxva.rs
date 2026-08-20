@@ -16,7 +16,10 @@
 //! backing: reported through [`media_decode::VideoDecoder::hardware_fell_back`]
 //! so the engine reroutes to the software path instead of failing.
 
-use media_decode::{ColorInfo, DecodeError, OpaqueFrame, OpaqueImage, SubmitOutcome, VideoFrame};
+use media_decode::{
+    ColorInfo, DecodeError, OpaqueFrame, OpaqueImage, SubmitOutcome, VideoFrame, packed_nv12_len,
+};
+use media_diag::diag_log;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
@@ -301,15 +304,36 @@ pub fn read_back_nv12(frame: &OpaqueFrame) -> Result<media_decode::Nv12Frame, De
         )?;
         let staging = staging.ok_or_else(|| DecodeError("no readback staging".into()))?;
         context.CopySubresourceRegion(&staging, 0, 0, 0, 0, texture, subresource, None);
+        let (w, h) = (frame.width as usize, frame.height as usize);
+        // Sized before the map rather than inside it: a fallible step
+        // between `Map` and `Unmap` returns with the staging texture
+        // still mapped, and it is then dropped in that state. The lock
+        // paths in the software route keep the same discipline.
+        let packed = packed_nv12_len("dxva readback", w, h)?;
         let mut mapped = Default::default();
         mf(
             context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)),
             "Map (readback)",
         )?;
-        let (w, h) = (frame.width as usize, frame.height as usize);
         let pitch = mapped.RowPitch as usize;
         let base = mapped.pData as *const u8;
-        let mut data = vec![0u8; w * h * 3 / 2];
+        // The strided read is bounded by the mapping, not by the
+        // destination `packed` sizes: the row copies read `w` bytes at
+        // `row * pitch`, and the chroma copies start at
+        // `pitch * desc.Height`, so a pitch narrower than the row or a
+        // texture shorter than the frame reads outside it. The software
+        // route checks the same shape before its own copy.
+        if base.is_null() || pitch < w || (desc.Height as usize) < h {
+            // Unmapped before the return: a fallible step inside the
+            // mapped window is what leaves the staging texture mapped
+            // when it drops.
+            context.Unmap(&staging, 0);
+            return Err(DecodeError(format!(
+                "dxva readback: {w}x{h} does not fit stride {pitch} in a {}-row texture",
+                desc.Height
+            )));
+        }
+        let mut data = vec![0u8; packed];
         for row in 0..h {
             std::ptr::copy_nonoverlapping(base.add(row * pitch), data.as_mut_ptr().add(row * w), w);
         }
@@ -436,10 +460,7 @@ impl HwVideoDecoder {
             if let Err(e) =
                 mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, dxva.manager.as_raw() as usize)
             {
-                eprintln!(
-                    "[basis-media] {}: SET_D3D_MANAGER refused: {e}",
-                    codec.tag()
-                );
+                diag_log!("{}: SET_D3D_MANAGER refused: {e}", codec.tag());
             }
             let input = video_input_type(codec.subtype(), Some((width, height)))?;
             mf(

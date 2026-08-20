@@ -2,6 +2,7 @@
 name = "media-ffi"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [lib]
@@ -13,6 +14,7 @@ rist = ["media-engine/rist"]
 
 [dependencies]
 media-clock = { workspace = true }
+media-diag = { workspace = true }
 media-engine = { workspace = true }
 media-present = { workspace = true }
 serde = { version = "1", features = ["derive"] }

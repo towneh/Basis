@@ -20,7 +20,7 @@ use media_clock::{Generation, MediaTime};
 
 use media_demux::{
     ByteSource, DemuxError, DemuxLimits, Demuxer, DiscontinuityReason, EosReason, Format,
-    Mp4Demuxer, SourceError, StreamEvent, TrackId, TsDemuxer,
+    Mp4Demuxer, SourceError, StreamEvent, TrackId, TsDemuxer, push_note,
 };
 
 /// Whole-resource fetch plus a pacing seam. `media-io` implements the
@@ -62,26 +62,107 @@ pub fn looks_like_playlist(head: &[u8]) -> bool {
     head[idx..].starts_with(b"#EXTM3U")
 }
 
+/// A leading `c:`, which names a Windows drive and is absolute to that
+/// OS with or without a separator after it. Recognised by shape rather
+/// than by `Path`, which does not see it at all off Windows.
+fn has_drive_prefix(rel: &str) -> bool {
+    let bytes = rel.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+/// A URI the engine can fetch over the network. The playlist lane has
+/// exactly one transport, so this is the whole allowlist.
+fn is_fetchable_scheme(scheme: &str) -> bool {
+    matches!(scheme, "http" | "https")
+}
+
 /// Resolve a possibly relative playlist URI against its playlist's URL
 /// (or filesystem path — local fixtures play without a server).
+///
+/// A playlist may not change what kind of thing its resources are. One
+/// served over the network resolves everything through `Url::join`,
+/// which handles an absolute URI correctly on its own, and the result
+/// has to be fetchable or it is refused: without that, a `c:` or `file:`
+/// URI resolves to something the fetcher would have opened as a path.
+/// A playlist on disk may still name network resources — those are what
+/// the address gate exists for — but anything else must sit beside it.
 fn resolve(base: &str, rel: &str) -> Result<String, DemuxError> {
-    if rel.contains("://") {
-        return Ok(rel.to_string());
-    }
     match url::Url::parse(base) {
         // A single-letter "scheme" is a Windows drive letter, not a URL.
-        Ok(base_url) if base_url.scheme().len() > 1 && !base_url.cannot_be_a_base() => base_url
-            .join(rel)
-            .map(|joined| joined.to_string())
-            .map_err(|e| DemuxError::Parse(format!("bad segment URI {rel:?}: {e}"))),
-        _ => {
-            let path = std::path::Path::new(base);
-            Ok(path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(""))
+        Ok(base_url) if base_url.scheme().len() > 1 && !base_url.cannot_be_a_base() => {
+            let joined = base_url
                 .join(rel)
-                .to_string_lossy()
-                .into_owned())
+                .map_err(|e| DemuxError::Parse(format!("bad segment URI {rel:?}: {e}")))?;
+            if !is_fetchable_scheme(joined.scheme()) {
+                return Err(DemuxError::Parse(format!(
+                    "playlist URI resolves to an unfetchable {} scheme: {rel:?}",
+                    joined.scheme()
+                )));
+            }
+            Ok(joined.to_string())
+        }
+        _ => {
+            // An absolute URI from a playlist on disk is fine when it is
+            // one the fetcher can actually go and get, and the gate vets
+            // it there. Any other scheme would land on the fetcher's
+            // filesystem arm, which is the shape this refuses.
+            if let Ok(absolute) = url::Url::parse(rel) {
+                if is_fetchable_scheme(absolute.scheme()) {
+                    return Ok(absolute.to_string());
+                }
+                return Err(DemuxError::Parse(format!(
+                    "playlist URI outside the playlist's directory: {rel:?}"
+                )));
+            }
+            // A playlist on disk names its resources beside itself, so
+            // the only URI shape that resolves is a plain relative one.
+            // Path::join drops the base entirely for an absolute rel and
+            // walks out of it for a `..`, so screen the URI here rather
+            // than build a path and rely on the fetcher to disown it.
+            //
+            // The Windows shapes are screened as text, before the
+            // components are walked, because `Path` only parses the
+            // syntax of the platform it was compiled for: a Unix build
+            // reads `C:\dir\clip.ts` as one ordinary filename and would
+            // accept a playlist written to attack a Windows client. One
+            // rule on every host beats a rule that changes shape under
+            // the reader.
+            // Defence in depth rather than the screen that catches these:
+            // a drive-shaped string parses as a URL whose scheme is the
+            // drive letter, so `c:\dir\clip.ts` and `C:/Windows/win.ini`
+            // are both refused by the unfetchable-scheme arm above and
+            // never arrive here. Only a string `Url::parse` rejects
+            // outright reaches this line, and no such string is
+            // drive-shaped — measured, not assumed. Do not read the
+            // check as load-bearing if that arm is ever reworked.
+            if rel.contains('\\') || has_drive_prefix(rel) {
+                return Err(DemuxError::Parse(format!(
+                    "playlist URI outside the playlist's directory: {rel:?}"
+                )));
+            }
+            let candidate = std::path::Path::new(rel);
+            if candidate.components().any(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            }) {
+                return Err(DemuxError::Parse(format!(
+                    "playlist URI outside the playlist's directory: {rel:?}"
+                )));
+            }
+            // A bare filename has no parent, and joining onto the empty
+            // path yields a bare name back. The fetcher is confined to a
+            // directory and judges what it is handed against it, so both
+            // sides have to spell the current directory the same way or
+            // every segment of such a playlist resolves to something the
+            // fetcher then disowns.
+            let path = std::path::Path::new(base);
+            let parent = match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => std::path::Path::new("."),
+            };
+            Ok(parent.join(rel).to_string_lossy().into_owned())
         }
     }
 }
@@ -245,10 +326,10 @@ impl Scheduler {
             // Fell out of the window: jump to the live join point and say so.
             if self.live && self.next_sequence < self.window.first_sequence {
                 let jump_to = self.live_join_sequence();
-                self.notes.push(format!(
-                    "window advanced past sequence {}; jumping to {jump_to}",
-                    self.next_sequence
-                ));
+                let from = self.next_sequence;
+                push_note(&mut self.notes, || {
+                    format!("window advanced past sequence {from}; jumping to {jump_to}")
+                });
                 self.next_sequence = jump_to;
                 self.pending_jump = true;
             }
@@ -277,10 +358,10 @@ impl Scheduler {
                     // A dead live segment is a gap to skip, not a session
                     // failure; VOD has no window racing away, so it fails.
                     Err(e) if self.live => {
-                        self.notes.push(format!(
-                            "segment {} unfetchable ({e}); skipping",
-                            self.next_sequence
-                        ));
+                        let sequence = self.next_sequence;
+                        push_note(&mut self.notes, || {
+                            format!("segment {sequence} unfetchable ({e}); skipping")
+                        });
                         self.next_sequence += 1;
                         self.pending_jump = true;
                         continue;
@@ -532,10 +613,12 @@ impl HlsDemuxer {
             ParsedPlaylist::Media(window) => *window,
             ParsedPlaylist::Master(variants) => {
                 let (bandwidth, variant_url) = variants[0].clone();
-                notes.push(format!(
-                    "master playlist: picked {bandwidth} bps of {} variants",
-                    variants.len()
-                ));
+                push_note(&mut notes, || {
+                    format!(
+                        "master playlist: picked {bandwidth} bps of {} variants",
+                        variants.len()
+                    )
+                });
                 let bytes = fetcher
                     .fetch(&variant_url, PLAYLIST_CAP)
                     .map_err(DemuxError::Source)?;

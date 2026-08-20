@@ -14,13 +14,16 @@ mod file;
 mod gate;
 mod http;
 mod live;
+mod resolve;
 mod runtime;
 
 pub use cancel::CancelToken;
 pub use fetch::ResourceFetcher;
 pub use file::FileSource;
-pub use gate::{AddressGate, AllowAllGate, PublicAddressGate, resolve_vetted, vet_host};
-pub use http::{HttpSource, vet_url};
+pub use gate::{
+    AddressGate, AllowAllGate, PublicAddressGate, resolve_vetted, resolve_vetted_async, vet_host,
+};
+pub use http::{HttpSource, vet_url_async};
 pub use live::HttpLiveSource;
 pub use runtime::io_runtime_handle;
 
@@ -34,8 +37,9 @@ pub struct IoLimits {
     pub connect_timeout: Duration,
     /// Ceiling on one ranged request, connect to last body byte. Ranged
     /// reads are chunked (`chunk_bytes`) so this doubles as the stall
-    /// detector; it is also the worst-case teardown wait while the async
-    /// I/O domain (M3) is not yet underneath this crate.
+    /// detector. It bounds a request rather than aborting one, so it is
+    /// not what makes a teardown prompt — every request and read races
+    /// the session's [`CancelToken`] for that.
     pub request_timeout: Duration,
     /// Size of one ranged request. Bounds both the per-request timeout's
     /// meaning and the bytes wasted by a discarded stream.
@@ -45,6 +49,10 @@ pub struct IoLimits {
     /// resilience path.
     pub read_stall: Duration,
     pub max_url_len: usize,
+    /// Ceiling on a signalling response body buffered whole in memory.
+    /// What this bounds is a negotiation document (SDP), not media, and
+    /// the host serving it is whichever one a session's URL names.
+    pub max_signalling_bytes: u64,
 }
 
 impl Default for IoLimits {
@@ -56,6 +64,7 @@ impl Default for IoLimits {
             chunk_bytes: 4 * 1024 * 1024,
             read_stall: Duration::from_secs(10),
             max_url_len: 4096,
+            max_signalling_bytes: 256 * 1024,
         }
     }
 }

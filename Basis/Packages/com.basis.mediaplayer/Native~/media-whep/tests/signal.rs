@@ -7,7 +7,8 @@
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use media_demux::Demuxer;
@@ -120,6 +121,79 @@ fn read_request(mut stream: &TcpStream) -> Option<Recorded> {
 
 fn find_header_end(raw: &[u8]) -> Option<usize> {
     raw.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// How long the endless-body row allows the cap refusal to take. Well
+/// under `IoLimits::request_timeout` (20 s), which is the bound it has to
+/// be told apart from, and well over anything a loopback read of the cap
+/// costs on a host running the rest of the suite alongside it.
+const REFUSAL_WINDOW: Duration = Duration::from_secs(2);
+
+/// A server whose answer never ends: chunked, so it states no length, and
+/// written until the peer goes away. [`VirtualServer`] answers with one
+/// finished string, which cannot express this shape.
+fn start_endless_server() -> (u16, mpsc::Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let tx = tx.clone();
+            // Per connection: the write loop below never returns while
+            // its peer is still there, so serving it on the accept
+            // thread would leave a second request accepted and then
+            // silent behind the first. A row that then failed would
+            // fail on the window rather than on the cap it is about.
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                if read_request(&stream).is_none() {
+                    return;
+                }
+                // Fires once the POST is read, so a row can time the read
+                // rather than everything that had to happen before it.
+                let _ = tx.send(());
+                let head = "HTTP/1.1 201 Created\r\nContent-Type: application/sdp\r\n\
+                     Location: /session/endless\r\nTransfer-Encoding: chunked\r\n\r\n";
+                if stream.write_all(head.as_bytes()).is_err() {
+                    return;
+                }
+                let chunk = format!("{:x}\r\n{}\r\n", 8192, "v".repeat(8192));
+                // Written until the peer goes away, with no bound of its
+                // own. Any finite body a fast loopback could finish
+                // inside the request timeout would let a reader that runs
+                // to EOF pass this row, which is the regression it exists
+                // to catch. The client always departs: at the cap, or at
+                // the timeout.
+                while stream.write_all(chunk.as_bytes()).is_ok() {}
+            });
+        }
+    });
+    (port, rx)
+}
+
+/// A server that accepts the POST and then never answers it, holding
+/// the connection open — the shape that leaves the client waiting out
+/// `request_timeout` unless something abandons the exchange. The channel
+/// fires once a whole request has been read, so a test can wait for the
+/// exchange to be genuinely in flight before cancelling it.
+fn start_silent_server() -> (u16, mpsc::Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // Held so the connections stay open; closing one would be an
+        // answer of sorts, and the client would stop waiting.
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            if read_request(&stream).is_some() {
+                let _ = tx.send(());
+            }
+            held.push(stream);
+        }
+    });
+    (port, rx)
 }
 
 fn response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
@@ -415,6 +489,221 @@ fn unplayable_answer_refuses_at_open() {
             );
         }
     }
+}
+
+/// The signalling body is the one HTTP read the engine buffers whole out
+/// of a host a peer chose, so it is bounded by bytes. The rows sit either
+/// side of the cap and on the shape a stated length cannot describe.
+#[test]
+fn an_answer_body_at_the_cap_is_still_read_whole() {
+    let cap = media_io::IoLimits::default().max_signalling_bytes as usize;
+    let server = VirtualServer::start(Box::new(move |_request| {
+        response(
+            "201 Created",
+            &[
+                ("Content-Type", "application/sdp"),
+                ("Location", "/session/big"),
+            ],
+            &"v".repeat(cap),
+        )
+    }));
+    let url = format!("whep://127.0.0.1:{}/stream/whep", server.port);
+    let err = open(&url, Arc::new(PermitAll))
+        .map(|_| ())
+        .expect_err("filler is not an SDP answer");
+    // On the variant rather than the wording. The cap refuses as a
+    // `Source`, as every transport failure does, and only a body read
+    // whole reaches the SDP parser and fails as a `Parse` — so this one
+    // assertion says both that the bound is inclusive and that the row
+    // got far enough to prove it. A malformed URL is the other way to
+    // reach `Parse`, and this one was well-formed enough to be served.
+    assert!(
+        matches!(err, media_demux::DemuxError::Parse(_)),
+        "exactly the cap is read whole and reaches the parser: {err}"
+    );
+}
+
+#[test]
+fn an_answer_body_past_the_cap_refuses_naming_the_cap() {
+    let cap = media_io::IoLimits::default().max_signalling_bytes as usize;
+    let server = VirtualServer::start(Box::new(move |_request| {
+        response(
+            "201 Created",
+            &[
+                ("Content-Type", "application/sdp"),
+                ("Location", "/session/toobig"),
+            ],
+            &"v".repeat(cap + 1),
+        )
+    }));
+    let url = format!("whep://127.0.0.1:{}/stream/whep", server.port);
+    let err = open(&url, Arc::new(PermitAll))
+        .map(|_| ())
+        .expect_err("one byte past the cap refuses");
+    let detail = err.to_string();
+    assert!(
+        detail.contains(&cap.to_string()) && detail.contains("cap"),
+        "the refusal names the cap it enforced: {detail}"
+    );
+}
+
+/// The counter-offer flow reads its body through the same path, so it is
+/// bounded the same way — the 406 arm is not a second, uncapped reader.
+#[test]
+fn a_counter_offer_past_the_cap_refuses_too() {
+    let cap = media_io::IoLimits::default().max_signalling_bytes as usize;
+    let server = VirtualServer::start(Box::new(move |_request| {
+        response(
+            "406 Not Acceptable",
+            &[
+                ("Content-Type", "application/sdp"),
+                ("Location", "/session/counter"),
+            ],
+            &"v".repeat(cap + 1),
+        )
+    }));
+    let url = format!("whep://127.0.0.1:{}/stream/whep", server.port);
+    let err = open(&url, Arc::new(PermitAll))
+        .map(|_| ())
+        .expect_err("one byte past the cap refuses");
+    let detail = err.to_string();
+    assert!(
+        detail.contains(&cap.to_string()) && detail.contains("cap"),
+        "the refusal names the cap it enforced: {detail}"
+    );
+}
+
+/// The case the cap exists for: a chunked answer states no length, so
+/// nothing can be checked before the read. It must refuse at the cap
+/// rather than run to the request timeout, which bounds time and not
+/// memory, so the row asserts what the error says and that it arrived an
+/// order of magnitude inside that timeout. The bound is `REFUSAL_WINDOW`
+/// rather than a millisecond figure because the row shares a host with
+/// the rest of the suite; the reading itself is a quarter of a megabyte
+/// over loopback.
+#[test]
+fn an_endless_answer_body_refuses_at_the_cap_not_the_timeout() {
+    let cap = media_io::IoLimits::default().max_signalling_bytes as usize;
+    let (port, posted) = start_endless_server();
+    let url = format!("whep://127.0.0.1:{port}/stream/whep");
+    // Timed from the POST landing rather than from the call. ICE gathering
+    // and the DTLS identity happen first and are not quick, so a window
+    // sized for the read alone can be spent before the read begins — the
+    // row would then fail without the cap having been slow at all.
+    let started = Arc::new(Mutex::new(None));
+    let stamp = Arc::clone(&started);
+    let stamper = std::thread::spawn(move || {
+        // Bounded, because the server thread holds the sender for the
+        // life of the process and the channel therefore never
+        // disconnects: an open that fails before the POST reaches the
+        // wire would otherwise leave this thread parked and the join
+        // below waiting on it for as long as the harness allows.
+        if posted.recv_timeout(Duration::from_secs(30)).is_ok() {
+            *stamp.lock().expect("stamp") = Some(std::time::Instant::now());
+        }
+    });
+    let err = open(&url, Arc::new(PermitAll))
+        .map(|_| ())
+        .expect_err("an endless body refuses");
+    // Joined before the stamp is read: the open returning says the server
+    // sent on the channel, not that the thread waiting on it has been
+    // scheduled to store the result.
+    stamper.join().expect("the stamping thread finishes");
+    let elapsed = started
+        .lock()
+        .expect("stamp")
+        .expect("the POST reached the server")
+        .elapsed();
+    let detail = err.to_string();
+    assert!(
+        detail.contains(&cap.to_string()) && detail.contains("cap"),
+        "the refusal is the cap, not a transport error: {detail}"
+    );
+    assert!(
+        elapsed < REFUSAL_WINDOW,
+        "refused on bytes read, not after the request timeout: {elapsed:?}"
+    );
+}
+
+/// `bm_session_close` joins the thread this open runs on, straight from
+/// the client's main thread, so an exchange that cannot be abandoned is
+/// a frozen client for the whole request timeout.
+#[test]
+fn a_close_during_signalling_abandons_the_open() {
+    let (port, posted) = start_silent_server();
+    let url = format!("whep://127.0.0.1:{port}/stream/whep");
+    let closing = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&closing);
+    // Recorded by the canceller: `None` afterwards means the open never
+    // got as far as a request, so the cancel proved nothing.
+    let cancelled_at = Arc::new(Mutex::new(None));
+    let stamp = Arc::clone(&cancelled_at);
+    std::thread::spawn(move || {
+        // Gathering ICE and building the DTLS identity happen before the
+        // POST and are not quick; cancelling on a timer alone can beat
+        // the request onto the wire and pass without testing anything.
+        // Bounded as in the row above: the server thread owns the sender
+        // for the life of the process, so a POST that never lands would
+        // park this thread rather than let the row say so.
+        if posted.recv_timeout(Duration::from_secs(30)).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        *stamp.lock().expect("stamp") = Some(std::time::Instant::now());
+        flag.store(true, Ordering::SeqCst);
+    });
+
+    let err = WhepDemuxer::open(
+        &url,
+        media_clock::Generation(0),
+        media_io::io_runtime_handle(),
+        Box::new(move || closing.load(Ordering::SeqCst)),
+        Arc::new(PermitAll),
+    )
+    .map(|_| ())
+    .expect_err("a cancelled open cannot succeed");
+
+    let cancelled_at = cancelled_at
+        .lock()
+        .expect("stamp")
+        .expect("the POST was in flight when the cancel landed");
+    assert!(
+        err.to_string().contains("cancelled"),
+        "the refusal names the cancel, not a transport error: {err}"
+    );
+    assert!(
+        cancelled_at.elapsed() < REFUSAL_WINDOW,
+        "returned on the cancel, not after the request timeout: {:?}",
+        cancelled_at.elapsed()
+    );
+}
+
+/// `open` drives signalling by blocking its thread on the runtime, so
+/// running it on a runtime worker panics inside tokio. It is public, so
+/// it screens for that itself and the refusal names the constraint.
+/// The URL is never reached: the screen is the first thing in the open,
+/// ahead of even parsing it.
+#[test]
+fn opening_from_inside_a_runtime_is_refused_by_name() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let err = runtime.block_on(async {
+        WhepDemuxer::open(
+            "whep://127.0.0.1:1/never-reached",
+            media_clock::Generation(0),
+            media_io::io_runtime_handle(),
+            Box::new(|| false),
+            Arc::new(PermitAll),
+        )
+        .map(|_| ())
+        .expect_err("an open on a runtime worker cannot succeed")
+    });
+    assert!(
+        err.to_string().contains("runtime worker"),
+        "the refusal names the thread model, not a transport error: {err}"
+    );
 }
 
 #[test]

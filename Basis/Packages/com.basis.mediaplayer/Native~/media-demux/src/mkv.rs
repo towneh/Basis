@@ -14,7 +14,7 @@ use crate::avc::{self, AvcConfig};
 use crate::source::ByteSource;
 use crate::{
     Au, AudioCodec, AudioTrackInfo, DemuxError, DemuxLimits, DemuxOptions, Demuxer, EosReason,
-    Format, StreamEvent, TrackId, VideoCodec,
+    Format, StreamEvent, TrackId, VideoCodec, push_note,
 };
 
 /// `Read + Seek` over a [`ByteSource`] for the EBML walker, which reads
@@ -43,6 +43,36 @@ struct SourceIo {
 
 const EOF_READ_CAP: u32 = 1024;
 const CACHE_BLOCK: u64 = 256 * 1024;
+
+/// Bounds on the two EBML *float* fields the walker forwards unfiltered.
+/// It rejects negatives only, and `NaN < 0.0` and `INFINITY < 0.0` are
+/// both false, so NaN and +Inf reach the casts here — where `as` saturates
+/// (NaN to 0, +Inf to the type maximum) instead of failing. Both limits
+/// sit above anything the codec table can carry.
+const MAX_DURATION_US: f64 = 100.0 * 3600.0 * 1_000_000.0;
+const MAX_SAMPLING_HZ: f64 = 768_000.0;
+
+/// `Channels` is a `NonZeroU64`, so its narrowing to the engine's `u32`
+/// is lossy too; bounded well above 7.1.
+const MAX_CHANNELS: u64 = 64;
+
+/// The announced audio geometry, or `None` when the container's stored
+/// values are not ones a ring can be sized from. Callers skip the track:
+/// the demuxer's posture for an unusable audio track is to pass it over,
+/// not to fail a file whose video is fine.
+fn audio_geometry(audio: &matroska_demuxer::Audio) -> Option<(u32, u32)> {
+    let hz = audio.sampling_frequency();
+    if !hz.is_finite() || !(1.0..=MAX_SAMPLING_HZ).contains(&hz) {
+        return None;
+    }
+    let channels = audio.channels().get();
+    // Rounded, not truncated: the field is a float because some rates
+    // genuinely are not integers (the /1.001 pulldown family), and an
+    // encoder that computes one lands a hair under as often as on it.
+    // Truncating turns 47 999.999… into 47 999, a rate that is wrong by
+    // one and drifts for the whole session.
+    (channels <= MAX_CHANNELS).then_some((hz.round() as u32, channels as u32))
+}
 
 impl SourceIo {
     fn read_uncached(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -227,10 +257,14 @@ impl MkvDemuxer {
             MatroskaFile::open(io).map_err(|e| DemuxError::Parse(format!("matroska: {e:?}")))?;
 
         let scale_ns = file.info().timestamp_scale().get();
-        let duration = file
-            .info()
-            .duration()
-            .map(|ticks| MediaTime::from_micros((ticks * scale_ns as f64 / 1000.0) as i64));
+        // An implausible declaration is reported as no duration rather
+        // than as a fabricated one: "unknown" is honest, a saturated 0
+        // reads as live and a saturated `i64::MAX` as a 292 000-year VOD.
+        let duration = file.info().duration().and_then(|ticks| {
+            let us = ticks * scale_ns as f64 / 1000.0;
+            (us.is_finite() && (0.0..=MAX_DURATION_US).contains(&us))
+                .then(|| MediaTime::from_micros(us as i64))
+        });
 
         let mut this = Self {
             file,
@@ -267,15 +301,18 @@ impl MkvDemuxer {
             .filter(|entry| entry.track_type() == TrackType::Audio)
             .filter_map(|entry| {
                 let codec = map_audio_codec(entry.codec_id())?;
-                let (sample_rate, channels) = entry
-                    .audio()
-                    .map(|audio| {
-                        (
-                            audio.sampling_frequency() as u32,
-                            audio.channels().get() as u32,
-                        )
-                    })
-                    .unwrap_or((0, 0));
+                // A track with no Audio element at all states a geometry
+                // that is unknown rather than implausible, and zero is how
+                // that is said: the engine reads a zero rate as unknown too
+                // and declines to extrapolate a playhead from it rather
+                // than dividing by it, so the track still plays on what its
+                // decoder reports for itself. Refusing it the way an
+                // implausible geometry is refused would drop a track that
+                // plays.
+                let (sample_rate, channels) = match entry.audio() {
+                    Some(audio) => audio_geometry(audio)?,
+                    None => (0, 0),
+                };
                 Some(AudioTrackInfo {
                     id: TrackId(entry.track_number().get() as u32),
                     language: match entry.language() {
@@ -291,11 +328,13 @@ impl MkvDemuxer {
             .collect();
         let wanted = offered.get(options.audio_track).map(|t| t.id);
         if wanted.is_none() && options.audio_track != 0 {
-            self.notes.push(format!(
-                "audio track {} requested, container has {}; using the first",
-                options.audio_track,
-                offered.len()
-            ));
+            push_note(&mut self.notes, || {
+                format!(
+                    "audio track {} requested, container has {}; using the first",
+                    options.audio_track,
+                    offered.len()
+                )
+            });
         }
         if offered.len() > 1 {
             self.audio_tracks = offered;
@@ -308,8 +347,9 @@ impl MkvDemuxer {
                 TrackType::Video if self.video.is_none() => {
                     let codec_id = entry.codec_id().to_string();
                     let Some(codec) = map_video_codec(&codec_id) else {
-                        self.notes
-                            .push(format!("track {number}: skipped video ({codec_id})"));
+                        push_note(&mut self.notes, || {
+                            format!("track {number}: skipped video ({codec_id})")
+                        });
                         continue;
                     };
                     let (width, height) = entry
@@ -324,18 +364,22 @@ impl MkvDemuxer {
                     let avc = match codec {
                         VideoCodec::H264 => {
                             let Some(private) = entry.codec_private() else {
-                                self.notes.push(format!(
-                                    "track {number}: H.264 without codec private data; skipped"
-                                ));
+                                push_note(&mut self.notes, || {
+                                    format!(
+                                        "track {number}: H.264 without codec private data; skipped"
+                                    )
+                                });
                                 continue;
                             };
                             Some(AvcConfig::parse(private)?)
                         }
                         VideoCodec::H265 => {
                             let Some(private) = entry.codec_private() else {
-                                self.notes.push(format!(
-                                    "track {number}: H.265 without codec private data; skipped"
-                                ));
+                                push_note(&mut self.notes, || {
+                                    format!(
+                                        "track {number}: H.265 without codec private data; skipped"
+                                    )
+                                });
                                 continue;
                             };
                             Some(crate::hevc::parse_hvcc(private)?)
@@ -375,19 +419,29 @@ impl MkvDemuxer {
                 {
                     let codec_id = entry.codec_id().to_string();
                     let Some(codec) = map_audio_codec(&codec_id) else {
-                        self.notes
-                            .push(format!("track {number}: skipped audio ({codec_id})"));
+                        push_note(&mut self.notes, || {
+                            format!("track {number}: skipped audio ({codec_id})")
+                        });
                         continue;
                     };
-                    let (sample_rate, channels) = entry
-                        .audio()
-                        .map(|audio| {
-                            (
-                                audio.sampling_frequency() as u32,
-                                audio.channels().get() as u32,
-                            )
-                        })
-                        .unwrap_or((0, 0));
+                    let (sample_rate, channels) = match entry.audio() {
+                        Some(audio) => match audio_geometry(audio) {
+                            Some(geometry) => geometry,
+                            None => {
+                                push_note(&mut self.notes, || {
+                                    format!(
+                                        "track {number}: skipped audio (implausible {} Hz / {} channels)",
+                                        audio.sampling_frequency(),
+                                        audio.channels()
+                                    )
+                                });
+                                continue;
+                            }
+                        },
+                        // Unknown rather than implausible, as in the
+                        // offered list above.
+                        None => (0, 0),
+                    };
                     self.pending.push_back(StreamEvent::Format(
                         track,
                         Format::Audio {
@@ -404,11 +458,13 @@ impl MkvDemuxer {
                     });
                 }
                 _ => {
-                    self.notes.push(format!(
-                        "track {number}: skipped ({:?} {})",
-                        entry.track_type(),
-                        entry.codec_id()
-                    ));
+                    push_note(&mut self.notes, || {
+                        format!(
+                            "track {number}: skipped ({:?} {})",
+                            entry.track_type(),
+                            entry.codec_id()
+                        )
+                    });
                 }
             }
         }

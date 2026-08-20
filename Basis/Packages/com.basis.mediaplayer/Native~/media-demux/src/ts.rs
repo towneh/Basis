@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 
 use media_clock::{Generation, MediaTime};
 
-use crate::demuxer::{DemuxLimits, Demuxer};
+use crate::demuxer::{DemuxLimits, Demuxer, push_note};
 use crate::source::ByteSource;
 use crate::{Au, AudioCodec, DemuxError, EosReason, Format, StreamEvent, TrackId, VideoCodec};
 
@@ -35,6 +35,34 @@ const READ_CHUNK: usize = 64 * TS_PKT;
 
 /// Blu-ray channel_assignment -> channel count (0 = reserved/unsupported).
 const LPCM_CHANNELS: [u8; 16] = [0, 1, 0, 2, 3, 3, 4, 4, 5, 6, 7, 8, 0, 0, 0, 0];
+
+/// Which of a table's 256 possible `section_number`s have been walked.
+/// Fixed size, so a table claiming every section costs 32 bytes and no
+/// allocation.
+#[derive(Default)]
+struct SectionSet([u64; 4]);
+
+impl SectionSet {
+    /// Mark `section` walked, reporting whether it already was.
+    fn mark(&mut self, section: u8) -> bool {
+        let mask = 1u64 << (section & 0x3F);
+        let word = &mut self.0[usize::from(section >> 6)];
+        let seen = *word & mask != 0;
+        *word |= mask;
+        seen
+    }
+}
+
+/// The PMT table whose sections have been walked: the PID that carried it
+/// and its `version_number`/`current_next_indicator` group. A table is a
+/// different table when either changes, and its sections are tracked
+/// individually because a PMT may legitimately span several of them and
+/// arrive in any order.
+struct PmtTable {
+    pid: u16,
+    group: u8,
+    walked: SectionSet,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TsVideo {
@@ -88,6 +116,29 @@ struct PesHeader {
 }
 
 /// PES packet header at the start of `p` (00 00 01 stream_id …).
+/// The CRC-32/MPEG-2 a PSI section carries in its last four bytes
+/// (H.222.0 §2.4.4): polynomial 0x04C11DB7, register all-ones to start,
+/// nothing reflected and nothing inverted at the end. Run over the
+/// section *including* its own CRC field, a sound one leaves zero.
+///
+/// Only a section that arrived whole can be checked — a clamped one has
+/// its CRC in the packets behind this one, which this parser does not
+/// reassemble.
+fn psi_crc_ok(section: &[u8]) -> bool {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in section {
+        crc ^= u32::from(byte) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc == 0
+}
+
 fn parse_pes_header(p: &[u8]) -> Option<PesHeader> {
     if p.len() < 9 || p[0] != 0 || p[1] != 0 || p[2] != 1 {
         return None;
@@ -126,6 +177,15 @@ pub struct TsDemuxer {
     pkt_size: Option<usize>,
 
     pmt_pid: Option<u16>,
+    /// The program the PAT selected. One PMT PID may legally carry the
+    /// tables of more than one program, and the section header's
+    /// `program_number` is what tells them apart — without it the first
+    /// section walked binds, whichever program it belongs to.
+    pmt_program: Option<u16>,
+    /// Which PMT sections have been walked, and which table they belong
+    /// to. The PID carries that table for the life of the stream, and a
+    /// table that has not changed says nothing the last one did not.
+    pmt_table: Option<PmtTable>,
     video_pid: Option<u16>,
     audio_pid: Option<u16>,
     video_codec: Option<TsVideo>,
@@ -157,6 +217,8 @@ impl TsDemuxer {
             carry: Vec::new(),
             pkt_size: None,
             pmt_pid: None,
+            pmt_program: None,
+            pmt_table: None,
             video_pid: None,
             audio_pid: None,
             video_codec: None,
@@ -219,10 +281,17 @@ impl TsDemuxer {
         }
         let payload = &pkt[off..TS_PKT];
 
+        // A section starts after the pointer field of a payload-unit-start
+        // packet. A continuation payload carries no pointer field, so
+        // parsing one reads whatever it holds as a table header.
         if pid == 0 {
-            self.parse_pat(payload);
+            if pusi {
+                self.parse_pat(payload);
+            }
         } else if Some(pid) == self.pmt_pid {
-            self.parse_pmt(payload);
+            if pusi {
+                self.parse_pmt(pid, payload);
+            }
         } else if Some(pid) == self.video_pid {
             self.feed_es(true, pusi, payload);
         } else if Some(pid) == self.audio_pid {
@@ -236,11 +305,33 @@ impl TsDemuxer {
             return;
         }
         let s = &p[1 + usize::from(p[0])..];
+        // A PAT is a program_association_section in PSI long form, and
+        // whatever else arrives on PID 0 is not this table. The guard
+        // above admits eight bytes, so the header is here to read.
+        if s[0] != 0x00 || s[1] & 0x80 == 0 {
+            return;
+        }
+        // current_next_indicator clear means this copy becomes applicable
+        // later rather than being the one in force (H.222.0 §2.4.4.9), so
+        // it may not repoint the PMT PID: doing so stops the demuxer
+        // reading the PID that is in force, and the new table identity
+        // discards the sections already walked under the old one.
+        if s[5] & 1 == 0 {
+            return;
+        }
         let section_len = (usize::from(s[1] & 0x0F) << 8) | usize::from(s[2]);
         // section_len is attacker-controlled (12 bits); this demuxer reads a
         // single packet, so clamp it to what is present rather than run off
         // the buffer.
-        let total = (3 + section_len).min(s.len());
+        let stated = 3 + section_len;
+        // Where the section arrived whole, its own check is here to run,
+        // and a section that fails it is corrupt rather than merely
+        // unexpected: the PID it names is the one the demuxer reads the
+        // program map from for the rest of the session.
+        if stated <= s.len() && !psi_crc_ok(&s[..stated]) {
+            return;
+        }
+        let total = stated.min(s.len());
         let Some(prog_bytes) = total.checked_sub(8 + 4) else {
             return; // minus 8-byte header, 4-byte CRC
         };
@@ -250,25 +341,130 @@ impl TsDemuxer {
             let program = (u16::from(prog[0]) << 8) | u16::from(prog[1]);
             let pid = (u16::from(prog[2] & 0x1F) << 8) | u16::from(prog[3]);
             if program != 0 {
-                self.pmt_pid = Some(pid); // first real program
+                // First real program, and which one it is: the pid alone
+                // does not identify the table, since another program's
+                // may share it.
+                self.pmt_pid = Some(pid);
+                self.pmt_program = Some(program);
                 break;
             }
             i += 4;
         }
     }
 
-    fn parse_pmt(&mut self, p: &[u8]) {
+    fn parse_pmt(&mut self, table_pid: u16, p: &[u8]) {
         if p.is_empty() || 1 + usize::from(p[0]) + 12 > p.len() {
             return;
         }
         let s = &p[1 + usize::from(p[0])..];
+        // A PMT is a program_map_section in PSI long form. Whatever else
+        // arrives on this PID is not this table, and must not be able to
+        // take the identity a real section needs.
+        if s[0] != 0x02 || s[1] & 0x80 == 0 {
+            return;
+        }
+        // And it must be *this* program's table. A PMT PID may legally
+        // carry more than one program's sections, distinguished only by
+        // the section header's program_number — the table_id_extension
+        // of H.222.0 §2.4.4. Without this, two programs sharing a pid
+        // both arrive as version 0 section 0, the first one walked binds
+        // its elementary streams and latches the identity, and the
+        // section belonging to the program the PAT actually selected is
+        // then dropped as a repeat. Screening here rather than widening
+        // the identity keeps one program's sections reaching the latch,
+        // so a pair from two programs cannot thrash it between them.
+        let program = (u16::from(s[3]) << 8) | u16::from(s[4]);
+        if self.pmt_program.is_some_and(|selected| selected != program) {
+            return;
+        }
+        // current_next_indicator clear means this copy is the table that
+        // becomes applicable later rather than the one in force (H.222.0
+        // §2.4.4.9), so nothing it lists may bind a PID. Every claiming
+        // arm below is guarded on the pid being unbound, so a next table
+        // walked first takes a binding the applicable one can no longer
+        // replace.
+        if s[5] & 1 == 0 {
+            return;
+        }
         let section_len = (usize::from(s[1] & 0x0F) << 8) | usize::from(s[2]);
-        let prog_info_len = (usize::from(s[10] & 0x0F) << 8) | usize::from(s[11]);
-        let total = (3 + section_len).min(s.len()); // clamp: section_len is untrusted
+        let stated = 3 + section_len;
+        // A section longer than the packet carrying it is not malformed:
+        // the rest of it is in the packets behind this one, which this
+        // parser does not reassemble.
+        let whole = stated <= s.len();
+        // As on the PAT: a whole section carries its own check, and one
+        // that fails it must not bind. Every claiming arm below is
+        // guarded on the pid being unbound, so a corrupt copy binding
+        // first stands for as long as its version does and the sound copy
+        // repeating behind it cannot replace it.
+        if whole && !psi_crc_ok(&s[..stated]) {
+            return;
+        }
+        let total = stated.min(s.len()); // clamp: section_len is untrusted
         let Some(es_end) = total.checked_sub(4) else {
             return; // up to CRC
         };
-        let mut i = 12 + prog_info_len;
+        let prog_info_len = (usize::from(s[10] & 0x0F) << 8) | usize::from(s[11]);
+        // Where the descriptors end is where the entries begin. A stated
+        // length that runs past the section leaves nothing to walk.
+        let first = 12 + prog_info_len;
+        if first > es_end {
+            return;
+        }
+
+        // Where the whole section is here, its entries must tile the space
+        // between the descriptors and the CRC exactly, and that is proven
+        // before any of it is acted on: a copy whose entries overrun the
+        // CRC, or leave a remainder too short to be another entry, is
+        // walked as far as it goes and then abandoned, and consuming the
+        // identity on the way would discard the sound copy repeating
+        // behind it — one malformed PMT would strand the program for as
+        // long as that version stood. A clamped section is exempt: what
+        // lies past the clamp is missing rather than wrong, and refusing
+        // it would bind none of the tracks its first packet does name.
+        if whole {
+            let mut scan = first;
+            while scan + 5 <= es_end {
+                let es_len = (usize::from(s[scan + 3] & 0x0F) << 8) | usize::from(s[scan + 4]);
+                let next = scan + 5 + es_len;
+                if next > es_end {
+                    return;
+                }
+                scan = next;
+            }
+            if scan != es_end {
+                return;
+            }
+        }
+
+        // Only now is this a section the walk will read, so only now does
+        // it count as walked: a malformed copy that returned above must
+        // not consume the identity a sound one arriving later needs.
+        //
+        // Repeating the table is how MPEG-TS keeps a late joiner supplied,
+        // so a walk belongs to a section this table has not shown yet
+        // rather than to a section arriving. The table's identity is the
+        // PID plus version_number + current_next_indicator: a PAT that
+        // selects a different PMT PID names a different table even where
+        // both are at version 0 section 0, which is the usual case.
+        let group = s[5] & 0x3F;
+        match &mut self.pmt_table {
+            Some(table) if table.pid == table_pid && table.group == group => {
+                if table.walked.mark(s[6]) {
+                    return;
+                }
+            }
+            slot => {
+                let mut walked = SectionSet::default();
+                walked.mark(s[6]);
+                *slot = Some(PmtTable {
+                    pid: table_pid,
+                    group,
+                    walked,
+                });
+            }
+        }
+        let mut i = first;
         while i + 5 <= es_end {
             let es = &s[i..];
             let stype = es[0];
@@ -292,10 +488,12 @@ impl TsDemuxer {
                     self.audio_codec = Some(TsAudio::Lpcm);
                 }
                 _ => {
-                    let note = format!("pmt: unclaimed stream_type {stype:#04x} on pid {pid}");
-                    if !self.notes.contains(&note) {
-                        self.notes.push(note);
-                    }
+                    // Every entry lands here once video and audio are
+                    // bound, and a PMT holds ~36 of them per packet, so
+                    // this is the note sink a stream can drive hardest.
+                    push_note(&mut self.notes, || {
+                        format!("pmt: unclaimed stream_type {stype:#04x} on pid {pid}")
+                    });
                 }
             }
             i += 5 + es_len;

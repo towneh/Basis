@@ -17,7 +17,17 @@ use crate::video::VideoMime;
 static JAVA_VM: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Record the process's `JavaVM` (from `JNI_OnLoad`). Idempotent.
-pub fn set_java_vm(vm: *mut c_void) {
+///
+/// # Safety
+/// `vm` must be the process's live `JavaVM*`, as the runtime hands it to
+/// `JNI_OnLoad`. It is kept for the process lifetime and revived later
+/// with `JavaVM::from_raw` on whichever thread runs the ceiling probe,
+/// and every JNI call that follows dispatches through the invocation
+/// table read out of it — so any other address becomes an indirect call
+/// through a word of unrelated memory. Nothing downstream can check
+/// this: the null guard at the load site rejects the one value that
+/// would fault immediately rather than misbehave.
+pub unsafe fn set_java_vm(vm: *mut c_void) {
     JAVA_VM.store(vm, Ordering::Release);
 }
 
@@ -74,8 +84,8 @@ fn jni_video_ceilings(codec_name: &str, mime: &str) -> Option<(u32, u32, u32)> {
     if vm_ptr.is_null() {
         return None;
     }
-    // SAFETY: the pointer stored by set_java_vm is the process's JavaVM,
-    // valid for the process lifetime.
+    // SAFETY: `set_java_vm` is unsafe and its contract admits only the
+    // process's live JavaVM*, so a non-null value here is one.
     let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) }.ok()?;
     let mut env = vm.attach_current_thread().ok()?;
 

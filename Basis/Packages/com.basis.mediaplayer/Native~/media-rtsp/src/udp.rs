@@ -16,7 +16,8 @@ use std::time::Instant;
 use futures::StreamExt;
 use media_clock::{Generation, MediaTime};
 use media_demux::{StreamEvent, TrackId};
-use media_rtp::{ReceiverConfig, RtpReceiver};
+use media_diag::diag_log;
+use media_rtp::{ReceiverConfig, RtpReceiver, ntp_at_zero, units_to_us};
 use retina::client::{PlayOptions, SessionOptions, SetupOptions, Transport, UdpTransportOptions};
 use retina::codec::{CodecItem, Depacketizer};
 use retina::rtp::ReceivedPacketBuilder;
@@ -44,6 +45,10 @@ pub(crate) struct UdpStream {
     /// timestamp is rebased so stream elapsed starts at zero.
     ts_start: Option<i64>,
     announced: bool,
+    /// Packets the depacketizer would not take. Loss is expected on this
+    /// lane; a count that only ever goes up is a stream nothing can
+    /// depacketize, and the two look the same from the emit path.
+    refused: u64,
 }
 
 pub(crate) struct UdpReady {
@@ -122,6 +127,7 @@ pub(crate) async fn setup_udp_session(
             depacketizer,
             ts_start: None,
             announced: false,
+            refused: 0,
         });
     }
     Ok(UdpReady {
@@ -321,7 +327,7 @@ async fn drain_stream(
             continue;
         }
         let Some(timestamp) =
-            retina::Timestamp::new(packet.timestamp - start, stream.clock_rate, 0)
+            retina::Timestamp::new(packet.timestamp.saturating_sub(start), stream.clock_rate, 0)
         else {
             continue;
         };
@@ -339,9 +345,24 @@ async fn drain_stream(
         .map_err(|e| format!("rebuild rtp packet: {e}"))?;
 
         // Per-packet depacketizer refusals are loss, not session
-        // failure — this lane tolerates loss by design.
-        if stream.depacketizer.push(built).is_err() {
-            continue;
+        // failure — this lane tolerates loss by design. The drain below
+        // is unconditional because retina can queue a completed access
+        // unit and then reject the same packet, and pushing over
+        // unpulled output panics.
+        //
+        // Discarding the reason outright left a lane refusing every
+        // packet looking like a healthy one carrying none, so the first
+        // is reported and then sparsely, with the running total to tell
+        // a burst from a stream that never depacketizes at all.
+        if let Err(e) = stream.depacketizer.push(built) {
+            stream.refused += 1;
+            if stream.refused == 1 || stream.refused.is_multiple_of(256) {
+                diag_log!(
+                    "rtsp stream {}: depacketizer refused {} packet(s), latest: {e}",
+                    stream.index,
+                    stream.refused
+                );
+            }
         }
         while let Some(item) = stream.depacketizer.pull() {
             let Ok(item) = item else {
@@ -361,7 +382,7 @@ async fn drain_stream(
                         stream.announced = true;
                     }
                     let ts = frame.timestamp();
-                    let elapsed_us = ts.elapsed() * 1_000_000 / i64::from(ts.clock_rate().get());
+                    let elapsed_us = units_to_us(ts.elapsed(), ts.clock_rate());
                     let pending = PendingFrame {
                         stream_id: stream.index,
                         elapsed_us,
@@ -383,7 +404,7 @@ async fn drain_stream(
                         stream.announced = true;
                     }
                     let ts = frame.timestamp();
-                    let elapsed_us = ts.elapsed() * 1_000_000 / i64::from(ts.clock_rate().get());
+                    let elapsed_us = units_to_us(ts.elapsed(), ts.clock_rate());
                     let pending = PendingFrame {
                         stream_id: stream.index,
                         elapsed_us,
@@ -409,11 +430,114 @@ fn update_alignment(stream: &mut UdpStream, align: &mut [StreamAlign; MAX_STREAM
         return;
     };
     let ext = stream.receiver.extend_report_ts(sr.rtp_timestamp);
-    let elapsed_us = (ext - start) * 1_000_000 / i64::from(stream.clock_rate.get());
-    let elapsed_ntp = (elapsed_us as f64 / 1e6) * 4_294_967_296.0;
-    align[stream.index].ntp_at_zero = Some(if elapsed_ntp >= 0.0 {
-        sr.ntp.wrapping_sub(elapsed_ntp as u64)
-    } else {
-        sr.ntp.wrapping_add((-elapsed_ntp) as u64)
-    });
+    let elapsed_us = units_to_us(ext.saturating_sub(start), stream.clock_rate);
+    align[stream.index].ntp_at_zero = Some(ntp_at_zero(sr.ntp, elapsed_us));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn datagram(seq: u16, timestamp: u32, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x80, 96];
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.extend_from_slice(&timestamp.to_be_bytes());
+        out.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A refused push can leave a completed access unit queued inside
+    /// retina, and the next push over it panics. Three datagrams reach
+    /// that state: an FU-A start, then a timestamp change mid-fragment
+    /// whose own payload is rejected (F bit set), then anything at all.
+    ///
+    /// What the row proves is survival, and only that. The state it
+    /// builds is a *pending* fragment, so nothing completes and the
+    /// buffer is empty at the end by construction — asserting an access
+    /// unit came out would mean completing one, which is a different
+    /// state from the one that used to panic.
+    #[test]
+    fn refused_push_still_drains_before_the_next_one() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut depacketizer =
+                Depacketizer::new("video", "h264", 90_000, None, None).expect("h264 depacketizer");
+            depacketizer.set_frame_format(frame_format());
+            let bind = || async {
+                Arc::new(
+                    UdpSocket::bind("127.0.0.1:0")
+                        .await
+                        .expect("loopback socket"),
+                )
+            };
+            let mut stream = UdpStream {
+                index: 0,
+                clock_rate: NonZeroU32::new(90_000).unwrap(),
+                rtp: bind().await,
+                rtcp: bind().await,
+                receiver: RtpReceiver::new(ReceiverConfig::new(90_000, 1, "basis-media")),
+                depacketizer,
+                ts_start: None,
+                announced: false,
+                refused: 0,
+            };
+
+            let fed_at = MediaTime::from_millis(0);
+            // Drained past the reorder window rather than at the instant
+            // the three were fed: `poll_packet` releases a sequential run
+            // straight away today, so draining at the same instant works
+            // by the current policy rather than by contract, and a change
+            // to it would fail this row for a reason that is not the one
+            // it exists to catch.
+            let now = fed_at
+                + ReceiverConfig::new(90_000, 1, "basis-media").reorder_wait
+                + MediaTime::from_millis(1);
+            for (seq, timestamp, payload) in [
+                (1000u16, 9_000u32, [0x7C, 0x85, 0x42].as_slice()),
+                (1001, 12_000, [0x9C, 0x42].as_slice()),
+                (1002, 12_000, [0x65, 0x42].as_slice()),
+            ] {
+                stream
+                    .receiver
+                    .on_rtp(fed_at, &datagram(seq, timestamp, payload))
+                    .expect("staged datagram accepted");
+            }
+
+            let (tx, _rx) = mpsc::channel(16);
+            let mut buffered = VecDeque::new();
+            let align = [StreamAlign::default(); MAX_STREAMS];
+            drain_stream(
+                &mut stream,
+                now,
+                true,
+                &mut buffered,
+                &align,
+                Generation::default(),
+                &tx,
+            )
+            .await
+            .expect("stream survives a refused push");
+            // The drain only pushes what `poll_packet` releases, and a
+            // reorder hold would release nothing at the instant the three
+            // were fed. `ts_start` is latched off the first released
+            // packet, so this is what separates surviving the push from
+            // never having made one.
+            assert!(
+                stream.ts_start.is_some(),
+                "no packet reached the depacketizer, so the row proved nothing"
+            );
+            // And that one of them was refused: the queued-output state
+            // this guards is only reachable through a refusal, so a
+            // depacketizer that took all three would leave the row
+            // passing over a state it never built.
+            assert!(
+                stream.refused > 0,
+                "nothing was refused, so the drain never covered the push that panicked"
+            );
+        });
+    }
 }

@@ -15,6 +15,39 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use media_clock::MediaTime;
 
+/// Where a textual diagnostic goes. `None` means stderr, which is the
+/// console a desktop run or `bm-probe` has. A host whose platform gives
+/// the process no usable stderr installs its own as it loads: Android
+/// discards a native process's stderr outright, so without one nothing
+/// the engine says about a session survives it.
+static SINK: Mutex<Option<fn(&str)>> = Mutex::new(None);
+
+/// Installs the sink [`log`] routes to. A host calls this once as it
+/// loads, before opening anything; the last writer wins.
+pub fn set_log_sink(sink: fn(&str)) {
+    *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+}
+
+/// Emits one diagnostic line. The default stderr sink names the source,
+/// since it shares a console with whatever else the host writes; an
+/// installed sink is not given the prefix, because a platform log that
+/// needs one carries it as a tag instead.
+pub fn log(line: &str) {
+    // Copied out so the sink runs with the lock released: a sink is
+    // host-supplied and may log, and re-entering here would deadlock.
+    let sink = *SINK.lock().unwrap_or_else(|e| e.into_inner());
+    match sink {
+        Some(sink) => sink(line),
+        None => eprintln!("[basis-media] {line}"),
+    }
+}
+
+/// [`log`] with `format!` arguments.
+#[macro_export]
+macro_rules! diag_log {
+    ($($arg:tt)*) => { $crate::log(&format!($($arg)*)) };
+}
+
 /// Every stage of the one pipeline shape (§6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
@@ -259,6 +292,10 @@ impl CaptureRecorder {
         &self.rows
     }
 
+    /// Writes the capture and flushes it. The sink is taken by value, so
+    /// returning without flushing would leave a buffered writer's tail to
+    /// its `Drop`, which discards the error by design: an `Ok` here has to
+    /// mean the rows reached the sink, not that they reached its buffer.
     pub fn write_csv<W: std::io::Write>(&self, w: W) -> std::io::Result<()> {
         self.write_csv_rows(w, true)
     }
@@ -274,7 +311,7 @@ impl CaptureRecorder {
         for row in &self.rows {
             writeln!(w, "{row}")?;
         }
-        Ok(())
+        w.flush()
     }
 }
 
@@ -318,5 +355,113 @@ mod tests {
         }
         assert_eq!(diag.take_events().len(), 2);
         assert_eq!(diag.events_dropped(), 1);
+    }
+
+    /// Accepts every byte and fails only when asked to flush: the shape a
+    /// file presents when the volume fills while its buffer is still held.
+    struct FlushFails;
+
+    impl std::io::Write for FlushFails {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("no space left on device"))
+        }
+    }
+
+    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// The sink and the capture behind it are process-wide and the harness
+    /// runs rows in parallel, so a row touching either takes this first —
+    /// otherwise one row's lines land in another row's expectations.
+    static GLOBALS: Mutex<()> = Mutex::new(());
+
+    fn capture(line: &str) {
+        CAPTURED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(line.to_string());
+    }
+
+    fn capture_marked(line: &str) {
+        CAPTURED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("replaced: {line}"));
+    }
+
+    /// One row rather than three because the sink is process-wide state,
+    /// so separate rows would race each other under the test harness.
+    /// Covers delivery, the macro's formatting and replacement; the
+    /// default stderr path is the one branch no in-process row can read.
+    #[test]
+    fn an_installed_sink_takes_every_line() {
+        let _globals = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        set_log_sink(capture);
+        log("plain");
+        crate::diag_log!("formatted {} {}", 1, "two");
+        set_log_sink(capture_marked);
+        crate::diag_log!("after replacing");
+        let lines = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // Put the default back before asserting: the sink is process-wide,
+        // the harness runs rows in parallel, and a row that panicked here
+        // would leave the capture installed for whatever ran next.
+        *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        assert_eq!(
+            lines,
+            ["plain", "formatted 1 two", "replaced: after replacing"]
+        );
+    }
+
+    /// Fails every write. Behind a buffer larger than the capture, the
+    /// first write it ever sees is the one the flush makes.
+    struct WriteFails;
+
+    impl std::io::Write for WriteFails {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("no space left on device"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn one_row() -> CaptureRecorder {
+        let diag = SessionDiag::default();
+        let mut rec = CaptureRecorder::default();
+        rec.sample(MediaTime::from_millis(16), &diag);
+        rec
+    }
+
+    /// The capture is the post-mortem channel for a failed session, so a
+    /// write that never reached the file must not return Ok. The sink is
+    /// taken by value and dropped inside the call, and a buffered writer's
+    /// Drop flushes with the error discarded, so the flush has to be made
+    /// and reported here or nowhere.
+    #[test]
+    fn a_failing_flush_is_reported() {
+        let rec = one_row();
+        assert!(rec.write_csv(FlushFails).is_err());
+    }
+
+    /// Nothing was written, so nothing can have failed on the way out —
+    /// bar the flush, which still has to be made and reported.
+    #[test]
+    fn an_empty_capture_still_flushes() {
+        let rec = CaptureRecorder::default();
+        assert!(rec.write_csv_rows(FlushFails, false).is_err());
+    }
+
+    /// The call sites all pass a `BufWriter`. Sized past the whole capture
+    /// so no row can spill early, which is what makes the tail flush the
+    /// only write and this row the shipped failure mode rather than an
+    /// overflow the `?` on `writeln!` would have caught anyway.
+    #[test]
+    fn a_buffered_tail_that_never_lands_is_reported() {
+        let rec = one_row();
+        let bytes = CaptureRecorder::header().len() + rec.rows()[0].len() + 2;
+        let w = std::io::BufWriter::with_capacity(bytes * 4, WriteFails);
+        assert!(rec.write_csv(w).is_err());
     }
 }

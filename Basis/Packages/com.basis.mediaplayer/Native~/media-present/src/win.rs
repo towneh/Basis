@@ -10,7 +10,7 @@
 use std::ffi::c_void;
 
 use media_decode::{ColorInfo, Nv12Frame};
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
@@ -168,8 +168,26 @@ impl SharedTexturePresenter {
                 ),
                 "CreateSharedHandle",
             )?;
-            let keyed: IDXGIKeyedMutex = d3d(texture.cast(), "cast IDXGIKeyedMutex")?;
-            let pass = gpu::ConvertPass::new(&device, &texture, width, height)?;
+            // The handle is owned from here, and `Drop` cannot run until
+            // `Self` exists — so a path that returns between the two has
+            // to close it itself or the texture's video memory stays
+            // pinned for the life of the process, one handle per
+            // presenter rebuild. The presenter is rebuilt on every
+            // announced coded-size or codec change.
+            let built = (|| -> Result<(IDXGIKeyedMutex, gpu::ConvertPass), PresentError> {
+                let keyed: IDXGIKeyedMutex = d3d(texture.cast(), "cast IDXGIKeyedMutex")?;
+                let pass = gpu::ConvertPass::new(&device, &texture, width, height)?;
+                Ok((keyed, pass))
+            })();
+            let (keyed, pass) = match built {
+                Ok(parts) => parts,
+                Err(e) => {
+                    // SAFETY: the handle came from `CreateSharedHandle`
+                    // above and is closed exactly once, here or in `Drop`.
+                    let _ = CloseHandle(shared_handle);
+                    return Err(e);
+                }
+            };
 
             Ok(Self {
                 device,
@@ -246,6 +264,21 @@ impl SharedTexturePresenter {
                     d3d(self.keyed.ReleaseSync(1), "ReleaseSync(1)")?;
                 }
                 Ok(true)
+            }
+        }
+    }
+}
+
+impl Drop for SharedTexturePresenter {
+    fn drop(&mut self) {
+        // `CreateSharedHandle` returns an owned NT handle: until it is
+        // closed it holds a reference to the texture, so the video memory
+        // outlives every interface on it. The presenter is its only owner.
+        if !self.shared_handle.is_invalid() {
+            // SAFETY: the handle came from `CreateSharedHandle` in `build`
+            // and is closed exactly once, here.
+            unsafe {
+                let _ = CloseHandle(self.shared_handle);
             }
         }
     }

@@ -1,5 +1,7 @@
 //! Decode trait + format types shared by the platform adapters.
 
+#![forbid(unsafe_code)]
+
 use std::fmt;
 
 /// YUV→RGB matrix, as stated by the decoder (§6.8: colour comes from the
@@ -41,6 +43,41 @@ pub struct Nv12Frame {
     pub pts_us: i64,
     pub color: ColorInfo,
     pub data: Vec<u8>,
+}
+
+/// Bytes a packed [`Nv12Frame`] of this geometry occupies: a full-width Y
+/// plane followed by a half-height interleaved chroma plane. Every route
+/// that packs one sizes its destination from here, so the layout has one
+/// rule rather than one per decoder.
+///
+/// The destination is allocated before a decoder has reported anything
+/// about the memory it will be copied from, so this is where an
+/// implausible frame size is caught: a product that wraps allocates
+/// short and the copy then writes the geometry it was given past the end
+/// of it.
+///
+/// Odd dimensions are refused rather than rounded. NV12's chroma plane
+/// is exactly half the luma in each axis, so an odd one has no
+/// representation in it at all: rounding down returns a length a copy
+/// writing half-height rows fits exactly and drops the bottom row of the
+/// picture, while a caller that rounds the other way writes past it.
+/// This is public, so the choice belongs here rather than in each route
+/// that reaches it — and refusing is what the software AV1 route already
+/// did on its own, for the same reason.
+pub fn packed_nv12_len(tag: &str, width: usize, height: usize) -> Result<usize, DecodeError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(DecodeError(format!(
+            "{tag}: NV12 geometry {width}x{height} is not representable at odd dimensions"
+        )));
+    }
+    width
+        .checked_mul(height)
+        .and_then(|y| y.checked_add(width.checked_mul(height / 2)?))
+        .ok_or_else(|| {
+            DecodeError(format!(
+                "{tag}: packed NV12 geometry {width}x{height} overflows"
+            ))
+        })
 }
 
 /// A decoded frame that never left the decoder's own memory: an opaque

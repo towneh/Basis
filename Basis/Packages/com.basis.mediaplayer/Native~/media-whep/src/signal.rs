@@ -47,6 +47,8 @@ pub enum WhepError {
     /// The response violated the WHEP shape (missing Location, empty
     /// SDP body, redirect loop).
     Protocol(String),
+    /// The session was closed while signalling was still in flight.
+    Cancelled,
 }
 
 impl std::fmt::Display for WhepError {
@@ -56,6 +58,7 @@ impl std::fmt::Display for WhepError {
             Self::Io(e) => write!(f, "whep signalling: {e}"),
             Self::Http { status, detail } => write!(f, "whep signalling ({status}): {detail}"),
             Self::Protocol(detail) => write!(f, "whep protocol: {detail}"),
+            Self::Cancelled => write!(f, "whep signalling cancelled"),
         }
     }
 }
@@ -103,8 +106,11 @@ pub fn signalling_url(url: &str) -> Result<Url, WhepError> {
 }
 
 /// A reqwest client pinned to the vetted addresses of one URL's host —
-/// the async twin of media-io's blocking connect discipline.
-fn pinned_client(
+/// the async twin of media-io's blocking connect discipline. The vet is
+/// awaited rather than blocked on: these futures share a two-worker
+/// runtime with every reader task in the process, and the host being
+/// resolved is whichever one a `Location:` header last named.
+async fn pinned_client(
     url: &Url,
     limits: &IoLimits,
     gate: &dyn AddressGate,
@@ -115,7 +121,10 @@ fn pinned_client(
         .timeout(limits.request_timeout)
         .no_proxy()
         .user_agent("basis-media/0.1");
-    if let Some((domain, addrs)) = media_io::vet_url(url, gate).map_err(WhepError::Io)? {
+    if let Some((domain, addrs)) = media_io::vet_url_async(url, gate)
+        .await
+        .map_err(WhepError::Io)?
+    {
         builder = builder.resolve_to_addrs(&domain, &addrs);
     }
     builder
@@ -133,7 +142,7 @@ pub async fn post_offer(
 ) -> Result<PostOutcome, WhepError> {
     let mut current = endpoint.clone();
     for _hop in 0..=limits.max_redirects {
-        let client = pinned_client(&current, limits, gate.as_ref())?;
+        let client = pinned_client(&current, limits, gate.as_ref()).await?;
         let response = client
             .post(current.clone())
             .header("Content-Type", "application/sdp")
@@ -173,7 +182,7 @@ pub async fn post_offer(
             201 => {
                 let resource =
                     resource.ok_or_else(|| WhepError::Protocol("201 without Location".into()))?;
-                let answer_sdp = sdp_body(response).await?;
+                let answer_sdp = sdp_body(response, limits).await?;
                 return Ok(PostOutcome::Answer {
                     resource,
                     ice_servers,
@@ -183,7 +192,7 @@ pub async fn post_offer(
             406 => {
                 let resource =
                     resource.ok_or_else(|| WhepError::Protocol("406 without Location".into()))?;
-                let offer_sdp = sdp_body(response).await?;
+                let offer_sdp = sdp_body(response, limits).await?;
                 return Ok(PostOutcome::CounterOffer {
                     resource,
                     ice_servers,
@@ -212,7 +221,7 @@ pub async fn patch_answer(
     limits: &IoLimits,
     gate: &Arc<dyn AddressGate>,
 ) -> Result<(), WhepError> {
-    let client = pinned_client(resource, limits, gate.as_ref())?;
+    let client = pinned_client(resource, limits, gate.as_ref()).await?;
     let response = client
         .patch(resource.clone())
         .header("Content-Type", "application/sdp")
@@ -233,19 +242,27 @@ pub async fn patch_answer(
 
 /// DELETE the session resource — the draft's teardown obligation. Errors
 /// are reported, not retried: the server reaps dead sessions anyway.
+///
+/// [`DELETE_TIMEOUT`] is applied twice over: once as reqwest's own
+/// connect/request bound, and once around the whole call, which is the
+/// only arm that covers the resolve preceding the request.
 pub async fn delete_resource(resource: &Url, gate: &Arc<dyn AddressGate>) -> Result<(), WhepError> {
-    let limits = IoLimits {
-        connect_timeout: DELETE_TIMEOUT,
-        request_timeout: DELETE_TIMEOUT,
-        ..IoLimits::default()
-    };
-    let client = pinned_client(resource, &limits, gate.as_ref())?;
-    client
-        .delete(resource.clone())
-        .send()
-        .await
-        .map_err(|e| WhepError::Protocol(format!("DELETE {resource}: {e}")))?;
-    Ok(())
+    tokio::time::timeout(DELETE_TIMEOUT, async {
+        let limits = IoLimits {
+            connect_timeout: DELETE_TIMEOUT,
+            request_timeout: DELETE_TIMEOUT,
+            ..IoLimits::default()
+        };
+        let client = pinned_client(resource, &limits, gate.as_ref()).await?;
+        client
+            .delete(resource.clone())
+            .send()
+            .await
+            .map_err(|e| WhepError::Protocol(format!("DELETE {resource}: {e}")))?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| WhepError::Protocol(format!("DELETE {resource}: teardown timed out")))?
 }
 
 fn header_str(response: &reqwest::Response, name: &str) -> Option<String> {
@@ -256,11 +273,27 @@ fn header_str(response: &reqwest::Response, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn sdp_body(response: reqwest::Response) -> Result<String, WhepError> {
-    let body = response
-        .text()
+/// Read the SDP body, bounded by `limits.max_signalling_bytes`. The cap
+/// comes off the chunks as they arrive rather than off a stated length,
+/// because a chunked answer states none: the request timeout bounds how
+/// long the server may write for, not how much lands in memory while it
+/// does.
+async fn sdp_body(mut response: reqwest::Response, limits: &IoLimits) -> Result<String, WhepError> {
+    let cap = limits.max_signalling_bytes;
+    let mut buf = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| WhepError::Protocol(format!("reading SDP body: {e}")))?;
+        .map_err(|e| WhepError::Protocol(format!("reading SDP body: {e}")))?
+    {
+        if buf.len() as u64 + chunk.len() as u64 > cap {
+            return Err(WhepError::Protocol(format!(
+                "SDP body exceeds the {cap}-byte cap"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&buf).into_owned();
     if body.trim().is_empty() {
         return Err(WhepError::Protocol("empty SDP body".into()));
     }

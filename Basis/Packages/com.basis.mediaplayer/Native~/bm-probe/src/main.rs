@@ -5,6 +5,8 @@
 //! Subcommands accrete per milestone; `probe` from M1, `play` and
 //! `conformance` from M2, `impair` at M3, `bench`/`resolve` at M4.
 
+#![forbid(unsafe_code)]
+
 mod bench;
 mod conformance;
 mod impair;
@@ -259,9 +261,14 @@ pub(crate) fn open_source(
         } else {
             std::sync::Arc::new(media_io::PublicAddressGate)
         };
-        media_io::HttpSource::open(url, media_io::IoLimits::default(), gate)
-            .map(|s| Box::new(s) as Box<dyn media_demux::ByteSource>)
-            .map_err(|e| e.to_string())
+        media_io::HttpSource::open(
+            url,
+            media_io::IoLimits::default(),
+            gate,
+            media_io::CancelToken::new(),
+        )
+        .map(|s| Box::new(s) as Box<dyn media_demux::ByteSource>)
+        .map_err(|e| e.to_string())
     } else {
         media_io::FileSource::open(std::path::Path::new(url))
             .map(|s| Box::new(s) as Box<dyn media_demux::ByteSource>)

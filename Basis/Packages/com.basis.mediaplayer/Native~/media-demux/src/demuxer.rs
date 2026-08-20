@@ -98,3 +98,58 @@ pub trait Demuxer: Send {
         Vec::new()
     }
 }
+
+/// Ceiling on a note collection whose entries come from the stream rather
+/// than from a container's fixed structure. Notes are drained once, after
+/// open, so nothing empties them again for the life of the session: a
+/// source that can keep producing distinct ones would otherwise grow the
+/// collection without bound on the demux thread. They are a set of
+/// findings about a source, not a log of what it did.
+pub const MAX_NOTES: usize = 64;
+
+/// Record a note unless it duplicates one already held or the collection
+/// is full. The note is built only when there is room for it, so a source
+/// generating them endlessly stops costing anything at all, and the
+/// duplicate scan stays constant-cost because the length is bounded.
+pub fn push_note(notes: &mut Vec<String>, note: impl FnOnce() -> String) {
+    if notes.len() >= MAX_NOTES {
+        return;
+    }
+    let note = note();
+    if !notes.contains(&note) {
+        notes.push(note);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn notes_fill_to_the_cap_and_stop() {
+        let mut notes = Vec::new();
+        let built = Cell::new(0usize);
+        for i in 0..MAX_NOTES * 4 {
+            push_note(&mut notes, || {
+                built.set(built.get() + 1);
+                format!("finding {i}")
+            });
+        }
+        assert_eq!(notes.len(), MAX_NOTES);
+        assert_eq!(
+            built.get(),
+            MAX_NOTES,
+            "a full collection does not even build the note"
+        );
+    }
+
+    #[test]
+    fn duplicate_notes_are_recorded_once() {
+        let mut notes = Vec::new();
+        for _ in 0..100 {
+            push_note(&mut notes, || "the same finding".to_string());
+        }
+        assert_eq!(notes, ["the same finding"]);
+    }
+}

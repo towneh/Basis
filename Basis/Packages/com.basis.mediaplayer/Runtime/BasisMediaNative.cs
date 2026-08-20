@@ -202,6 +202,11 @@ public unsafe struct BmCaption
     public long PtsUs;
     public uint TextLen;
     public fixed byte Text[256];
+    /// <summary>
+    /// Names the four bytes PtsUs's alignment adds after Text. Not part of
+    /// the contract — always 0. The struct is 272 bytes either way.
+    /// </summary>
+    public uint Reserved;
 }
 
 /// <summary>

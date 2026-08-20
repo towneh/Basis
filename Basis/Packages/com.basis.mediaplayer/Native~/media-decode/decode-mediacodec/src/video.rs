@@ -258,8 +258,25 @@ impl McVideoDecoder {
                 return Err(DecodeError(format!("AImage_getTimestamp: {status}")));
             }
             let (mut width, mut height) = (0i32, 0i32);
-            let _ = AImage_getWidth(image, &mut width);
-            let _ = AImage_getHeight(image, &mut height);
+            let status = AImage_getWidth(image, &mut width);
+            if status != AMEDIA_OK {
+                AImage_delete(image);
+                return Err(DecodeError(format!("AImage_getWidth: {status}")));
+            }
+            let status = AImage_getHeight(image, &mut height);
+            if status != AMEDIA_OK {
+                AImage_delete(image);
+                return Err(DecodeError(format!("AImage_getHeight: {status}")));
+            }
+            // A failed query leaves the out-param untouched, so a zero is
+            // indistinguishable from a real dimension by the time the
+            // present pass clamps it up to one and derives the sampling
+            // rectangle from that. Refuse the frame the way every
+            // neighbouring NDK failure here does.
+            if width <= 0 || height <= 0 {
+                AImage_delete(image);
+                return Err(DecodeError(format!("image geometry {width}x{height}")));
+            }
 
             self.alive.fetch_add(1, Ordering::AcqRel);
             let handle = McImage {
@@ -269,8 +286,8 @@ impl McVideoDecoder {
                 alive: Arc::clone(&self.alive),
             };
             Ok(Some(VideoFrame::Opaque(OpaqueFrame {
-                width: width.max(0) as u32,
-                height: height.max(0) as u32,
+                width: width as u32,
+                height: height as u32,
                 // Surface timestamps are the queued presentationTimeUs in
                 // nanoseconds.
                 pts_us: timestamp_ns / 1_000,
@@ -352,7 +369,7 @@ impl VideoDecoder for McVideoDecoder {
                 self.drain_waited += DRAIN_SLICE;
                 let _ = self.codec.pop_output(DRAIN_SLICE).map(|entry| {
                     // Put it back through the normal path.
-                    let mut state = self.codec.cb.state.lock().expect("cb lock");
+                    let mut state = self.codec.cb.lock();
                     state.output_ready.push_front(entry);
                 });
                 self.render_ready_outputs()?;

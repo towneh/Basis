@@ -9,7 +9,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use media_engine::{OpenRequest, Session, State};
+use media_engine::{EngineError, OpenRequest, Session, State};
 
 fn fixture(name: &str) -> String {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -208,5 +208,83 @@ fn a_split_request_on_a_live_transport_is_refused() {
         }),
         "a split request on an RTSP source must fail rather than open"
     );
+    session.close();
+}
+
+/// The other side of that: two sources that disagree about where their
+/// timelines start cannot be banked against one another at all. The Bank
+/// measures how much it holds as one span across everything banked, so
+/// the gap between the origins counts as media it is not holding — past
+/// the decoder cushion it reads as full from the trailing leg's first
+/// access unit, both legs park on it, release never drains, and the
+/// session sits in Buffering with no audio, no video and nothing said
+/// until it is closed. It says so instead.
+#[test]
+fn a_split_pair_whose_timelines_disagree_is_refused() {
+    // The TS fixture's first pts is ~1.47 s and the audio-only m4a starts
+    // at zero, which is what an MPEG-TS rendition against an MP4 one does
+    // by default.
+    let mut request = OpenRequest::new(fixture("h264-aac-640x360-30fps.ts"));
+    request.audio_url = Some(audio_leg());
+    let mut session = Session::open(request);
+    let shared = session.shared().clone();
+
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Error as u32
+        }),
+        "a mismatched pair must fail rather than sit in Buffering — state {}",
+        shared.state.load(Ordering::Relaxed)
+    );
+    // Which failure, not just that one happened: an unreadable fixture or
+    // a codec the host will not decode reaches Error too.
+    assert_eq!(
+        shared.last_error.load(Ordering::Relaxed),
+        EngineError::split_origin_mismatch("").code,
+        "the pair failed for some other reason"
+    );
+    session.close();
+}
+
+/// Container timelines rarely start at zero — MPEG-TS carries an arbitrary
+/// 33-bit clock, fMP4 a `baseMediaDecodeTime`, Matroska a first cluster
+/// timestamp of its own. The lead cap that keeps the two legs in step
+/// meters their progress against each other, so an origin that is not zero
+/// must not read as one leg already being ahead of the other before either
+/// has banked anything.
+#[test]
+fn a_split_pair_whose_timeline_does_not_start_at_zero_still_plays() {
+    // The TS fixture's first pts is ~1.47 s, well past the lead cap.
+    let ts = fixture("h264-aac-640x360-30fps.ts");
+    let mut request = OpenRequest::new(ts.clone());
+    request.audio_url = Some(ts);
+    let mut session = Session::open(request);
+    let shared = session.shared().clone();
+
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "split session never reached Playing — state {}",
+        shared.state.load(Ordering::Relaxed)
+    );
+
+    let pulled = run(&session, Duration::from_secs(20), || {
+        shared.state.load(Ordering::Relaxed) == State::Ended as u32
+    });
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Ended as u32,
+        "a split pair on a non-zero timeline must still end naturally"
+    );
+    // Ending is not the same as playing: a pair that reached Eos having
+    // produced nothing would satisfy the state alone. Both bars are
+    // deliberately loose — this harness pulls at wall-clock cadence, so a
+    // throughput figure measures how the test thread got scheduled.
+    assert!(
+        shared.frames_decoded.load(Ordering::Relaxed) > 0,
+        "the session ended without decoding a frame"
+    );
+    assert!(pulled > 0, "the session ended without serving any audio");
     session.close();
 }

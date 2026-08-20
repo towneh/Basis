@@ -370,3 +370,64 @@ fn present_slice_honours_the_subresource_index() {
         }
     }
 }
+
+/// The presenter owns the NT handle `CreateSharedHandle` hands back, so
+/// dropping it must close the handle — otherwise every rebuild strands a
+/// kernel handle and pins the texture's video memory for the process's life.
+///
+/// A duplicate pins the kernel object for the length of the test, so a
+/// handle value the OS recycles after the close still reads as "no longer
+/// the shared texture" rather than as a leak.
+#[test]
+fn dropping_the_presenter_closes_its_shared_handle() {
+    use windows::Win32::Foundation::{
+        CloseHandle, CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle,
+        GetHandleInformation, HANDLE,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    let presenter = SharedTexturePresenter::new(64, 64).expect("presenter");
+    let raw = HANDLE(presenter.shared_handle() as usize as *mut std::ffi::c_void);
+    let mut dup = HANDLE::default();
+    // SAFETY: handles this process owns; the duplicate is closed below.
+    unsafe {
+        let me = GetCurrentProcess();
+        DuplicateHandle(me, raw, me, &mut dup, 0, false, DUPLICATE_SAME_ACCESS)
+            .expect("duplicate the shared handle");
+    }
+    // SAFETY: both handles are live and name the same shared texture.
+    let duplicated = unsafe { CompareObjectHandles(raw, dup) }.as_bool();
+    if !duplicated {
+        // Closed before failing: panicking here would leak the duplicate
+        // for the rest of the binary, and the sibling rows in it build
+        // D3D11 devices that recycle freed handle values.
+        // SAFETY: `dup` was created above and is closed exactly once.
+        unsafe {
+            let _ = CloseHandle(dup);
+        }
+        panic!("the duplicate does not name the shared texture");
+    }
+
+    drop(presenter);
+
+    let mut flags = 0u32;
+    // SAFETY: reading a handle's flags and comparing object identity.
+    // A closed handle is reported as invalid under an ordinary run, which
+    // is what this asks about — the duplicate above is what pins the
+    // object, since a sibling row can recycle the freed value. Note that
+    // a process with strict handle checking on, which a debugger turns on
+    // for its child, raises on the closed value instead of answering; the
+    // row is written for `cargo test` and would have to ask a different
+    // way under one.
+    let still_ours = unsafe {
+        GetHandleInformation(raw, &mut flags).is_ok() && CompareObjectHandles(raw, dup).as_bool()
+    };
+    // SAFETY: the duplicate is this test's own handle, closed exactly once.
+    unsafe {
+        let _ = CloseHandle(dup);
+    }
+    assert!(
+        !still_ours,
+        "shared texture handle still open after the presenter dropped"
+    );
+}

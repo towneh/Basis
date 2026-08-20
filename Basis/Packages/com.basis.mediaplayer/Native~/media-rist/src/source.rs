@@ -6,10 +6,12 @@
 
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use media_demux::{ByteSource, SourceError};
+use media_diag::diag_log;
 
 use crate::RistError;
 use crate::ffi;
@@ -39,7 +41,10 @@ struct Shared {
 
 impl Shared {
     fn write(&self, data: &[u8]) {
-        let mut ring = self.ring.lock().expect("rist ring lock");
+        // Reached from a librist C thread: recover from poisoning rather
+        // than unwind into it. Each iteration below leaves head and fill
+        // consistent, so the ring is usable after an unrelated panic.
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         let cap = ring.buf.len();
         for &byte in data {
             let at = ring.head;
@@ -54,7 +59,7 @@ impl Shared {
     }
 
     fn drain(&self, out: &mut [u8]) -> usize {
-        let mut ring = self.ring.lock().expect("rist ring lock");
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         let cap = ring.buf.len();
         let n = out.len().min(ring.fill);
         let tail = (ring.head + cap - ring.fill) % cap;
@@ -69,20 +74,56 @@ impl Shared {
 /// librist data callback — runs on a librist output thread, must be
 /// thread-safe and must not stall. The block is reference-counted and must be
 /// released with `rist_receiver_data_block_free2`.
+/// Panics absorbed by the fence below. A count rather than a flag: the
+/// line it drives says how much has been lost this way, and the callback
+/// runs once per datagram so it cannot say so every time.
+static PANICS: AtomicU64 = AtomicU64::new(0);
+
+/// The frame is librist's, which cannot unwind, so a panic is absorbed
+/// here; the block is released on every path either way.
 extern "C" fn on_data(arg: *mut c_void, mut block: *mut ffi::RistDataBlock) -> c_int {
-    // SAFETY: `arg` is the raw Arc<Shared> handed to
-    // rist_receiver_data_callback_set2; a strong count is held for it until
-    // after rist_destroy has joined librist's threads, so it is live here.
-    let shared = unsafe { &*(arg as *const Shared) };
-    // SAFETY: librist hands a valid block whose payload/payload_len describe
-    // the recovered datagram; both are only read within those bounds.
-    unsafe {
-        if !block.is_null() && !(*block).payload.is_null() && (*block).payload_len > 0 {
-            let payload =
-                std::slice::from_raw_parts((*block).payload as *const u8, (*block).payload_len);
-            shared.write(payload);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // The block is checked below and the argument is checked here:
+        // both come from librist, and a fence catches an unwind rather
+        // than a dereference of a pointer that was never ours.
+        if arg.is_null() {
+            return;
         }
-        ffi::rist_receiver_data_block_free2(&mut block);
+        // SAFETY: `arg` is the raw Arc<Shared> handed to
+        // rist_receiver_data_callback_set2; a strong count is held for it until
+        // after rist_destroy has joined librist's threads, so it is live here,
+        // and it is non-null by the check above.
+        let shared = unsafe { &*(arg as *const Shared) };
+        // SAFETY: librist hands a valid block whose payload/payload_len describe
+        // the recovered datagram; both are only read within those bounds.
+        unsafe {
+            if !block.is_null() && !(*block).payload.is_null() && (*block).payload_len > 0 {
+                let payload =
+                    std::slice::from_raw_parts((*block).payload as *const u8, (*block).payload_len);
+                shared.write(payload);
+            }
+        }
+    }));
+    if outcome.is_err() {
+        // Absorbing it keeps the unwind off librist's thread, which is
+        // this fence's job. Saying nothing made it indistinguishable
+        // from ordinary loss: the datagram is gone either way, and this
+        // lane drops datagrams by design, so a capture showed a clean
+        // recovery where a panic was repeating. Counted rather than
+        // logged outright — the callback runs once per datagram.
+        let panics = PANICS.fetch_add(1, Ordering::Relaxed) + 1;
+        if panics == 1 || panics.is_multiple_of(256) {
+            diag_log!("rist: {panics} panic(s) in the data callback, datagram dropped");
+        }
+    }
+    // The free dereferences the block without checking it, so the null the
+    // read above already guards against is guarded here too. The return
+    // value stays 0 on every path: librist cannot re-deliver a datagram, so
+    // there is nothing a failure code would buy.
+    if !block.is_null() {
+        // SAFETY: non-null per the check above; this is the block librist
+        // handed over, released exactly once.
+        unsafe { ffi::rist_receiver_data_block_free2(&mut block) };
     }
     0
 }
@@ -305,7 +346,11 @@ impl RistSource {
             if n > 0 {
                 return n;
             }
-            let ring = self.shared.ring.lock().expect("rist ring lock");
+            // Recovered rather than propagated, as the writer and the
+            // drain are: the ring is left consistent by every one of
+            // them, so a panic elsewhere is no reason for this thread to
+            // take the session down on every later read.
+            let ring = self.shared.ring.lock().unwrap_or_else(|e| e.into_inner());
             // Re-check under the lock so a write between drain and lock
             // cannot be slept through.
             if ring.fill == 0 {
@@ -313,7 +358,7 @@ impl RistSource {
                     .shared
                     .ready
                     .wait_timeout(ring, WAIT_SLICE)
-                    .expect("rist ring lock");
+                    .unwrap_or_else(|e| e.into_inner());
             }
         }
     }

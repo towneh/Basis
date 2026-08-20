@@ -2,6 +2,7 @@
 name = "media-rist"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 build = "build.rs"
 
@@ -13,6 +14,7 @@ librist = []
 
 [dependencies]
 media-demux.workspace = true
+media-diag.workspace = true
 url = "2.5.8"
 
 [build-dependencies]

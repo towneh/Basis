@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use media_clock::{Generation, MediaTime};
 use media_demux::{DemuxError, DemuxLimits, Demuxer, Format, SourceError, StreamEvent};
-use media_hls::{HlsDemuxer, SegmentFetcher, looks_like_playlist};
+use media_hls::{HlsDemuxer, ParsedPlaylist, SegmentFetcher, looks_like_playlist};
 
 fn fixture_dir(kind: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../fixtures/hls/{kind}"))
@@ -74,7 +74,7 @@ impl SegmentFetcher for MockFetcher {
     }
 }
 
-const BASE: &str = "hls://test/index.m3u8";
+const BASE: &str = "https://test/index.m3u8";
 
 fn open(playlist: &str, fetcher: MockFetcher) -> Result<HlsDemuxer, DemuxError> {
     HlsDemuxer::open(
@@ -134,9 +134,9 @@ fn ts_fetcher(refreshes: Vec<Vec<u8>>) -> MockFetcher {
     let dir = fixture_dir("ts");
     let (fetcher, _) = MockFetcher::new(BASE, refreshes);
     fetcher
-        .with_file("hls://test/seg000.ts", dir.join("seg000.ts"))
-        .with_file("hls://test/seg001.ts", dir.join("seg001.ts"))
-        .with_file("hls://test/seg002.ts", dir.join("seg002.ts"))
+        .with_file("https://test/seg000.ts", dir.join("seg000.ts"))
+        .with_file("https://test/seg001.ts", dir.join("seg001.ts"))
+        .with_file("https://test/seg002.ts", dir.join("seg002.ts"))
 }
 
 const VOD_TS: &str = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
@@ -165,10 +165,10 @@ fn vod_fmp4_plays_every_segment_with_absolute_timestamps() {
     let dir = fixture_dir("fmp4");
     let (fetcher, _) = MockFetcher::new(BASE, vec![]);
     let fetcher = fetcher
-        .with_file("hls://test/init.mp4", dir.join("init.mp4"))
-        .with_file("hls://test/seg000.m4s", dir.join("seg000.m4s"))
-        .with_file("hls://test/seg001.m4s", dir.join("seg001.m4s"))
-        .with_file("hls://test/seg002.m4s", dir.join("seg002.m4s"));
+        .with_file("https://test/init.mp4", dir.join("init.mp4"))
+        .with_file("https://test/seg000.m4s", dir.join("seg000.m4s"))
+        .with_file("https://test/seg001.m4s", dir.join("seg001.m4s"))
+        .with_file("https://test/seg002.m4s", dir.join("seg002.m4s"));
     // EXT-X-MAP appears once and applies to every later segment.
     let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
 #EXT-X-MAP:URI=\"init.mp4\"\n\
@@ -235,7 +235,7 @@ fn live_join_starts_three_segments_from_the_edge() {
     let fetched = log.lock().unwrap().fetched.clone();
     assert_eq!(
         fetched.first().map(String::as_str),
-        Some("hls://test/seg000.ts"),
+        Some("https://test/seg000.ts"),
         "first fetch is the join point, not the window start: {fetched:?}"
     );
     assert!(
@@ -291,12 +291,12 @@ fn master_playlist_picks_the_highest_bandwidth_variant() {
     let (fetcher, log) = MockFetcher::new(BASE, vec![]);
     let dir = fixture_dir("ts");
     let mut fetcher = fetcher
-        .with_file("hls://test/seg000.ts", dir.join("seg000.ts"))
-        .with_file("hls://test/seg001.ts", dir.join("seg001.ts"))
-        .with_file("hls://test/seg002.ts", dir.join("seg002.ts"));
+        .with_file("https://test/seg000.ts", dir.join("seg000.ts"))
+        .with_file("https://test/seg001.ts", dir.join("seg001.ts"))
+        .with_file("https://test/seg002.ts", dir.join("seg002.ts"));
     fetcher
         .resources
-        .insert("hls://test/high.m3u8".into(), VOD_TS.as_bytes().to_vec());
+        .insert("https://test/high.m3u8".into(), VOD_TS.as_bytes().to_vec());
     let mut demuxer = open(master, fetcher).expect("open");
     let notes = demuxer.take_notes();
     assert!(
@@ -398,17 +398,226 @@ fn playlist_sniff_tolerates_bom_and_whitespace() {
 
 /// Fuzz-found (first hls_playlist campaign): a hostile EXTINF duration
 /// must be a typed cap refusal, not a MediaTime overflow in the
-/// cumulative-duration folds.
+/// cumulative-duration folds. Stated on a playlist that is otherwise
+/// well-formed, so the duration is what the refusal is about — the
+/// pinned campaign input below carries several hostile shapes at once
+/// and is not a witness for any one of them.
 #[test]
 fn hostile_extinf_duration_is_a_cap_refusal() {
+    let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:2679\n\
+#EXTINF:44444444444444445.988,\nseg2680.ts\n#EXT-X-ENDLIST\n";
+    match media_hls::parse_playlist(playlist.as_bytes(), BASE) {
+        Err(DemuxError::Cap(_)) => {}
+        Err(other) => panic!("expected a cap refusal, got {other:?}"),
+        Ok(_) => panic!("hostile duration parsed"),
+    }
+}
+
+/// The campaign input itself: whatever the parser makes of it, the
+/// answer is a typed error rather than a panic or an unbounded
+/// allocation. Which refusal fires is not pinned — the input carries a
+/// hostile duration, a corrupt tag and a garbage URI together, and the
+/// first one reached is an implementation detail that has moved before.
+#[test]
+fn the_pinned_campaign_input_refuses_without_panicking() {
     let bytes = std::fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/hls-playlist/extinf-overflow.m3u8"),
     )
     .expect("pinned input");
-    match media_hls::parse_playlist(&bytes, BASE) {
-        Err(DemuxError::Cap(_)) => {}
-        Err(other) => panic!("expected a cap refusal, got {other:?}"),
-        Ok(_) => panic!("hostile duration parsed"),
+    assert!(
+        media_hls::parse_playlist(&bytes, BASE).is_err(),
+        "the campaign input must refuse"
+    );
+}
+
+/// A playlist opened from disk names its resources beside itself. Path
+/// joining would drop the base entirely for an absolute URI and walk out
+/// of it for a `..`, so resolution refuses anything that is not a plain
+/// relative name rather than handing the fetcher a path to disown. A
+/// plain relative URI, with or without a `./`, still resolves.
+///
+/// Every row here holds on every host, which is the point of the list
+/// rather than an accident of it. `Path` parses only the syntax of the
+/// platform it was built for, so a Unix build reads the Windows rows as
+/// ordinary filenames and would take a playlist written to attack a
+/// Windows client; those shapes are screened as text so that the answer
+/// does not depend on who is running the test.
+#[test]
+fn a_disk_playlist_refuses_a_uri_outside_its_directory() {
+    let local_base = "/srv/fixtures/index.m3u8";
+    let playlist = |uri: &str| {
+        format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n{uri}\n#EXT-X-ENDLIST\n")
+            .into_bytes()
+    };
+
+    for uri in [
+        // Recognised by Path on any host.
+        "/etc/passwd",
+        "../../../etc/passwd",
+        "sub/../../escape.ts",
+        // Windows syntax, refused off Windows too.
+        r"C:\Windows\win.ini",
+        "c:win.ini",
+        "C:/Windows/win.ini",
+        r"\\attacker.example\share\clip.ts",
+        r"sub\..\..\escape.ts",
+    ] {
+        match media_hls::parse_playlist(&playlist(uri), local_base) {
+            Err(DemuxError::Parse(detail)) => assert!(
+                detail.contains("outside the playlist's directory"),
+                "{uri:?} refused for the wrong reason: {detail}"
+            ),
+            Err(other) => panic!("{uri:?}: expected a resolution refusal, got {other:?}"),
+            Ok(_) => panic!("{uri:?} resolved instead of refusing"),
+        }
     }
+
+    for uri in ["seg000.ts", "./seg000.ts", "nested/seg000.ts"] {
+        media_hls::parse_playlist(&playlist(uri), local_base)
+            .unwrap_or_else(|e| panic!("{uri:?} is a plain relative URI and must resolve: {e:?}"));
+    }
+}
+
+/// A playlist named without a directory — `bm-probe play index.m3u8`
+/// from inside the fixture directory — resolves its segments against the
+/// current directory explicitly. The fetcher is built confined to a
+/// directory and judges what it is handed against that root, so a bare
+/// name coming back here would be disowned there and the playlist would
+/// open and then fetch nothing.
+#[test]
+fn a_playlist_named_without_a_directory_resolves_against_the_current_one() {
+    let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg000.ts\n#EXT-X-ENDLIST\n";
+    let parsed = media_hls::parse_playlist(playlist.as_bytes(), "index.m3u8").expect("resolves");
+    let ParsedPlaylist::Media(window) = parsed else {
+        panic!("media playlist expected")
+    };
+    let resolved = std::path::Path::new(&window.segments[0].url);
+    assert!(
+        resolved.strip_prefix(".").is_ok(),
+        "must sit under the same root the fetcher is given: {:?}",
+        window.segments[0].url
+    );
+}
+
+/// A playlist served over the network may not name resources of a
+/// different kind. Every URI resolves through URL joining and the result
+/// has to be one the fetcher can actually go and get, so a scheme that
+/// would instead land on its filesystem arm is refused at resolution.
+/// The drive-letter forms are the ones that matter on Windows: `c://x`
+/// carries the `://` that used to mark a URI as absolute and pass it
+/// through untouched, and `c:/x` reads as a one-character scheme.
+#[test]
+fn a_network_playlist_cannot_change_a_uri_to_an_unfetchable_scheme() {
+    let playlist = |uri: &str| {
+        format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n{uri}\n#EXT-X-ENDLIST\n")
+            .into_bytes()
+    };
+
+    for uri in [
+        "c://Windows/win.ini",
+        "c:/Windows/win.ini",
+        "C://Windows//System32/drivers/etc/hosts",
+        "file:///etc/passwd",
+        "ftp://attacker.example/clip.ts",
+        "data:text/plain,hello",
+    ] {
+        match media_hls::parse_playlist(&playlist(uri), BASE) {
+            Err(DemuxError::Parse(detail)) => assert!(
+                detail.contains("unfetchable"),
+                "{uri:?} refused for the wrong reason: {detail}"
+            ),
+            Err(other) => panic!("{uri:?}: expected a scheme refusal, got {other:?}"),
+            Ok(_) => panic!("{uri:?} resolved instead of refusing"),
+        }
+    }
+
+    // What a real playlist does, all still fine: relative, root-relative,
+    // absolute onto another host (a CDN split across origins), and a
+    // scheme change between the two fetchable ones.
+    for uri in [
+        "seg000.ts",
+        "/other/seg000.ts",
+        "https://cdn.example/seg000.ts",
+        "http://cdn.example/seg000.ts",
+    ] {
+        media_hls::parse_playlist(&playlist(uri), BASE)
+            .unwrap_or_else(|e| panic!("{uri:?} is an ordinary playlist URI: {e:?}"));
+    }
+}
+
+/// A playlist on disk may still name network resources — that is an
+/// ordinary local fixture pointing at a CDN, and the address gate vets
+/// it at the fetcher. Only the schemes that would reach the filesystem
+/// arm are refused.
+#[test]
+fn a_disk_playlist_may_still_name_network_resources() {
+    let playlist = |uri: &str| {
+        format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n{uri}\n#EXT-X-ENDLIST\n")
+            .into_bytes()
+    };
+    let local_base = "/srv/fixtures/index.m3u8";
+
+    for uri in ["https://cdn.example/seg000.ts", "http://cdn.example/seg.ts"] {
+        let parsed = media_hls::parse_playlist(&playlist(uri), local_base)
+            .unwrap_or_else(|e| panic!("{uri:?} must resolve from a disk playlist: {e:?}"));
+        match parsed {
+            ParsedPlaylist::Media(window) => assert_eq!(
+                window.segments[0].url, uri,
+                "the URI stays whole for the fetcher to vet"
+            ),
+            ParsedPlaylist::Master(_) => panic!("media playlist expected"),
+        }
+    }
+
+    // A scheme that would land on the filesystem arm is still refused.
+    for uri in ["file:///etc/passwd", "c://Windows/win.ini"] {
+        assert!(
+            media_hls::parse_playlist(&playlist(uri), local_base).is_err(),
+            "{uri:?} must not resolve from a disk playlist"
+        );
+    }
+}
+
+/// The scheduler's notes are drained once, before playback starts, so
+/// nothing empties them again for the life of a live session — and a live
+/// session records one on every window jump and every segment it has to
+/// skip. Over hours that is unbounded growth on the demux thread, so the
+/// collection is capped like the demuxers' own.
+#[test]
+fn scheduler_notes_stay_bounded_over_a_long_live_session() {
+    // Three segments per window, so the live join point is the window
+    // start and every one of them is reached; none of them is fetchable,
+    // so each is a skip note. Each refresh moves the window far past the
+    // cursor, which is a jump note on top.
+    let window = |first: u64| {
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first}\n\
+             #EXTINF:2.0,\ngone{first}a.ts\n#EXTINF:2.0,\ngone{first}b.ts\n\
+             #EXTINF:2.0,\ngone{first}c.ts\n"
+        )
+    };
+    // Every refresh offers at least its own window-jump note, so asking
+    // for one more window than the cap holds overruns it whatever the cap
+    // is set to. Derived rather than fixed: a count chosen against today's
+    // cap turns a raised cap into a failing row about nothing.
+    let windows = media_demux::MAX_NOTES as u64 + 1;
+    let refreshes: Vec<Vec<u8>> = (1..=windows)
+        .map(|i| window(i * 100).into_bytes())
+        .collect();
+    let (fetcher, _log) = MockFetcher::new(BASE, refreshes);
+    let mut demuxer = open(&window(0), fetcher).expect("a live playlist opens");
+    // One jump note per window, plus a skip note per segment in it.
+    for _ in 0..10_000 {
+        match demuxer.next_event() {
+            Ok(StreamEvent::Eos(_)) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    let notes = demuxer.take_notes();
+    assert_eq!(
+        notes.len(),
+        media_demux::MAX_NOTES,
+        "filled and stopped rather than growing with the session: {notes:?}"
+    );
 }

@@ -6,7 +6,8 @@
 use std::ptr::NonNull;
 
 use media_decode::{
-    ColorInfo, DecodeError, Nv12Frame, SubmitOutcome, VideoDecoder, VideoFrame, YuvMatrix, YuvRange,
+    ColorInfo, DecodeError, Nv12Frame, SubmitOutcome, VideoDecoder, VideoFrame, YuvMatrix,
+    YuvRange, packed_nv12_len,
 };
 use rav1d::include::dav1d::data::Dav1dData;
 use rav1d::include::dav1d::dav1d::{Dav1dContext, Dav1dSettings};
@@ -87,18 +88,41 @@ impl SwAv1Decoder {
         }
         let width = pic.p.w as usize;
         let height = pic.p.h as usize;
-        // NV12 wants even dimensions; AV1 4:2:0 has even coded sizes.
+        // An AV1 frame size is `frame_width_minus_1 + 1`, so it may be odd,
+        // and NV12 has no way to carry that: its chroma plane is exactly
+        // half the luma in each axis. The interleave below would take
+        // `width / 2` samples of a `width.div_ceil(2)`-wide chroma row and
+        // drop the last column, and the present layer refuses an odd frame
+        // outright — so refuse here, where the reason is still legible,
+        // rather than once per frame further down.
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(DecodeError(format!(
+                "AV1 picture {width}x{height} has no NV12 representation"
+            )));
+        }
         let (y, u, v) = match (pic.data[0], pic.data[1], pic.data[2]) {
             (Some(y), Some(u), Some(v)) => (y, u, v),
             _ => return Err(DecodeError("AV1 picture without planes".into())),
         };
-        let y_stride = pic.stride[0] as usize;
-        let uv_stride = pic.stride[1] as usize;
-        let mut data = vec![0u8; width * height * 3 / 2];
+        let Some((y_stride, uv_stride)) = checked_strides(pic.stride[0], pic.stride[1], width)
+        else {
+            return Err(DecodeError(format!(
+                "AV1 picture strides {}/{} cannot cover {width}x{height}",
+                pic.stride[0], pic.stride[1]
+            )));
+        };
+        // Both axes are even by the refusal above — which the shared
+        // rule now makes as well, keeping the one here for the message
+        // it gives a stream that names an odd picture. It sizes this
+        // exactly: a full Y plane and a half-height interleaved chroma
+        // one, checked, because it is what sizes the destination the
+        // unsafe block below writes through.
+        let mut data = vec![0u8; packed_nv12_len("AV1 picture", width, height)?];
         // SAFETY: the picture's planes are valid for its stated geometry
-        // until dav1d_picture_unref; every row read is within
-        // stride-sized rows for height (Y) and height/2 (U/V), and the
-        // destination is sized width*height*3/2 up front.
+        // until dav1d_picture_unref; the strides are checked forwards and
+        // at least as wide as the rows they carry above, so every row read
+        // is within the plane, and the destination is sized for the
+        // packed frame up front.
         unsafe {
             let y = y.as_ptr() as *const u8;
             for row in 0..height {
@@ -231,5 +255,32 @@ impl Drop for SwAv1Decoder {
             let mut ctx = Some(self.ctx);
             dav1d_close(Some(NonNull::from(&mut ctx)));
         }
+    }
+}
+
+/// The strides are signed, and the decoder states them per picture: a
+/// negative one is a bottom-up plane the forward row reads in `convert`
+/// cannot follow, and one shorter than the row it carries cannot bound
+/// them either. `None` for both.
+fn checked_strides(y: isize, uv: isize, width: usize) -> Option<(usize, usize)> {
+    let y = usize::try_from(y).ok()?;
+    let uv = usize::try_from(uv).ok()?;
+    (y >= width && uv >= width.div_ceil(2)).then_some((y, uv))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_strides;
+
+    #[test]
+    fn a_picture_stride_that_cannot_cover_its_rows_is_refused() {
+        assert_eq!(checked_strides(1920, 960, 1920), Some((1920, 960)));
+        assert_eq!(checked_strides(2048, 1024, 1920), Some((2048, 1024)));
+        // Bottom-up planes, either one.
+        assert_eq!(checked_strides(-1920, 960, 1920), None);
+        assert_eq!(checked_strides(1920, -960, 1920), None);
+        // Shorter than the row it carries, either plane.
+        assert_eq!(checked_strides(1919, 960, 1920), None);
+        assert_eq!(checked_strides(1920, 959, 1920), None);
     }
 }

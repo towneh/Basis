@@ -13,7 +13,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use media_clock::{Generation, MediaTime};
 
-use crate::demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer};
+use crate::demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer, push_note};
 use crate::source::{ByteSource, SourceReader};
 use crate::{Au, AudioCodec, DemuxError, EosReason, Format, StreamEvent, TrackId, VideoCodec};
 
@@ -187,11 +187,13 @@ impl Mp4Demuxer {
         }
         let wanted = audio_ids.get(options.audio_track).copied();
         if wanted.is_none() && options.audio_track != 0 {
-            self.notes.push(format!(
-                "audio track {} requested, container has {}; using the first",
-                options.audio_track,
-                audio_ids.len()
-            ));
+            push_note(&mut self.notes, || {
+                format!(
+                    "audio track {} requested, container has {}; using the first",
+                    options.audio_track,
+                    audio_ids.len()
+                )
+            });
         }
 
         for (id, track) in mp4.tracks() {
@@ -215,8 +217,9 @@ impl Mp4Demuxer {
                     }
                 }
                 _ => {
-                    self.notes
-                        .push(format!("track {id}: skipped ({:?})", track.kind));
+                    push_note(&mut self.notes, || {
+                        format!("track {id}: skipped ({:?})", track.kind)
+                    });
                     continue;
                 }
             }
@@ -299,11 +302,13 @@ impl Mp4Demuxer {
                 )
             }
             _ => {
-                self.notes.push(format!(
-                    "track {}: skipped video (unsupported sample entry: {})",
-                    track_id.0,
-                    track.codec_string(mp4).unwrap_or_default()
-                ));
+                push_note(&mut self.notes, || {
+                    format!(
+                        "track {}: skipped video (unsupported sample entry: {})",
+                        track_id.0,
+                        track.codec_string(mp4).unwrap_or_default()
+                    )
+                });
                 return Ok(None);
             }
         };
@@ -348,24 +353,26 @@ impl Mp4Demuxer {
         let trak = track.trak(mp4);
         let stsd = &trak.mdia.minf.stbl.stsd;
         let re_mp4::StsdBoxContent::Mp4a(mp4a) = &stsd.contents else {
-            self.notes.push(format!(
-                "track {}: skipped audio (not AAC/mp4a)",
-                track_id.0
-            ));
+            push_note(&mut self.notes, || {
+                format!("track {}: skipped audio (not AAC/mp4a)", track_id.0)
+            });
             return None;
         };
         let Some(esds) = &mp4a.esds else {
-            self.notes
-                .push(format!("track {}: mp4a without esds", track_id.0));
+            push_note(&mut self.notes, || {
+                format!("track {}: mp4a without esds", track_id.0)
+            });
             return None;
         };
         let dec = &esds.es_desc.dec_config;
         // 0x40 = MPEG-4 Audio, 0x67 = MPEG-2 AAC-LC.
         if dec.object_type_indication != 0x40 && dec.object_type_indication != 0x67 {
-            self.notes.push(format!(
-                "track {}: skipped audio (object type {:#x}, not AAC)",
-                track_id.0, dec.object_type_indication
-            ));
+            push_note(&mut self.notes, || {
+                format!(
+                    "track {}: skipped audio (object type {:#x}, not AAC)",
+                    track_id.0, dec.object_type_indication
+                )
+            });
             return None;
         }
         let spec = &dec.dec_specific;
@@ -375,10 +382,12 @@ impl Mp4Demuxer {
         // common case and refuse the escapes (AOT 31, freq index 15) whose
         // reconstruction would be a guess.
         if spec.profile == 0 || spec.profile > 31 || spec.freq_index >= 15 {
-            self.notes.push(format!(
-                "track {}: refused AAC config (AOT {}, freq index {})",
-                track_id.0, spec.profile, spec.freq_index
-            ));
+            push_note(&mut self.notes, || {
+                format!(
+                    "track {}: refused AAC config (AOT {}, freq index {})",
+                    track_id.0, spec.profile, spec.freq_index
+                )
+            });
             return None;
         }
         // The in-box platform decoders handle at most 6 explicitly
@@ -386,10 +395,12 @@ impl Mp4Demuxer {
         // layouts AV inside the MFT rather than erroring). PCE-defined
         // layouts (chan_conf 0) leave the real width unknown: refused too.
         if spec.chan_conf < 1 || spec.chan_conf > 6 {
-            self.notes.push(format!(
-                "track {}: refused AAC channel configuration {}",
-                track_id.0, spec.chan_conf
-            ));
+            push_note(&mut self.notes, || {
+                format!(
+                    "track {}: refused AAC channel configuration {}",
+                    track_id.0, spec.chan_conf
+                )
+            });
             return None;
         }
         let asc = vec![
@@ -421,8 +432,9 @@ impl Mp4Demuxer {
         let samples = match self.collect_shifted_samples(&track.samples, priming) {
             Ok(samples) => samples,
             Err(e) => {
-                self.notes
-                    .push(format!("track {}: audio refused: {e}", track_id.0));
+                push_note(&mut self.notes, || {
+                    format!("track {}: audio refused: {e}", track_id.0)
+                });
                 return None;
             }
         };

@@ -2,12 +2,14 @@
 name = "media-whep"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 bytes = "1"
 media-clock.workspace = true
 media-demux.workspace = true
+media-diag.workspace = true
 media-io.workspace = true
 media-rtp.workspace = true
 media-rtsp.workspace = true

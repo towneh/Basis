@@ -34,7 +34,7 @@ use std::thread::JoinHandle;
 use media_bank::{Bank, BankConfig, BufferDepth, Liveness};
 use media_clock::{ClockConfig, Generation, MediaClock, MediaTime};
 use media_demux::{ByteSource, DemuxError, DemuxLimits, DemuxOptions, SourceError};
-use media_diag::{EventCode, SessionDiag, Stage};
+use media_diag::{EventCode, SessionDiag, Stage, diag_log};
 use media_io::{AllowAllGate, FileSource, HttpSource, IoError, IoLimits, PublicAddressGate};
 
 /// Decode-channel depths. The audio side stays shallow (its decoders and
@@ -144,6 +144,21 @@ impl EngineError {
             code: 501,
             category: ErrorCategory::Config,
             stage: Stage::Source,
+            detail: detail.into(),
+        }
+    }
+
+    /// The two sources of a split pair measure their timelines from
+    /// points too far apart to play against one another. A property of
+    /// the pair the caller asked for rather than of either source, so it
+    /// shares the descriptor's category, with its own sub-code because
+    /// the answer is to pick a different rendition rather than to fix a
+    /// URL.
+    pub fn split_origin_mismatch(detail: impl Into<String>) -> Self {
+        Self {
+            code: 502,
+            category: ErrorCategory::Config,
+            stage: Stage::Demux,
             detail: detail.into(),
         }
     }
@@ -416,7 +431,10 @@ impl Session {
                 .name("bm-diag".into())
                 .spawn(move || run_diag_sampler(sampler_px, path, append))
                 .expect("spawn diag sampler thread");
-            threads.lock().expect("threads lock").push(sampler);
+            threads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(sampler);
         }
         let opener_px = Arc::clone(&px);
         let opener_threads = Arc::clone(&threads);
@@ -424,7 +442,10 @@ impl Session {
             .name("bm-open".into())
             .spawn(move || open_and_run(opener_px, request, source, bank_cfg, opener_threads))
             .expect("spawn opener thread");
-        threads.lock().expect("threads lock").push(opener);
+        threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(opener);
 
         Self { px, threads }
     }
@@ -560,9 +581,25 @@ impl Session {
         self.px.shared.stop.store(true, Ordering::Relaxed);
         self.px.io_cancel.cancel();
         self.px.bank.changed.notify_all();
-        let handles: Vec<_> = std::mem::take(&mut *self.threads.lock().expect("threads lock"));
-        for handle in handles {
-            let _ = handle.join();
+        // Drop runs this, where a panic would abort the process rather
+        // than reach the ABI's fences, so poisoning is recovered from at
+        // every site on this lock. The handles stay valid across one.
+        //
+        // Drained in a loop because the opener registers the pipeline's
+        // threads part-way through its own run: closing mid-open takes a
+        // list holding just the opener, and returning after joining it
+        // would leave the threads it spawned meanwhile running on shared
+        // state the caller believes is released. The opener is the only
+        // registrar, so the drain after it is joined is the last one.
+        loop {
+            let handles: Vec<_> =
+                std::mem::take(&mut *self.threads.lock().unwrap_or_else(|e| e.into_inner()));
+            if handles.is_empty() {
+                break;
+            }
+            for handle in handles {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -609,7 +646,7 @@ fn run_diag_sampler(px: Arc<PipelineShared>, path: std::path::PathBuf, append: b
         .open(&path)
         .and_then(|file| recorder.write_csv_rows(std::io::BufWriter::new(file), header));
     if let Err(e) = written {
-        eprintln!("[basis-media] diag csv {}: {e}", path.display());
+        diag_log!("diag csv {}: {e}", path.display());
     }
 }
 
@@ -646,14 +683,25 @@ fn read_all(source: &mut dyn ByteSource, cap: u64) -> Result<Vec<u8>, SourceErro
 
 const PLAYLIST_CAP: u64 = 4 * 1024 * 1024;
 
+/// Where a playlist came from, which fixes what its URIs may reach for
+/// the life of the session. A playlist read off the network can name only
+/// more network; one opened from disk can name either, since reaching the
+/// network is what the address gate already covers.
+enum PlaylistOrigin {
+    Network,
+    Disk,
+}
+
 /// HLS lane: playlist bytes sniffed, hand the URL to the HLS demuxer with
-/// a per-resource fetcher. The playlist states its own liveness
-/// (EXT-X-ENDLIST), and the Bank mode follows it; the HLS scheduler owns
-/// resilience, so the lane takes no engine reconnect factory.
+/// a per-resource fetcher built for where the playlist came from. The
+/// playlist states its own liveness (EXT-X-ENDLIST), and the Bank mode
+/// follows it; the HLS scheduler owns resilience, so the lane takes no
+/// engine reconnect factory.
 fn open_hls(
     px: Arc<PipelineShared>,
     url: &str,
     playlist: Vec<u8>,
+    origin: PlaylistOrigin,
     allow_local: bool,
     mut bank_cfg: BankConfig,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -663,7 +711,31 @@ fn open_hls(
     } else {
         Arc::new(PublicAddressGate)
     };
-    let fetcher = media_io::ResourceFetcher::new(IoLimits::default(), gate, px.io_cancel.clone());
+    let limits = IoLimits::default();
+    let fetcher = match origin {
+        PlaylistOrigin::Network => {
+            media_io::ResourceFetcher::remote(limits, gate, px.io_cancel.clone())
+        }
+        PlaylistOrigin::Disk => {
+            // Segments resolve beside the playlist, so its own directory
+            // is the root. A bare filename has none; that is the cwd.
+            let dir = std::path::Path::new(url)
+                .parent()
+                .unwrap_or(std::path::Path::new(""));
+            let dir = if dir.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                dir
+            };
+            match media_io::ResourceFetcher::local(dir, limits, gate, px.io_cancel.clone()) {
+                Ok(fetcher) => fetcher,
+                Err(e) => {
+                    px.fail(EngineError::io(e));
+                    return;
+                }
+            }
+        }
+    };
     match media_hls::HlsDemuxer::open(
         url,
         playlist,
@@ -727,7 +799,16 @@ fn open_http_live(
     if media_hls::looks_like_playlist(&head[..filled]) {
         match read_all(&mut counted, PLAYLIST_CAP) {
             Ok(playlist) => {
-                open_hls(px, url, playlist, allow_local, bank_cfg, threads);
+                // This lane is only ever entered for an http(s) URL.
+                open_hls(
+                    px,
+                    url,
+                    playlist,
+                    PlaylistOrigin::Network,
+                    allow_local,
+                    bank_cfg,
+                    threads,
+                );
             }
             Err(e) => px.fail(EngineError::demux(DemuxError::Source(e))),
         }
@@ -826,9 +907,9 @@ fn open_rtsp(
                     Stage::Source,
                     reason.to_string(),
                 );
-                eprintln!("[basis-media] rtsp transport fallback: {reason}");
+                diag_log!("rtsp transport fallback: {reason}");
             }
-            eprintln!("[basis-media] rtsp transport: {}", demuxer.transport());
+            diag_log!("rtsp transport: {}", demuxer.transport());
             Ok(Box::new(demuxer))
         }
     };
@@ -888,8 +969,8 @@ fn open_whep(
                 gate,
             )
             .map_err(EngineError::demux)?;
-            eprintln!(
-                "[basis-media] whep negotiated: {} flow{}",
+            diag_log!(
+                "whep negotiated: {} flow{}",
                 demuxer.answer_flow(),
                 if demuxer.ice_servers().is_empty() {
                     String::new()
@@ -973,8 +1054,8 @@ fn open_rist(
                 return;
             }
         };
-    eprintln!(
-        "[basis-media] rist transport: librist {} main profile",
+    diag_log!(
+        "rist transport: librist {} main profile",
         media_rist::RistSource::library_version()
     );
     let counted = CountedSource {
@@ -992,6 +1073,113 @@ fn open_rist(
     }
 }
 
+/// What a session's URL names. Decided once, from the URL parser's
+/// normalised scheme rather than from raw prefixes, because schemes are
+/// case-insensitive (RFC 3986 §3.1) and the managed classifier that
+/// steers the same string compares them that way. A local path is a
+/// case of its own and not the fallthrough: a string that matches
+/// nothing known is a refusal, not something to open off the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    Http,
+    Rtsp,
+    Whep,
+    Rist,
+    File,
+    /// The caller brought the bytes, so the request's URL is a label
+    /// rather than a location and names nothing to open.
+    Supplied,
+}
+
+impl SourceKind {
+    /// Every transport that carries both tracks in one stream, so a
+    /// separate audio leg cannot apply to it.
+    fn is_live_transport(self) -> bool {
+        matches!(self, SourceKind::Rtsp | SourceKind::Whep | SourceKind::Rist)
+    }
+}
+
+/// A path that names a host rather than a place on this machine. Windows
+/// resolves both spellings through the SMB redirector, so opening one is
+/// a network connection that never reaches the address gate — the same
+/// class of reach the gate exists to decide on, arriving through a route
+/// it does not watch.
+///
+/// Matched as text, on every host: `Path` recognises only the syntax of
+/// the platform it was compiled for, and the answer to "is this a
+/// network path" should not depend on who is asking.
+fn names_a_network_share(url: &str) -> bool {
+    // Two leading separators are not always a host. `\\?\` and `\\.\`
+    // open the device namespace, where `\\?\C:\clips\x.mp4` is the long
+    // spelling of a local file — what a caller reaches for past MAX_PATH —
+    // and only the UNC device names a host. Backslashes only: an
+    // extended-length path reaches the object manager unnormalised, so the
+    // forward-slash pairings are not this prefix.
+    if let Some(rest) = url
+        .strip_prefix(r"\\?\")
+        .or_else(|| url.strip_prefix(r"\\.\"))
+    {
+        // `get` rather than a slice: the device name is a str and its
+        // fourth byte need not be a character boundary.
+        return rest
+            .get(..4)
+            .is_some_and(|device| device.eq_ignore_ascii_case(r"UNC\"));
+    }
+    // Windows takes either separator in either position, so all four
+    // pairings name the same share.
+    let mut bytes = url.bytes();
+    matches!(
+        (bytes.next(), bytes.next()),
+        (Some(b'\\' | b'/'), Some(b'\\' | b'/'))
+    )
+}
+
+/// The URL with its scheme in the parser's normalised form and every
+/// other byte untouched. The transports below match their schemes as
+/// text, so normalise once here rather than teach each of them that
+/// `RTSP://` is the same request as `rtsp://`.
+///
+/// Spliced only where the leading bytes really are that scheme in some
+/// other case. The parser skips leading control characters and spaces
+/// before it reads a scheme, so its answer does not always start at byte
+/// zero of what the caller wrote, and splicing on length alone would
+/// build a string that is neither what was asked for nor what was
+/// parsed. Where the two disagree the URL is left exactly as it came in
+/// and the transport's own parser sees the same input this one did.
+fn with_normalised_scheme(url: &str, scheme: &str) -> String {
+    match url.get(..scheme.len()) {
+        Some(prefix) if prefix.eq_ignore_ascii_case(scheme) && prefix != scheme => {
+            format!("{scheme}{}", &url[scheme.len()..])
+        }
+        _ => url.to_owned(),
+    }
+}
+
+/// Classify `url`, and hand back the spelling the lanes below should
+/// use. An unknown scheme is a typed refusal.
+fn classify(url: &str) -> Result<(SourceKind, String), EngineError> {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Ok((SourceKind::File, url.to_owned()));
+    };
+    // A single-letter "scheme" is a Windows drive letter, not a URL.
+    let scheme = parsed.scheme();
+    if scheme.len() <= 1 {
+        return Ok((SourceKind::File, url.to_owned()));
+    }
+    let kind = match scheme {
+        "http" | "https" => SourceKind::Http,
+        "rtsp" | "rtspt" => SourceKind::Rtsp,
+        "whep" | "wheps" => SourceKind::Whep,
+        "rist" => SourceKind::Rist,
+        other => {
+            return Err(EngineError::config(format!(
+                "unsupported source scheme: {other}"
+            )));
+        }
+    };
+    Ok((kind, with_normalised_scheme(url, scheme)))
+}
+
 fn open_and_run(
     px: Arc<PipelineShared>,
     request: OpenRequest,
@@ -1000,8 +1188,24 @@ fn open_and_run(
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
     let diag = Arc::clone(&px.diag);
-    let url = request.url.clone();
-    let is_http = url.starts_with("http://") || url.starts_with("https://");
+    let (kind, url) = match classify(&request.url) {
+        // `open_with_source` states the URL is display-only, so when the
+        // caller brought the bytes the URL is a label and names nothing
+        // to open — whatever it happens to parse as. Refusing a label
+        // would break such a caller, and reading one as a location is
+        // worse: "case 4" parses as a relative path, which would hand a
+        // caller-supplied playlist a filesystem arm rooted at the working
+        // directory. Every transport branch below already requires no
+        // override, so nothing else moves.
+        Ok((_, url)) if source_override.is_some() => (SourceKind::Supplied, url),
+        Err(_) if source_override.is_some() => (SourceKind::Supplied, request.url.clone()),
+        Ok(classified) => classified,
+        Err(e) => {
+            px.fail(e);
+            return;
+        }
+    };
+    let is_http = kind == SourceKind::Http;
     let options = DemuxOptions {
         audio_track: request.audio_track,
     };
@@ -1010,31 +1214,28 @@ fn open_and_run(
     // on-demand byte stream. Every live transport carries both tracks in
     // one stream, and a caller-supplied source is a single stream by
     // construction — refusing loudly beats silently playing no audio.
-    if request.audio_url.is_some() {
-        let live_transport = url.starts_with("rtsp://")
-            || url.starts_with("rtspt://")
-            || url.starts_with("whep://")
-            || url.starts_with("wheps://")
-            || url.starts_with("rist://");
-        if live_transport || source_override.is_some() || request.liveness == SourceLiveness::Live {
-            px.fail(EngineError::config(
-                "audio_url applies to on-demand HTTP(S) and file sources only",
-            ));
-            return;
-        }
+    if request.audio_url.is_some()
+        && (kind.is_live_transport()
+            || source_override.is_some()
+            || request.liveness == SourceLiveness::Live)
+    {
+        px.fail(EngineError::config(
+            "audio_url applies to on-demand HTTP(S) and file sources only",
+        ));
+        return;
     }
 
-    if source_override.is_none() && (url.starts_with("rtsp://") || url.starts_with("rtspt://")) {
+    if source_override.is_none() && kind == SourceKind::Rtsp {
         open_rtsp(px, &url, request.allow_local_addresses, bank_cfg, threads);
         return;
     }
 
-    if source_override.is_none() && (url.starts_with("whep://") || url.starts_with("wheps://")) {
+    if source_override.is_none() && kind == SourceKind::Whep {
         open_whep(px, &url, &request, bank_cfg, threads);
         return;
     }
 
-    if source_override.is_none() && url.starts_with("rist://") {
+    if source_override.is_none() && kind == SourceKind::Rist {
         open_rist(
             px,
             &url,
@@ -1077,7 +1278,7 @@ fn open_and_run(
         } else {
             Arc::new(PublicAddressGate)
         };
-        match HttpSource::open(&url, IoLimits::default(), gate) {
+        match HttpSource::open(&url, IoLimits::default(), gate, px.io_cancel.clone()) {
             Ok(source) => {
                 // A split session is an on-demand shape by construction
                 // (the resolver states liveness for those), so the audio
@@ -1096,6 +1297,12 @@ fn open_and_run(
             }
         }
     } else {
+        if names_a_network_share(&url) && !request.allow_local_addresses {
+            px.fail(EngineError::config(format!(
+                "network share paths are not opened unless local addresses are permitted: {url}"
+            )));
+            return;
+        }
         match FileSource::open(std::path::Path::new(&url)) {
             Ok(source) => Box::new(CountedSource {
                 inner: source,
@@ -1123,10 +1330,20 @@ fn open_and_run(
             match read_all(&mut source, PLAYLIST_CAP) {
                 Ok(playlist) => {
                     drop(source);
+                    // Only a playlist actually opened off the disk gets a
+                    // fetcher that can reach it; everything else, a
+                    // caller-supplied source included, stays on the
+                    // network side.
+                    let origin = if kind == SourceKind::File {
+                        PlaylistOrigin::Disk
+                    } else {
+                        PlaylistOrigin::Network
+                    };
                     open_hls(
                         px,
                         &url,
                         playlist,
+                        origin,
                         request.allow_local_addresses,
                         bank_cfg,
                         threads,
@@ -1202,13 +1419,29 @@ fn open_audio_leg(
     allow_local: bool,
     diag: &Arc<SessionDiag>,
 ) -> Option<Box<dyn media_demux::Demuxer>> {
-    let source: Box<dyn ByteSource> = if url.starts_with("http://") || url.starts_with("https://") {
+    let (kind, url) = match classify(url) {
+        Ok(classified) => classified,
+        Err(e) => {
+            px.fail(e);
+            return None;
+        }
+    };
+    // The leg is one plain on-demand byte stream by construction, so the
+    // live transports are refused here as they are for the primary.
+    if kind.is_live_transport() {
+        px.fail(EngineError::config(
+            "audio_url applies to on-demand HTTP(S) and file sources only",
+        ));
+        return None;
+    }
+    let url = url.as_str();
+    let source: Box<dyn ByteSource> = if kind == SourceKind::Http {
         let gate: Arc<dyn media_io::AddressGate> = if allow_local {
             Arc::new(AllowAllGate)
         } else {
             Arc::new(PublicAddressGate)
         };
-        match HttpSource::open(url, IoLimits::default(), gate) {
+        match HttpSource::open(url, IoLimits::default(), gate, px.io_cancel.clone()) {
             Ok(source) => Box::new(CountedSource {
                 inner: source,
                 diag: Arc::clone(diag),
@@ -1219,6 +1452,12 @@ fn open_audio_leg(
             }
         }
     } else {
+        if names_a_network_share(url) && !allow_local {
+            px.fail(EngineError::config(format!(
+                "network share paths are not opened unless local addresses are permitted: {url}"
+            )));
+            return None;
+        }
         match FileSource::open(std::path::Path::new(url)) {
             Ok(source) => Box::new(CountedSource {
                 inner: source,
@@ -1379,5 +1618,230 @@ fn finish_open_split(
                 .expect("spawn audio thread"),
         );
     }
-    threads.lock().expect("threads lock").extend(handles);
+    threads
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .extend(handles);
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::{SourceKind, classify, names_a_network_share};
+
+    fn kind(url: &str) -> SourceKind {
+        classify(url)
+            .unwrap_or_else(|e| panic!("{url:?} refused: {}", e.detail))
+            .0
+    }
+
+    fn spelling(url: &str) -> String {
+        classify(url).expect("classified").1
+    }
+
+    #[test]
+    fn schemes_classify_case_insensitively() {
+        for (url, want) in [
+            ("http://h/x", SourceKind::Http),
+            ("HTTPS://h/x", SourceKind::Http),
+            ("HtTp://h/x", SourceKind::Http),
+            ("rtsp://h/x", SourceKind::Rtsp),
+            ("RTSPT://h/x", SourceKind::Rtsp),
+            ("WHEP://h/x", SourceKind::Whep),
+            ("RIST://h:1234", SourceKind::Rist),
+        ] {
+            assert_eq!(kind(url), want, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn paths_are_files_and_unknown_schemes_are_refused() {
+        for url in [
+            r"C:\clips\x.mp4",
+            "c:/clips/x.mp4",
+            "/srv/clips/x.mp4",
+            "clips/x.mp4",
+            "x.mp4",
+            r"\\host\share\x.mp4",
+        ] {
+            assert_eq!(kind(url), SourceKind::File, "{url:?}");
+        }
+        for url in [
+            "ftp://h/x",
+            "file:///x",
+            "gopher://h/x",
+            "data:text/plain,x",
+        ] {
+            assert!(
+                classify(url).is_err(),
+                "{url:?} must refuse, not open as a path"
+            );
+        }
+    }
+
+    /// The scheme is lowercased for the transports below, which match it
+    /// as text; every other byte, case included, is left exactly as the
+    /// caller wrote it.
+    #[test]
+    fn only_the_scheme_is_normalised() {
+        assert_eq!(spelling("RTSP://Host/Path?Q=V"), "rtsp://Host/Path?Q=V");
+        assert_eq!(spelling("RTSPT://Host/Path"), "rtspt://Host/Path");
+        assert_eq!(spelling("HTTPS://Host/Path"), "https://Host/Path");
+        assert_eq!(spelling("https://Host/Path"), "https://Host/Path");
+        // A path is not a URL and is never rewritten.
+        assert_eq!(spelling(r"C:\Clips\X.mp4"), r"C:\Clips\X.mp4");
+    }
+
+    /// The parser skips leading control characters and spaces before it
+    /// reads a scheme, so its answer does not always begin at byte zero
+    /// of the input. Splicing on length alone would graft the normalised
+    /// scheme onto a string still carrying part of the original one —
+    /// " http://h/x" becoming "httpp://h/x", a URL nobody asked for.
+    /// Where the leading bytes are not that scheme, the input is passed
+    /// through untouched for the transport's own parser to read.
+    #[test]
+    fn a_scheme_the_parser_found_past_the_start_is_not_spliced() {
+        for url in [
+            " http://h/x",
+            "\thttp://h/x",
+            "\nhttp://h/x",
+            "\u{1}http://h/x",
+            "  HTTP://h/x",
+        ] {
+            assert_eq!(spelling(url), url, "{url:?} was rewritten");
+        }
+    }
+
+    /// A string that does not parse as a URL at all is a path, not an
+    /// error — so the unknown-scheme refusal never sees it. That is why
+    /// `open_and_run` overrides the kind whenever the caller brought the
+    /// bytes rather than only when classification fails: a label like
+    /// `"case 4"` reads as a relative path here, and left alone would
+    /// give a caller-supplied playlist a filesystem arm rooted at the
+    /// working directory.
+    #[test]
+    fn a_label_that_does_not_parse_as_a_url_reads_as_a_path() {
+        for label in ["case 4", "burst run", "the third one"] {
+            assert!(
+                classify(label).is_ok(),
+                "{label:?} must not reach the scheme refusal"
+            );
+            assert_eq!(kind(label), SourceKind::File, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn network_share_paths_are_recognised_by_shape() {
+        for url in [
+            r"\\host\share\x.ts",
+            "//host/share/x.ts",
+            r"\\?\UNC\host\share\x.ts",
+            // Windows takes either separator in either position.
+            r"\/host/share/x.ts",
+            r"/\host\share\x.ts",
+        ] {
+            assert!(
+                url.starts_with('\\') || url.starts_with('/'),
+                "the row's own input lost its leading separators: {url:?}"
+            );
+            assert!(names_a_network_share(url), "{url:?}");
+        }
+        for url in [r"C:\clips\x.ts", "/srv/clips/x.ts", "clips/x.ts"] {
+            assert!(!names_a_network_share(url), "{url:?}");
+        }
+    }
+
+    /// Two leading separators can also open the device namespace, where
+    /// the path names this machine after all. The long spelling is what a
+    /// caller uses past MAX_PATH, so refusing it as a share would refuse
+    /// ordinary local content.
+    #[test]
+    fn the_device_namespace_is_local_unless_it_names_the_unc_device() {
+        for url in [
+            r"\\?\C:\clips\x.ts",
+            r"\\.\C:\clips\x.ts",
+            // A device name whose fourth byte falls inside a character.
+            // The prefix test counts bytes and the value is a str, so
+            // slicing to a fixed length is a panic waiting for a name
+            // that is not all ASCII.
+            "\\\\?\\A𐀀\\x.ts",
+            // A device whose name merely begins with those three letters
+            // is not the UNC device.
+            r"\\?\UNCLE\x.ts",
+        ] {
+            assert!(
+                url.starts_with(r"\\"),
+                "the row's own input lost its leading separators: {url:?}"
+            );
+            assert!(!names_a_network_share(url), "{url:?}");
+        }
+        // The UNC device is a share however it is spelled.
+        for url in [r"\\?\UNC\host\share\x.ts", r"\\?\unc\host\share\x.ts"] {
+            assert!(names_a_network_share(url), "{url:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    /// A whole-file source that stalls its first read, so a close issued
+    /// straight after open is still inside the opener's run.
+    struct StalledSource {
+        data: Vec<u8>,
+        stalled: bool,
+    }
+
+    impl ByteSource for StalledSource {
+        fn size(&mut self) -> Result<Option<u64>, SourceError> {
+            Ok(Some(self.data.len() as u64))
+        }
+
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, SourceError> {
+            if !self.stalled {
+                self.stalled = true;
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            // Bounded in the type it arrives in: narrowing first would
+            // drop the high bits of an offset past `usize` and read from
+            // wherever the remainder landed. The sibling source in
+            // `tests/routing.rs` orders it the same way.
+            if offset >= self.data.len() as u64 {
+                return Ok(0);
+            }
+            let offset = offset as usize;
+            let n = buf.len().min(self.data.len() - offset);
+            buf[..n].copy_from_slice(&self.data[offset..offset + n]);
+            Ok(n)
+        }
+    }
+
+    /// The opener registers the pipeline's threads part-way through its own
+    /// run, so a close arriving mid-open takes a list holding only the
+    /// opener. Joining that is not the end of the job: the threads it
+    /// spawned meanwhile are in the list by the time the join returns, and
+    /// close must drain it again rather than return with them running.
+    #[test]
+    fn close_mid_open_joins_the_threads_the_opener_registered() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../fixtures/h264-aac-640x360-30fps.mp4"
+        );
+        let source = StalledSource {
+            data: std::fs::read(path).expect("fixture readable"),
+            stalled: false,
+        };
+        let mut session =
+            Session::open_with_source(OpenRequest::new("test://stalled"), Box::new(source));
+        session.close();
+
+        assert!(
+            session
+                .threads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "close returned leaving threads the opener registered while it ran"
+        );
+    }
 }

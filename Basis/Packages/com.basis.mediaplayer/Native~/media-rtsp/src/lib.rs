@@ -24,6 +24,7 @@ use media_clock::{Generation, MediaTime};
 use media_demux::{
     Au, AudioCodec, DemuxError, Demuxer, EosReason, Format, StreamEvent, TrackId, VideoCodec,
 };
+use media_rtp::{ntp_at_zero, units_to_us};
 use retina::client::{PlayOptions, SessionOptions, SetupOptions, Transport};
 use retina::codec::{CodecItem, FrameFormat, ParameterSetInsertion, ParametersRef, aac, h26x};
 use tokio::sync::mpsc;
@@ -405,8 +406,7 @@ async fn run_session(
                     }
                 }
                 let timestamp = frame.timestamp();
-                let elapsed_us =
-                    timestamp.elapsed() * 1_000_000 / i64::from(timestamp.clock_rate().get());
+                let elapsed_us = units_to_us(timestamp.elapsed(), timestamp.clock_rate());
                 let pending = PendingFrame {
                     stream_id,
                     elapsed_us,
@@ -427,8 +427,7 @@ async fn run_session(
                     }
                 }
                 let timestamp = frame.timestamp();
-                let elapsed_us =
-                    timestamp.elapsed() * 1_000_000 / i64::from(timestamp.clock_rate().get());
+                let elapsed_us = units_to_us(timestamp.elapsed(), timestamp.clock_rate());
                 let pending = PendingFrame {
                     stream_id,
                     elapsed_us,
@@ -443,15 +442,17 @@ async fn run_session(
                     && align[stream_id].ntp_at_zero.is_none()
                     && let Some(rtp_timestamp) = rtcp.rtp_timestamp()
                 {
+                    let elapsed_us =
+                        units_to_us(rtp_timestamp.elapsed(), rtp_timestamp.clock_rate());
+                    // The first report in the compound packet, not the last
+                    // one: a sender is free to carry several, and letting
+                    // each overwrite the one before makes the anchor depend
+                    // on how the peer packed them.
                     for packet in rtcp.pkts() {
                         if let Ok(Some(sr)) = packet.as_sender_report() {
-                            let elapsed_us = rtp_timestamp.elapsed() * 1_000_000
-                                / i64::from(rtp_timestamp.clock_rate().get());
-                            // NTP at stream elapsed 0 = SR's NTP minus the
-                            // SR's elapsed, in 32.32 fixed point.
-                            let elapsed_ntp = ((elapsed_us as f64 / 1e6) * 4294967296.0) as u64;
                             align[stream_id].ntp_at_zero =
-                                Some(sr.ntp_timestamp().0.wrapping_sub(elapsed_ntp));
+                                Some(ntp_at_zero(sr.ntp_timestamp().0, elapsed_us));
+                            break;
                         }
                     }
                 }
@@ -538,7 +539,7 @@ async fn emit_aligned(
     let offset = align.get(frame.stream_id).map(|a| a.offset_us).unwrap_or(0);
     // RTP carries presentation time only; arrival order is decode order,
     // so dts = pts (live encoders on these lanes do not reorder).
-    let pts = MediaTime::from_micros(frame.elapsed_us + offset);
+    let pts = MediaTime::from_micros(frame.elapsed_us.saturating_add(offset));
     let au = Au {
         track: TrackId(frame.stream_id as u32),
         data: frame.data,

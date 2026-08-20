@@ -4,11 +4,17 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use media_demux::{ByteSource, DemuxLimits, Demuxer, Mp4Demuxer, StreamEvent};
-use media_io::{AllowAllGate, HttpSource, IoErrorKind, IoLimits, PublicAddressGate};
+use media_io::{AllowAllGate, CancelToken, HttpSource, IoErrorKind, IoLimits, PublicAddressGate};
+
+/// How long a cancelled request may take to come back. The request
+/// timeout it stands against is 20 s, so this is loose enough not to
+/// flake on a host running the rest of the suite alongside it.
+const CANCEL_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -122,6 +128,51 @@ fn serve_connection(stream: TcpStream, body: &[u8], mode: Mode) {
     }
 }
 
+/// A server that answers a ranged GET with `serve` bytes of a body it
+/// never finishes, or with `serve` as `None` never answers at all. Both
+/// leave the client waiting on a socket nothing will write to again,
+/// which is what the request timeout, and only the request timeout,
+/// used to end.
+fn start_stalling_server(total: u64, serve: Option<usize>) -> (String, mpsc::Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        // Held so the connections stay open rather than being closed by
+        // the drop, which the client would read as a finished body.
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if line.trim_end().is_empty() {
+                    break;
+                }
+            }
+            if let Some(n) = serve {
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{total}\r\n\
+                     Content-Length: {total}\r\n\r\n",
+                    // A zero total is not a shape any row wants, but it
+                    // would underflow here and stop the server thread
+                    // accepting, which reads as a hung client.
+                    total.saturating_sub(1)
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&vec![0u8; n]);
+                let _ = stream.flush();
+            }
+            let _ = tx.send(());
+            held.push(stream);
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), rx)
+}
+
 fn redirect(to: &str) -> Vec<u8> {
     format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\n\r\n").into_bytes()
 }
@@ -134,7 +185,12 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn open(url: &str) -> Result<HttpSource, media_io::IoError> {
-    HttpSource::open(url, IoLimits::default(), Arc::new(AllowAllGate))
+    HttpSource::open(
+        url,
+        IoLimits::default(),
+        Arc::new(AllowAllGate),
+        CancelToken::new(),
+    )
 }
 
 fn count_aus(source: HttpSource) -> (u32, u32) {
@@ -182,6 +238,7 @@ fn small_chunks_span_the_whole_file() {
             ..IoLimits::default()
         },
         Arc::new(AllowAllGate),
+        CancelToken::new(),
     )
     .expect("open");
     assert_eq!(count_aus(source), (180, 283));
@@ -212,9 +269,170 @@ fn public_gate_blocks_loopback() {
         &format!("{base}/media"),
         IoLimits::default(),
         Arc::new(PublicAddressGate),
+        CancelToken::new(),
     )
     .expect_err("loopback must be blocked");
     assert_eq!(err.kind, IoErrorKind::Blocked);
+}
+
+/// `Session::close` joins the opener thread from the client's main
+/// thread, so an open that cannot be abandoned freezes the client for the
+/// request budget — six redirect hops' worth, in the worst case.
+#[test]
+fn a_close_during_open_abandons_the_request() {
+    let (base, requested) = start_stalling_server(1024, None);
+    let cancel = CancelToken::new();
+    let closing = cancel.clone();
+    // `None` afterwards means the open never reached a request, so the
+    // cancel would have proved nothing.
+    let cancelled_at = Arc::new(Mutex::new(None));
+    let stamp = Arc::clone(&cancelled_at);
+    thread::spawn(move || {
+        // Building the pinned client loads the OS trust store, which is
+        // not quick; cancelling on a timer alone can beat the request
+        // onto the wire.
+        requested.recv().expect("the server reads the request");
+        thread::sleep(Duration::from_millis(200));
+        *stamp.lock().expect("stamp") = Some(Instant::now());
+        closing.cancel();
+    });
+
+    let err = HttpSource::open(
+        &format!("{base}/media"),
+        IoLimits::default(),
+        Arc::new(AllowAllGate),
+        cancel,
+    )
+    .map(|_| ())
+    .expect_err("a cancelled open cannot succeed");
+
+    let cancelled_at = cancelled_at
+        .lock()
+        .expect("stamp")
+        .expect("the request was in flight when the cancel landed");
+    assert_eq!(err.kind, IoErrorKind::Connect);
+    assert!(
+        err.detail.contains("cancelled"),
+        "the refusal names the cancel, not a transport error: {err}"
+    );
+    assert!(
+        cancelled_at.elapsed() < CANCEL_WINDOW,
+        "returned on the cancel, not after the request timeout: {:?}",
+        cancelled_at.elapsed()
+    );
+}
+
+/// The same for the demux thread, which `close` joins too and which is
+/// where a session spends the whole of its life.
+#[test]
+fn a_close_during_a_read_abandons_it() {
+    const SERVED: usize = 64 * 1024;
+    let (base, _requested) = start_stalling_server(4 * 1024 * 1024, Some(SERVED));
+    let cancel = CancelToken::new();
+    let mut source = HttpSource::open(
+        &format!("{base}/media"),
+        IoLimits::default(),
+        Arc::new(AllowAllGate),
+        cancel.clone(),
+    )
+    .expect("the open lands on the bytes the server did write");
+
+    // Drain exactly what was written; the read after this one has nothing
+    // to wait for.
+    let mut buf = vec![0u8; 32 * 1024];
+    let mut got = 0usize;
+    while got < SERVED {
+        let n = source
+            .read_at(got as u64, &mut buf)
+            .expect("the served head reads back");
+        assert!(n > 0, "the server wrote {SERVED} bytes");
+        got += n;
+    }
+
+    let closing = cancel.clone();
+    let cancelled_at = Arc::new(Mutex::new(None));
+    let stamp = Arc::clone(&cancelled_at);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        *stamp.lock().expect("stamp") = Some(Instant::now());
+        closing.cancel();
+    });
+
+    let err = source
+        .read_at(got as u64, &mut buf)
+        .expect_err("the stalled read is abandoned");
+
+    let cancelled_at = cancelled_at
+        .lock()
+        .expect("stamp")
+        .expect("the read was waiting when the cancel landed");
+    assert!(
+        err.to_string().contains("cancelled"),
+        "the refusal names the cancel, not a transport error: {err}"
+    );
+    assert!(
+        cancelled_at.elapsed() < CANCEL_WINDOW,
+        "returned on the cancel, not after the request timeout: {:?}",
+        cancelled_at.elapsed()
+    );
+}
+
+/// `read_at` is trait surface, so the buffer's length is the caller's to
+/// choose and zero is a length. The held chunk has to survive it: served
+/// as a spent one, the unread remainder is dropped and the loop pulls
+/// until the body ends, which on a live or stalled source is not a thing
+/// that happens. Pinned against a server that goes quiet, so a read that
+/// went to the network rather than to the chunk in hand cannot come back
+/// inside the window.
+#[test]
+fn a_zero_length_read_keeps_the_chunk_it_is_holding() {
+    // Small and written in one call, so the whole of it is one chunk on
+    // loopback and the first read provably leaves a remainder inside it.
+    // Sized from a 64 KiB body the row would be resting on where the
+    // transport happened to split it, and a short first chunk would send
+    // the second read to the network and read as a regression that is
+    // not one. Small also makes the failure loud rather than slow: the
+    // server writes this much and then never writes again, so a source
+    // that dropped the chunk has nothing to refetch and the read waits
+    // out the request timeout instead of quietly succeeding.
+    const SERVED: usize = 32;
+    let (base, _requested) = start_stalling_server(4 * 1024 * 1024, Some(SERVED));
+    let mut source = open(&format!("{base}/media")).expect("open");
+
+    let mut buf = [0u8; 16];
+    assert_eq!(
+        source
+            .read_at(0, &mut buf)
+            .expect("the served head reads back"),
+        buf.len(),
+        "the first read leaves a remainder in the chunk"
+    );
+
+    let started = Instant::now();
+    assert_eq!(
+        source.read_at(16, &mut []).expect("a zero-length read"),
+        0,
+        "nothing was asked for and nothing is served"
+    );
+    assert!(
+        started.elapsed() < CANCEL_WINDOW,
+        "the zero-length read went to the network: {:?}",
+        started.elapsed()
+    );
+
+    let started = Instant::now();
+    assert_eq!(
+        source
+            .read_at(16, &mut buf)
+            .expect("the remainder reads back"),
+        buf.len(),
+        "the chunk the zero-length read was holding is still there"
+    );
+    assert!(
+        started.elapsed() < CANCEL_WINDOW,
+        "the remainder was refetched rather than served: {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]

@@ -11,30 +11,39 @@
 //! than a silent hang; sequential reads ride one pooled connection, and a
 //! positioned read elsewhere costs one request. Servers without range
 //! support get an untimed sequential stream (forward reads discard,
-//! backward reads restart) so faststart files still play; the per-read
-//! stall detector for that path arrives with the async I/O domain at M3.
+//! backward reads restart) so faststart files still play. Nothing bounds
+//! that body, so every request and every read races the session's
+//! [`CancelToken`] instead: the opener and demux threads this source runs
+//! on are both joined by a closing session, and a server that stops
+//! answering must hold neither of them.
 
-use std::io::Read;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use media_demux::{ByteSource, SourceError};
 use url::Url;
 
+use crate::cancel::CancelToken;
+use crate::runtime::runtime;
 use crate::{AddressGate, IoError, IoErrorKind, IoLimits};
 
 pub(crate) const REDIRECT_STATUSES: [u16; 5] = [301, 302, 303, 307, 308];
 
-/// Scheme/host vetting shared by the blocking and async clients: resolve
-/// once, permit *every* returned address (a mixed public/private answer is
-/// the rebinding shape, refused whole), and hand back the pinned set for
-/// `resolve_to_addrs`. `None` means the host was an IP literal, already
-/// vetted. Public for transports that run their own HTTP requests over
-/// the same discipline (WHEP signalling).
-pub fn vet_url(
-    url: &Url,
-    gate: &dyn AddressGate,
-) -> Result<Option<(String, Vec<SocketAddr>)>, IoError> {
+/// What one URL still needs looked up before its client can be pinned.
+enum VetTarget {
+    /// An IP literal, vetted by the screen that produced this.
+    Literal,
+    Domain {
+        domain: String,
+        port: u16,
+    },
+}
+
+/// The half of vetting that touches no network: scheme screen, and the
+/// literal hosts settled against the gate on the spot.
+fn vet_target(url: &Url, gate: &dyn AddressGate) -> Result<VetTarget, IoError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(IoError::new(
             IoErrorKind::Url,
@@ -53,40 +62,67 @@ pub fn vet_url(
             if !gate.permit(ip.into()) {
                 return Err(IoError::new(IoErrorKind::Blocked, format!("{ip} blocked")));
             }
-            Ok(None)
+            Ok(VetTarget::Literal)
         }
         url::Host::Ipv6(ip) => {
             if !gate.permit(ip.into()) {
                 return Err(IoError::new(IoErrorKind::Blocked, format!("{ip} blocked")));
             }
-            Ok(None)
+            Ok(VetTarget::Literal)
         }
-        url::Host::Domain(domain) => {
-            let addrs: Vec<SocketAddr> = (domain, port)
-                .to_socket_addrs()
-                .map_err(|e| IoError::new(IoErrorKind::Resolve, format!("{domain}: {e}")))?
-                .collect();
-            if addrs.is_empty() {
-                return Err(IoError::new(
-                    IoErrorKind::Resolve,
-                    format!("{domain}: no addresses"),
-                ));
-            }
-            for addr in &addrs {
-                if !gate.permit(addr.ip()) {
-                    return Err(IoError::new(
-                        IoErrorKind::Blocked,
-                        format!("{domain} resolves to blocked {}", addr.ip()),
-                    ));
-                }
-            }
-            Ok(Some((domain.to_string(), addrs)))
+        url::Host::Domain(domain) => Ok(VetTarget::Domain {
+            domain: domain.to_string(),
+            port,
+        }),
+    }
+}
+
+/// The other half: permit *every* returned address (a mixed
+/// public/private answer is the rebinding shape, refused whole) and hand
+/// back the pinned set for `resolve_to_addrs`.
+fn vet_addrs(
+    domain: String,
+    addrs: Vec<SocketAddr>,
+    gate: &dyn AddressGate,
+) -> Result<(String, Vec<SocketAddr>), IoError> {
+    if addrs.is_empty() {
+        return Err(IoError::new(
+            IoErrorKind::Resolve,
+            format!("{domain}: no addresses"),
+        ));
+    }
+    for addr in &addrs {
+        if !gate.permit(addr.ip()) {
+            return Err(IoError::new(
+                IoErrorKind::Blocked,
+                format!("{domain} resolves to blocked {}", addr.ip()),
+            ));
+        }
+    }
+    Ok((domain, addrs))
+}
+
+/// Scheme/host vetting: resolve once under the resolver ceiling, vet the
+/// whole answer, and hand back the pinned set for `resolve_to_addrs`.
+/// `None` means the host was an IP literal, already vetted. The resolve
+/// is a real await point, so a `select!` racing this against a cancel
+/// token can observe the cancel. Public for transports that run their own
+/// HTTP requests over the same discipline (WHEP signalling).
+pub async fn vet_url_async(
+    url: &Url,
+    gate: &dyn AddressGate,
+) -> Result<Option<(String, Vec<SocketAddr>)>, IoError> {
+    match vet_target(url, gate)? {
+        VetTarget::Literal => Ok(None),
+        VetTarget::Domain { domain, port } => {
+            let addrs = crate::resolve::resolve_async(&domain, port).await?;
+            vet_addrs(domain, addrs, gate).map(Some)
         }
     }
 }
 
 pub struct HttpSource {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     url: Url,
     limits: IoLimits,
     len: Option<u64>,
@@ -100,14 +136,74 @@ pub struct HttpSource {
     /// body's. Chunked delivery with no length at all is the live shape.
     finite: bool,
     stream: Option<StreamState>,
+    cancel: CancelToken,
 }
 
 struct StreamState {
-    response: reqwest::blocking::Response,
+    response: reqwest::Response,
     pos: u64,
     /// Exclusive end of the current ranged chunk; `None` for an unbounded
     /// sequential body.
     end: Option<u64>,
+    /// The chunk being served and how far into it the reads have got. A
+    /// body yields whole chunks rather than filling a caller's buffer, so
+    /// the remainder is held here between reads.
+    chunk: Option<(Bytes, usize)>,
+}
+
+impl StreamState {
+    fn new(response: reqwest::Response, pos: u64, end: Option<u64>) -> Self {
+        Self {
+            response,
+            pos,
+            end,
+            chunk: None,
+        }
+    }
+
+    /// Copy out of the held chunk; `0` once it is spent.
+    fn serve(&mut self, buf: &mut [u8]) -> usize {
+        let Some((bytes, taken)) = self.chunk.as_mut() else {
+            return 0;
+        };
+        let remaining = &bytes[*taken..];
+        let n = remaining.len().min(buf.len());
+        buf[..n].copy_from_slice(&remaining[..n]);
+        *taken += n;
+        if *taken >= bytes.len() {
+            self.chunk = None;
+        }
+        self.pos += n as u64;
+        n
+    }
+
+    /// One read's worth of body, `0` at the end of it.
+    fn read(&mut self, cancel: &CancelToken, buf: &mut [u8]) -> Result<usize, IoError> {
+        // Guarded here as well as at the trait boundary: this is the loop
+        // that reads a zero from `serve` as a spent chunk, and it should
+        // not depend on every caller having checked first.
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let n = self.serve(buf);
+            if n > 0 {
+                return Ok(n);
+            }
+            let next = awaiting(cancel, IoErrorKind::Read, "read cancelled", async {
+                self.response
+                    .chunk()
+                    .await
+                    .map_err(|e| IoError::new(IoErrorKind::Read, e.to_string()))
+            })?;
+            match next {
+                Some(bytes) if !bytes.is_empty() => self.chunk = Some((bytes, 0)),
+                // An empty chunk is not the end of the body.
+                Some(_) => {}
+                None => return Ok(0),
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for HttpSource {
@@ -121,7 +217,12 @@ impl std::fmt::Debug for HttpSource {
 }
 
 impl HttpSource {
-    pub fn open(url: &str, limits: IoLimits, gate: Arc<dyn AddressGate>) -> Result<Self, IoError> {
+    pub fn open(
+        url: &str,
+        limits: IoLimits,
+        gate: Arc<dyn AddressGate>,
+        cancel: CancelToken,
+    ) -> Result<Self, IoError> {
         if url.len() > limits.max_url_len {
             return Err(IoError::new(IoErrorKind::Cap, "URL length cap exceeded"));
         }
@@ -129,13 +230,20 @@ impl HttpSource {
             Url::parse(url).map_err(|e| IoError::new(IoErrorKind::Url, format!("{url}: {e}")))?;
 
         for _hop in 0..=limits.max_redirects {
-            let client = build_pinned_client(&current, &limits, gate.as_ref(), true)?;
             let probe_end = limits.chunk_bytes - 1;
-            let response = client
-                .get(current.clone())
-                .header("Range", format!("bytes=0-{probe_end}"))
-                .send()
-                .map_err(|e| IoError::new(IoErrorKind::Connect, e.to_string()))?;
+            let (client, response) = awaiting(
+                &cancel,
+                IoErrorKind::Connect,
+                "open cancelled",
+                pinned_get(
+                    &current,
+                    &limits,
+                    gate.as_ref(),
+                    true,
+                    Some((0, probe_end)),
+                    IoErrorKind::Connect,
+                ),
+            )?;
 
             let status = response.status().as_u16();
             if REDIRECT_STATUSES.contains(&status) {
@@ -175,11 +283,8 @@ impl HttpSource {
                     ranges: true,
                     rangeable: true,
                     finite,
-                    stream: Some(StreamState {
-                        response,
-                        pos: 0,
-                        end,
-                    }),
+                    stream: Some(StreamState::new(response, 0, end)),
+                    cancel,
                 });
             }
 
@@ -194,11 +299,19 @@ impl HttpSource {
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"));
             drop(response);
-            let client = build_pinned_client(&current, &limits, gate.as_ref(), false)?;
-            let response = client
-                .get(current.clone())
-                .send()
-                .map_err(|e| IoError::new(IoErrorKind::Connect, e.to_string()))?;
+            let (client, response) = awaiting(
+                &cancel,
+                IoErrorKind::Connect,
+                "open cancelled",
+                pinned_get(
+                    &current,
+                    &limits,
+                    gate.as_ref(),
+                    false,
+                    None,
+                    IoErrorKind::Connect,
+                ),
+            )?;
             if !response.status().is_success() {
                 return Err(IoError {
                     kind: IoErrorKind::Http,
@@ -215,11 +328,8 @@ impl HttpSource {
                 ranges: false,
                 rangeable: advertises_ranges,
                 finite: len.is_some(),
-                stream: Some(StreamState {
-                    response,
-                    pos: 0,
-                    end: None,
-                }),
+                stream: Some(StreamState::new(response, 0, None)),
+                cancel,
             });
         }
         Err(IoError::new(
@@ -246,12 +356,17 @@ impl HttpSource {
         self.stream = None;
         if self.ranges {
             let last = offset + self.limits.chunk_bytes - 1;
-            let response = self
-                .client
-                .get(self.url.clone())
-                .header("Range", format!("bytes={offset}-{last}"))
-                .send()
-                .map_err(|e| IoError::new(IoErrorKind::Read, e.to_string()))?;
+            let response = awaiting(
+                &self.cancel,
+                IoErrorKind::Read,
+                "read cancelled",
+                send_get(
+                    &self.client,
+                    &self.url,
+                    Some((offset, last)),
+                    IoErrorKind::Read,
+                ),
+            )?;
             let status = response.status().as_u16();
             if status != 206 {
                 return Err(IoError {
@@ -261,20 +376,17 @@ impl HttpSource {
                 });
             }
             let end = response.content_length().map(|n| offset + n);
-            self.stream = Some(StreamState {
-                response,
-                pos: offset,
-                end,
-            });
+            self.stream = Some(StreamState::new(response, offset, end));
             return Ok(());
         }
 
         // Sequential fallback: restart and discard forward to the offset.
-        let response = self
-            .client
-            .get(self.url.clone())
-            .send()
-            .map_err(|e| IoError::new(IoErrorKind::Read, e.to_string()))?;
+        let response = awaiting(
+            &self.cancel,
+            IoErrorKind::Read,
+            "read cancelled",
+            send_get(&self.client, &self.url, None, IoErrorKind::Read),
+        )?;
         if !response.status().is_success() {
             return Err(IoError {
                 kind: IoErrorKind::Read,
@@ -282,12 +394,8 @@ impl HttpSource {
                 detail: format!("GET {}", self.url),
             });
         }
-        let mut stream = StreamState {
-            response,
-            pos: 0,
-            end: None,
-        };
-        discard_until(&mut stream, offset)?;
+        let mut stream = StreamState::new(response, 0, None);
+        discard_until(&mut stream, &self.cancel, offset)?;
         self.stream = Some(stream);
         Ok(())
     }
@@ -299,11 +407,19 @@ impl ByteSource for HttpSource {
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, SourceError> {
+        // A caller that asked for nothing gets nothing. `serve` copies zero
+        // bytes and reports it as a spent chunk, so the loop below would
+        // replace the chunk it is still holding — losing its unread
+        // remainder — and go on pulling until the body ends.
+        if buf.is_empty() {
+            return Ok(0);
+        }
         if let Some(len) = self.len
             && offset >= len
         {
             return Ok(0);
         }
+        let cancel = self.cancel.clone();
         // Two passes at most: a positioned stream that has reached its chunk
         // boundary reopens once and reads again.
         for _ in 0..2 {
@@ -316,17 +432,29 @@ impl ByteSource for HttpSource {
                 self.reopen_at(offset)?;
             } else if let Some(stream) = &mut self.stream
                 && offset > stream.pos
+                && let Err(e) = discard_until(stream, &cancel, offset)
             {
-                discard_until(stream, offset)?;
+                self.stream = None;
+                return Err(e.into());
             }
 
             let stream = self.stream.as_mut().expect("stream present after reopen");
-            let n = stream
-                .response
-                .read(buf)
-                .map_err(|e| IoError::new(IoErrorKind::Read, e.to_string()))?;
+            // A failed read retires the response with it. Left installed,
+            // it stays usable to the check above, and a later read at the
+            // same position polls a `chunk()` future that was dropped
+            // mid-poll on the way out. Nothing reaches that today because
+            // the session's cancel token latches, so every later call
+            // resolves the cancel branch first — which makes this path
+            // safe by the token's behaviour rather than by its own state.
+            // One reconnect on a transient error is what that costs.
+            let n = match stream.read(&cancel, buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    self.stream = None;
+                    return Err(e.into());
+                }
+            };
             if n > 0 {
-                stream.pos += n as u64;
                 return Ok(n);
             }
             // Chunk exhausted at the boundary: reopen; a true end of file
@@ -342,24 +470,72 @@ impl ByteSource for HttpSource {
     }
 }
 
-fn build_pinned_client(
+/// Drive one network operation on the shared runtime, racing the session's
+/// cancel token. The live source gets that race from the `select!` around
+/// its own open; this lane stays synchronous all the way down to the demux
+/// thread, so the race belongs at each call instead.
+fn awaiting<T>(
+    cancel: &CancelToken,
+    kind: IoErrorKind,
+    detail: &'static str,
+    work: impl Future<Output = Result<T, IoError>>,
+) -> Result<T, IoError> {
+    runtime().block_on(async {
+        tokio::select! {
+            _ = cancel.cancelled() => Err(IoError::new(kind, detail)),
+            outcome = work => outcome,
+        }
+    })
+}
+
+/// Build the pinned client for `url` and send one GET through it. The
+/// client comes back alongside the response because the source keeps it
+/// for every later positioned read.
+async fn pinned_get(
     url: &Url,
     limits: &IoLimits,
     gate: &dyn AddressGate,
     timed: bool,
-) -> Result<reqwest::blocking::Client, IoError> {
-    let mut builder = reqwest::blocking::Client::builder()
+    range: Option<(u64, u64)>,
+    kind: IoErrorKind,
+) -> Result<(reqwest::Client, reqwest::Response), IoError> {
+    let client = build_pinned_client(url, limits, gate, timed).await?;
+    let response = send_get(&client, url, range, kind).await?;
+    Ok((client, response))
+}
+
+async fn send_get(
+    client: &reqwest::Client,
+    url: &Url,
+    range: Option<(u64, u64)>,
+    kind: IoErrorKind,
+) -> Result<reqwest::Response, IoError> {
+    let mut request = client.get(url.clone());
+    if let Some((first, last)) = range {
+        request = request.header("Range", format!("bytes={first}-{last}"));
+    }
+    request
+        .send()
+        .await
+        .map_err(|e| IoError::new(kind, e.to_string()))
+}
+
+async fn build_pinned_client(
+    url: &Url,
+    limits: &IoLimits,
+    gate: &dyn AddressGate,
+    timed: bool,
+) -> Result<reqwest::Client, IoError> {
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(limits.connect_timeout)
-        .timeout(if timed {
-            Some(limits.request_timeout)
-        } else {
-            None
-        })
         .no_proxy()
         .user_agent("basis-media/0.1");
+    if timed {
+        builder = builder.timeout(limits.request_timeout);
+    }
 
-    if let Some((domain, addrs)) = vet_url(url, gate)? {
+    if let Some((domain, addrs)) = vet_url_async(url, gate).await? {
         builder = builder.resolve_to_addrs(&domain, &addrs);
     }
 
@@ -368,27 +544,27 @@ fn build_pinned_client(
         .map_err(|e| IoError::new(IoErrorKind::Connect, e.to_string()))
 }
 
-fn content_range_total(response: &reqwest::blocking::Response) -> Option<u64> {
+fn content_range_total(response: &reqwest::Response) -> Option<u64> {
     let value = response.headers().get("content-range")?.to_str().ok()?;
     let total = value.rsplit('/').next()?;
     total.parse().ok()
 }
 
-fn discard_until(stream: &mut StreamState, offset: u64) -> Result<(), IoError> {
+fn discard_until(
+    stream: &mut StreamState,
+    cancel: &CancelToken,
+    offset: u64,
+) -> Result<(), IoError> {
     let mut scratch = [0u8; 64 * 1024];
     while stream.pos < offset {
         let want = scratch.len().min((offset - stream.pos) as usize);
-        let n = stream
-            .response
-            .read(&mut scratch[..want])
-            .map_err(|e| IoError::new(IoErrorKind::Read, e.to_string()))?;
+        let n = stream.read(cancel, &mut scratch[..want])?;
         if n == 0 {
             return Err(IoError::new(
                 IoErrorKind::Read,
                 format!("source ended at {} before offset {offset}", stream.pos),
             ));
         }
-        stream.pos += n as u64;
     }
     Ok(())
 }

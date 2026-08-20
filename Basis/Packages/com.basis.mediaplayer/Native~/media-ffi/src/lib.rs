@@ -14,10 +14,17 @@
 //! keyed-mutex acquire + `CopyResource` — it never waits on a media-path
 //! lock. Teardown order: stop issuing render events, then
 //! `bm_session_close`; the Unity texture must outlive the last issued
-//! event.
+//! event, and on Vulkan by a few render events more (see
+//! `bm_session_set_output_texture`).
+
+mod host_log;
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+// `stable_texture` compiles under test on every host, so the import it
+// needs cannot be Android-only.
+#[cfg(any(target_os = "android", test))]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -65,6 +72,16 @@ pub struct BmSnapshot {
     pub reserved2: u32,
 }
 
+/// A record written with a whole-struct copy hands the caller its padding
+/// too, and padding is indeterminate. Every one of these is sized so it
+/// has none; the asserts keep it that way when a cap or a field moves.
+const _: () = {
+    assert!(size_of::<BmSnapshot>() == 88);
+    assert!(size_of::<BmEvent>() == 8 + 4 + 4 + 4 + BM_EVENT_DETAIL_CAP);
+    assert!(size_of::<BmCaption>() == 8 + 4 + BM_CAPTION_TEXT_CAP + 4);
+    assert!(size_of::<BmAudioTrack>() == 4 * 4 + BM_TRACK_LANG_CAP + 4 + BM_TRACK_LABEL_CAP);
+};
+
 pub const BM_EVENT_DETAIL_CAP: usize = 116;
 
 /// One diagnostics event. `detail` is UTF-8, truncated to
@@ -91,6 +108,10 @@ pub struct BmCaption {
     pub pts_us: i64,
     pub text_len: u32,
     pub text: [u8; BM_CAPTION_TEXT_CAP],
+    /// Names the four bytes the `i64`'s alignment adds after `text`, so
+    /// they are written rather than left holding whatever the stack slot
+    /// did. Not part of the contract — always 0.
+    pub reserved: u32,
 }
 
 /// The JSON descriptor `bm_session_open` accepts. The resolver-facing
@@ -152,17 +173,55 @@ struct Entry {
     shared: Arc<SessionShared>,
     pipeline: Arc<PipelineShared>,
     unity_texture: AtomicUsize,
+    /// Advanced by every output-texture registration, so the Android
+    /// renderer can tell a re-registered texture from the one it cached
+    /// a view over even when the driver reuses handle values.
+    #[cfg(target_os = "android")]
+    texture_generation: AtomicU64,
     #[cfg(windows)]
     consumer: Mutex<ConsumerSlot>,
     #[cfg(target_os = "android")]
     renderer: Mutex<media_present::android::SessionRenderer>,
 }
 
+/// The consumer is opened against one shared-texture handle. The engine
+/// publishes a fresh handle whenever it rebuilds the presenter, so each
+/// variant carries the handle it settled on and a differing one reopens.
 #[cfg(windows)]
 enum ConsumerSlot {
     Unopened,
-    Open(SharedTextureConsumer),
-    Failed,
+    Open(u64, SharedTextureConsumer),
+    /// The handle whose open failed, and how many attempts it has had.
+    Failed(u64, u32),
+}
+
+/// How many times one shared handle's consumer open is attempted before
+/// the slot gives up on it. A failure here is typically the handle
+/// racing a presenter rebuild, which the next attempt sees through;
+/// caching the first outright left a session that never presented again,
+/// since a new handle is only published when the presenter is rebuilt.
+/// The bound is what keeps a genuinely dead handle from calling `open`
+/// once per render event for the rest of the session.
+#[cfg(windows)]
+const MAX_CONSUMER_OPENS: u32 = 8;
+
+#[cfg(windows)]
+impl ConsumerSlot {
+    /// Which attempt an open for `handle` would be, or `None` where the
+    /// slot already holds one for it or has spent its attempts.
+    fn attempt_for(&self, handle: u64) -> Option<u32> {
+        match self {
+            ConsumerSlot::Unopened => Some(1),
+            ConsumerSlot::Open(open_handle, _) => (*open_handle != handle).then_some(1),
+            ConsumerSlot::Failed(open_handle, attempts) => {
+                if *open_handle != handle {
+                    Some(1)
+                } else {
+                    (*attempts < MAX_CONSUMER_OPENS).then_some(*attempts + 1)
+                }
+            }
+        }
+    }
 }
 
 struct Slot {
@@ -243,6 +302,7 @@ pub extern "C" fn bm_abi_version() -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bm_capabilities(out_buf: *mut u8, cap: usize) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
+        host_log::install();
         let json = media_engine::capabilities().to_json();
         let bytes = json.as_bytes();
         if !out_buf.is_null() && cap >= bytes.len() {
@@ -274,6 +334,7 @@ pub unsafe extern "C" fn bm_session_open(
     out_handle: *mut u64,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
+        host_log::install();
         if desc_ptr.is_null() || out_handle.is_null() {
             return BM_ERR_INVALID_ARG;
         }
@@ -309,6 +370,8 @@ pub unsafe extern "C" fn bm_session_open(
             pipeline: Arc::clone(session.pipeline()),
             session: Mutex::new(Some(session)),
             unity_texture: AtomicUsize::new(0),
+            #[cfg(target_os = "android")]
+            texture_generation: AtomicU64::new(0),
             #[cfg(windows)]
             consumer: Mutex::new(ConsumerSlot::Unopened),
             #[cfg(target_os = "android")]
@@ -598,6 +661,7 @@ pub unsafe extern "C" fn bm_session_drain_captions(
                 pts_us: cue.pts_us,
                 text_len: len as u32,
                 text,
+                reserved: 0,
             };
             // SAFETY: caller contract — out points to cap writable
             // BmCaptions; i < cues.len() <= cap.
@@ -794,18 +858,57 @@ fn copy_utf8(text: Option<&str>, buf: &mut [u8]) -> u32 {
 /// `media_present::android` for the full contract).
 ///
 /// # Safety
+/// Calls for one session must not overlap: the Android render event
+/// pairs the pointer with a counter this brackets, and the bracket is a
+/// single-writer construction — two registrations in flight at once can
+/// leave the counter even across a pointer store and hand the renderer a
+/// mismatched pair, which is the pairing it exists to refuse. Unity
+/// registers from the main thread, so this costs a caller nothing it was
+/// not already doing.
+///
 /// `texture` must be the live native texture owned by Unity's device
-/// (`ID3D11Texture2D*` on D3D11, `VkImage` on Vulkan), and must outlive
-/// the session (or be cleared by closing the session).
+/// (`ID3D11Texture2D*` on D3D11, `VkImage` on Vulkan). The plugin builds
+/// its own objects over it — a shared-texture consumer on D3D11, an image
+/// view on Vulkan — and cannot destroy them until it can prove the GPU is
+/// done with them, which takes render events. So on Vulkan the texture
+/// must stay alive for a few render events past `bm_session_close`, not
+/// be released alongside it: destroying the image while views over it
+/// still exist is what the object-lifetime rules forbid.
+///
+/// A texture this call *replaces* is under the same requirement, and for
+/// a second reason: a render event already in flight may have taken the
+/// previous pointer before this call and reach its own render after it
+/// returns. The counter pairs a pointer with the registration it belongs
+/// to, which is what stops a stale view being used against a new image;
+/// it does not extend any image's life. So the caller holds a replaced
+/// texture for a few render events too, exactly as it holds a closed
+/// one.
+///
+/// Neither is enforced here. Enforcing would mean the plugin gating the
+/// caller's own release on GPU completion, which is a contract the
+/// managed side has to keep rather than one this boundary can impose.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bm_session_set_output_texture(handle: u64, texture: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let Some(entry) = lookup(handle) else {
             return BM_ERR_INVALID_HANDLE;
         };
+        // The Android render event pairs the pointer with the counter,
+        // so the registration brackets the store rather than trailing it:
+        // odd while it is in flight, even and advanced once it lands. A
+        // reader that overlaps any part of the write then sees an odd
+        // counter or a changed one. A single bump afterwards is not
+        // enough — release/acquire only orders the pointer *before* the
+        // bump a reader observed, so a reader can take the new pointer and
+        // read the same old counter either side of it, which is exactly
+        // the pairing the counter exists to refuse.
+        #[cfg(target_os = "android")]
+        entry.texture_generation.fetch_add(1, Ordering::AcqRel);
         entry
             .unity_texture
             .store(texture as usize, Ordering::Release);
+        #[cfg(target_os = "android")]
+        entry.texture_generation.fetch_add(1, Ordering::Release);
         #[cfg(windows)]
         if let Ok(mut consumer) = entry.consumer.lock() {
             *consumer = ConsumerSlot::Unopened;
@@ -834,21 +937,28 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
         let Ok(mut slot) = entry.consumer.lock() else {
             return;
         };
-        if matches!(*slot, ConsumerSlot::Unopened) {
+        if let Some(attempt) = slot.attempt_for(shared_handle) {
             // SAFETY: texture is the ID3D11Texture2D* the managed side
             // registered and contracts to keep alive; shared_handle is the
             // engine's live shared-texture handle for this session.
             *slot =
                 match unsafe { SharedTextureConsumer::open(texture as *mut c_void, shared_handle) }
                 {
-                    Ok(consumer) => ConsumerSlot::Open(consumer),
+                    Ok(consumer) => ConsumerSlot::Open(shared_handle, consumer),
                     Err(e) => {
-                        eprintln!("[basis-media] consumer open failed: {e}");
-                        ConsumerSlot::Failed
+                        // The first says a session is in trouble and the
+                        // last says it has stopped trying; the ones
+                        // between would be a line per render event.
+                        if attempt == 1 || attempt == MAX_CONSUMER_OPENS {
+                            media_diag::diag_log!(
+                                "consumer open failed (attempt {attempt}/{MAX_CONSUMER_OPENS}): {e}"
+                            );
+                        }
+                        ConsumerSlot::Failed(shared_handle, attempt)
                     }
                 };
         }
-        if let ConsumerSlot::Open(consumer) = &mut *slot
+        if let ConsumerSlot::Open(_, consumer) = &mut *slot
             && consumer.copy_if_fresh().unwrap_or(false)
         {
             entry
@@ -872,6 +982,37 @@ pub extern "C" fn bm_render_event_func() -> *mut c_void {
     on_render_event as *mut c_void
 }
 
+/// A registered output texture and the registration it belongs to, read as
+/// a pair.
+///
+/// Registration stores the pointer and then advances the generation, so
+/// reading one of each can straddle the two writes and hand the render
+/// event a new texture under the previous registration. That pairing is
+/// exactly what the present layer's view cache cannot survive: it keys a
+/// cached image view on the generation precisely because Unity may destroy
+/// an image and give a later one the same handle value, so a new image
+/// under an old generation can match a view over the destroyed one.
+///
+/// A pair is stable only if the generation reads the same either side of
+/// the pointer. Where it does not, the frame is skipped — the registration
+/// is mid-flight and the next render event has a settled pair.
+///
+/// The pointer arrives as a closure rather than a second atomic so a row
+/// can drive the unstable case: the race itself is two adjacent stores
+/// wide and cannot be scheduled on demand.
+#[cfg(any(target_os = "android", test))]
+fn stable_texture(generation: &AtomicU64, load: impl Fn() -> usize) -> Option<(usize, u64)> {
+    let before = generation.load(Ordering::Acquire);
+    // Odd is a registration caught between its two bumps: the pointer may
+    // be the outgoing one or the incoming one and the counter cannot say
+    // which, so there is no pair to take.
+    if !before.is_multiple_of(2) {
+        return None;
+    }
+    let texture = load();
+    (generation.load(Ordering::Acquire) == before).then_some((texture, before))
+}
+
 /// Android render event: select the due frame at display cadence (§6.8
 /// — the engine grades due-ness against its mirrored clock with a
 /// vsync of lookahead) and run the Vulkan conversion pass into the
@@ -882,12 +1023,20 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let handle = data as usize as u64;
         let Some(entry) = lookup(handle) else { return };
-        let texture = entry.unity_texture.load(Ordering::Acquire) as *mut c_void;
+        let Some((texture, generation)) = stable_texture(&entry.texture_generation, || {
+            entry.unity_texture.load(Ordering::Acquire)
+        }) else {
+            return;
+        };
+        let texture = texture as *mut c_void;
         let frame = media_engine::render_take(&entry.pipeline);
         let Ok(mut renderer) = entry.renderer.lock() else {
             return;
         };
-        if renderer.render(frame, texture) {
+        // SAFETY: `texture` is what the managed side registered through
+        // bm_session_set_output_texture, whose contract requires the
+        // texture to outlive the render events it is registered for.
+        if unsafe { renderer.render(frame, texture, generation) } {
             entry
                 .shared
                 .frames_presented
@@ -919,6 +1068,9 @@ pub unsafe extern "C" fn UnityPluginUnload() {}
 
 /// `System.loadLibrary` hands over the JavaVM here; the MediaCodec
 /// capability probe uses it for the `MediaCodecList` ceilings query.
+/// It is also the first moment the library runs on this platform, so the
+/// host's diagnostic sink is installed from here, earlier than any entry
+/// point a caller could reach.
 ///
 /// # Safety
 /// Called by the Android runtime with the process's `JavaVM*`.
@@ -926,8 +1078,110 @@ pub unsafe extern "C" fn UnityPluginUnload() {}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> i32 {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        decode_mediacodec::set_java_vm(vm);
+        host_log::install();
+        // SAFETY: `vm` is the runtime's own JavaVM*, which is exactly
+        // what this entry point is called with.
+        unsafe { decode_mediacodec::set_java_vm(vm) };
     }));
     // JNI_VERSION_1_6
     0x0001_0006
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed consumer open is retried for the same handle, but not
+    /// forever. Caching the first failure outright meant a session whose
+    /// open lost a race against a presenter rebuild never presented
+    /// again: a fresh handle is the only thing that clears the slot, and
+    /// one is published only when the presenter is rebuilt.
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_consumer_open_is_retried_a_bounded_number_of_times() {
+        const HANDLE: u64 = 0x1234;
+
+        assert_eq!(
+            ConsumerSlot::Unopened.attempt_for(HANDLE),
+            Some(1),
+            "an unopened slot opens"
+        );
+
+        // Each failure is the next attempt, up to the bound.
+        let mut slot = ConsumerSlot::Unopened;
+        let mut attempts = Vec::new();
+        while let Some(attempt) = slot.attempt_for(HANDLE) {
+            attempts.push(attempt);
+            slot = ConsumerSlot::Failed(HANDLE, attempt);
+        }
+        assert_eq!(
+            attempts,
+            (1..=MAX_CONSUMER_OPENS).collect::<Vec<_>>(),
+            "every attempt up to the bound is made, and then no more"
+        );
+
+        // A different handle is a different question, however spent the
+        // slot is for the old one.
+        assert_eq!(
+            ConsumerSlot::Failed(HANDLE, MAX_CONSUMER_OPENS).attempt_for(HANDLE + 1),
+            Some(1),
+            "a new handle starts over"
+        );
+    }
+
+    /// The pair the render event acts on has to come from one registration.
+    /// A generation that moves while the pointer is being read means the
+    /// managed side is mid-registration, and the pointer read either side
+    /// of that belongs to a different texture than the generation does.
+    #[test]
+    fn a_texture_read_across_a_registration_is_refused() {
+        // Registrations bracket their store, so a settled counter is even
+        // and a completed one has advanced by two.
+        let generation = AtomicU64::new(8);
+
+        let settled = stable_texture(&generation, || 0xDEAD_BEEF);
+        assert_eq!(
+            settled,
+            Some((0xDEAD_BEEF, 8)),
+            "a quiet registration reads as itself"
+        );
+
+        // A whole registration lands between the two generation reads.
+        let straddled = stable_texture(&generation, || {
+            generation.fetch_add(2, Ordering::Release);
+            0x1234_5678
+        });
+        assert_eq!(straddled, None, "a moving registration yields no pair");
+
+        // And the one after it is stable again rather than stuck.
+        assert_eq!(
+            stable_texture(&generation, || 0x1234_5678),
+            Some((0x1234_5678, 10)),
+            "the settled registration reads normally"
+        );
+    }
+
+    /// The half that a single trailing bump cannot cover: the pointer store
+    /// has landed and the counter has not moved yet. Reading the counter
+    /// either side of the pointer sees no change there and would pair a new
+    /// texture with the previous registration. Bracketing the write makes
+    /// that state odd, so it is refused instead of read as settled.
+    #[test]
+    fn a_registration_in_flight_is_refused() {
+        // The first of the two bumps has landed, the second has not.
+        let generation = AtomicU64::new(9);
+        assert_eq!(
+            stable_texture(&generation, || 0x1234_5678),
+            None,
+            "a counter mid-registration yields no pair"
+        );
+
+        // The second bump completes it and the pair reads normally.
+        generation.fetch_add(1, Ordering::Release);
+        assert_eq!(
+            stable_texture(&generation, || 0x1234_5678),
+            Some((0x1234_5678, 10)),
+            "the completed registration reads normally"
+        );
+    }
 }
