@@ -12,13 +12,10 @@
 //! (cc_type 2/3) is parsed out but not decoded.
 
 use crate::sei::scan_au_sei;
+use crate::user_data::EPOCH_SLACK_US;
 
 const ROWS: usize = 15;
 const COLS: usize = 32;
-
-/// PTS gap (µs) beyond which a backwards jump is treated as a new timeline
-/// rather than B-frame decode-order reordering (which is sub-second).
-const EPOCH_SLACK_US: i64 = 1_000_000;
 
 /// Basic North American set: 0x20..=0x7F is ASCII bar these substitutions.
 fn basic_cp(c: u8) -> u16 {
@@ -420,7 +417,7 @@ impl CaptionScanner {
         let mut force_clear = false;
         if pts_us >= 0 {
             if let Some(last) = self.last_pts
-                && pts_us + EPOCH_SLACK_US < last
+                && pts_us < last.saturating_sub(EPOCH_SLACK_US)
             {
                 force_clear = !self.dec.serialize().is_empty();
                 self.dec = Cea608::new();

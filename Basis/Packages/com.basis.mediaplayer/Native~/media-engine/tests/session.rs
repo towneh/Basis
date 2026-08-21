@@ -675,3 +675,71 @@ fn diag_csv_appends_without_a_second_header() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// SEI user data: the authored fixture stamps one type-5 message into
+/// every access unit (tools/gen-sei-userdata-fixture.py's layout), and the
+/// lane hands each over with its UUID split off and its PTS, in order and
+/// without loss. x264's own build-string message rides through on the
+/// first AU under its own UUID, which is what the consumer-side UUID
+/// filter exists for.
+#[test]
+fn user_data_lane_delivers_every_frames_message() {
+    const FIXTURE_UUID: [u8; 16] = [
+        0x7a, 0x1c, 0x3e, 0x5f, 0x9b, 0x2d, 0x4c, 0x6e, 0x8f, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f,
+        0x60,
+    ];
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-sei-userdata-640x360-30fps.ts")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+
+    let mut messages = Vec::new();
+    assert!(
+        wait_for(Duration::from_secs(20), || {
+            messages.extend(Session::drain_user_data(&px, 64, 1 << 20));
+            let state = shared.state.load(Ordering::Relaxed);
+            assert_ne!(
+                state,
+                State::Error as u32,
+                "error {}",
+                shared.last_error.load(Ordering::Relaxed)
+            );
+            state == State::Ended as u32
+        }),
+        "user data session never ended"
+    );
+    messages.extend(Session::drain_user_data(&px, 64, 1 << 20));
+    session.close();
+
+    let ours: Vec<_> = messages.iter().filter(|m| m.uuid == FIXTURE_UUID).collect();
+    assert_eq!(ours.len(), 180, "one message per AU, none dropped");
+    for (i, m) in ours.iter().enumerate() {
+        assert_eq!(&m.payload[..4], b"BMUD");
+        let frame = u32::from_be_bytes(m.payload[4..8].try_into().unwrap());
+        assert_eq!(frame as usize, i, "decode order preserved");
+        assert_eq!(m.payload.len(), 8 + 512);
+        assert!(
+            m.payload[8..]
+                .iter()
+                .enumerate()
+                .all(|(k, &b)| b == ((i + k) & 0xFF) as u8),
+            "filler intact on frame {i}"
+        );
+        if i > 0 {
+            let step = m.pts_us - ours[i - 1].pts_us;
+            assert!(
+                (33_000..=34_000).contains(&step),
+                "pts step {step} on frame {i}"
+            );
+        }
+    }
+    let foreign: Vec<_> = messages.iter().filter(|m| m.uuid != FIXTURE_UUID).collect();
+    assert!(
+        foreign.iter().any(|m| m.payload.starts_with(b"x264")),
+        "x264's own user data passes through under its UUID"
+    );
+    assert_eq!(foreign[0].pts_us, ours[0].pts_us);
+}

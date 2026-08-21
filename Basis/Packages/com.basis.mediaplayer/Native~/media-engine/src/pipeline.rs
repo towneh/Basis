@@ -141,6 +141,10 @@ pub struct PipelineShared {
     /// bypass the Bank's release schedule so the consumer gets the full
     /// pre-roll). Drop-oldest at [`CAPTION_RING`].
     pub captions: Mutex<std::collections::VecDeque<media_bitstream::CaptionCue>>,
+    /// SEI user data (type 5) scanned from the video AUs on the demux
+    /// thread, surfaced on arrival with its PTS and left unparsed. Same
+    /// path as captions.
+    pub user_data: Mutex<UserDataRing>,
     /// Audio tracks the container offers instead of the bound one, filled
     /// once the demuxer is open. Empty where there is no choice to make.
     /// Read-mostly, so a plain mutex is right — a picker polls it, nothing
@@ -181,6 +185,82 @@ pub struct PipelineShared {
 
 /// Cue ring depth (the C player's CUE_RING).
 const CAPTION_RING: usize = 64;
+/// A per-frame lane arrives one message per AU, and an on-demand open
+/// banks up to the Bank's 30 s time cap before the consumer's first
+/// drain — 900 messages at 30 fps. The ring has to outlast that burst
+/// or a recording loses its opening seconds of data; live delivery is
+/// paced and never comes near it.
+const USER_DATA_RING: usize = 1024;
+/// Memory bound on the ring as a whole, drop-oldest like the count.
+const USER_DATA_RING_BYTES: usize = 16 * 1024 * 1024;
+/// Per-message ceiling. The largest real payload measured is ~10 KiB;
+/// a stream stamping more than this per frame is refused at the ring
+/// rather than allowed to size it.
+pub const USER_DATA_PAYLOAD_CAP: usize = 64 * 1024;
+
+/// Pending SEI user-data messages, oldest first, with the payload total
+/// kept alongside so both bounds are O(1) to hold.
+#[derive(Default)]
+pub struct UserDataRing {
+    items: std::collections::VecDeque<media_bitstream::SeiUserData>,
+    bytes: usize,
+}
+
+impl UserDataRing {
+    fn push(&mut self, message: media_bitstream::SeiUserData) {
+        if message.payload.len() > USER_DATA_PAYLOAD_CAP {
+            return;
+        }
+        self.bytes += message.payload.len();
+        self.items.push_back(message);
+        while self.items.len() > USER_DATA_RING || self.bytes > USER_DATA_RING_BYTES {
+            self.pop_front();
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<media_bitstream::SeiUserData> {
+        let m = self.items.pop_front()?;
+        self.bytes -= m.payload.len();
+        Some(m)
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.bytes = 0;
+    }
+
+    /// Take up to `max` messages whose payloads total no more than
+    /// `max_bytes`. A head message that could never fit on its own is
+    /// dropped rather than left blocking everything behind it.
+    pub fn drain(&mut self, max: usize, max_bytes: usize) -> Vec<media_bitstream::SeiUserData> {
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        while out.len() < max {
+            let Some(head) = self.items.front() else {
+                break;
+            };
+            let len = head.payload.len();
+            if len > max_bytes {
+                self.pop_front();
+                continue;
+            }
+            if bytes + len > max_bytes {
+                break;
+            }
+            bytes += len;
+            out.push(self.pop_front().expect("front was present"));
+        }
+        out
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
 
 /// Which source a demux thread is reading, in a session that has more than
 /// one. Adaptive ladders serve high rungs as a video-only and an audio-only
@@ -591,6 +671,10 @@ pub fn run_demux_leg(
     // consumer). One scanner per session; seeks reset it.
     let mut caption_scanner = media_bitstream::CaptionScanner::new();
     let mut caption_track: Option<media_demux::TrackId> = None;
+    // SEI user data rides the same AUs (H.264 and H.265 both carry it)
+    // and is scanned here for the same reason.
+    let mut user_data_scanner = media_bitstream::UserDataScanner::new();
+    let mut user_data_track: Option<(media_demux::TrackId, bool)> = None;
     // The floor on how much media the Bank will hold before it refuses a
     // push. Read once: a session's Bank config is settled at open.
     let decoder_cushion_us = px
@@ -689,6 +773,8 @@ pub fn run_demux_leg(
                     // the display at the landed position.
                     caption_scanner.reset();
                     px.captions.lock().expect("captions lock").clear();
+                    user_data_scanner.reset();
+                    px.user_data.lock().expect("user data lock").clear();
                     px.push_caption(media_bitstream::CaptionCue {
                         pts_us: landed.as_micros(),
                         text: String::new(),
@@ -752,18 +838,53 @@ pub fn run_demux_leg(
                         .stage(Stage::Demux)
                         .out_bytes
                         .fetch_add(event.payload_bytes() as u64, Ordering::Relaxed);
-                    // Caption scan on first pull only — a Bank-full retry
-                    // must not re-feed the stateful 608 decoder.
+                    // SEI scans on first pull only — a Bank-full retry must
+                    // not re-feed the stateful 608 decoder. And on the leg
+                    // that owns video only: the audio leg's source may carry
+                    // a picture of its own, which adapt_leg_event drops
+                    // below, and scanning it would mix a second timeline
+                    // into rings the video leg is filling.
                     match &event {
+                        _ if leg == Leg::Audio => {}
                         StreamEvent::Format(track, Format::Video { codec, .. }) => {
                             caption_track =
                                 (*codec == media_demux::VideoCodec::H264).then_some(*track);
+                            user_data_track = match codec {
+                                media_demux::VideoCodec::H264 => Some((*track, false)),
+                                media_demux::VideoCodec::H265 => Some((*track, true)),
+                                _ => None,
+                            };
                         }
-                        StreamEvent::Au(au) if Some(au.track) == caption_track => {
-                            if let Some(cue) =
-                                caption_scanner.scan_au(&au.data, false, au.pts.as_micros())
+                        StreamEvent::Au(au) => {
+                            if Some(au.track) == caption_track
+                                && let Some(cue) =
+                                    caption_scanner.scan_au(&au.data, false, au.pts.as_micros())
                             {
                                 px.push_caption(cue);
+                            }
+                            if let Some((track, hevc)) = user_data_track
+                                && au.track == track
+                            {
+                                // Collected first: a backwards jump means the
+                                // timeline restarted, and everything queued
+                                // before this AU belongs to the old one — a
+                                // loop lands back among the old pass's first
+                                // timestamps, so no pts comparison can tell
+                                // them apart.
+                                let mut messages = Vec::new();
+                                let new_epoch = user_data_scanner.scan_au(
+                                    &au.data,
+                                    hevc,
+                                    au.pts.as_micros(),
+                                    |m| messages.push(m),
+                                );
+                                let mut ring = px.user_data.lock().expect("user data lock");
+                                if new_epoch {
+                                    ring.clear();
+                                }
+                                for m in messages {
+                                    ring.push(m);
+                                }
                             }
                         }
                         _ => {}
@@ -2169,6 +2290,86 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 px.set_state(State::Ended);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod user_data_ring_tests {
+    use super::*;
+    use media_bitstream::SeiUserData;
+
+    fn message(pts_us: i64, len: usize) -> SeiUserData {
+        SeiUserData {
+            pts_us,
+            uuid: [0; 16],
+            payload: vec![0xAB; len],
+        }
+    }
+
+    #[test]
+    fn drain_takes_whole_messages_that_fit_and_leaves_the_rest() {
+        let mut ring = UserDataRing::default();
+        for i in 0..4 {
+            ring.push(message(i, 100));
+        }
+        let first = ring.drain(10, 250);
+        assert_eq!(first.len(), 2, "a third would pass the byte bound");
+        assert_eq!(ring.len(), 2);
+        let second = ring.drain(1, 1000);
+        assert_eq!(second.len(), 1, "the count bound holds too");
+        assert_eq!(second[0].pts_us, 2);
+        assert!(ring.drain(10, 1000).len() == 1 && ring.is_empty());
+    }
+
+    #[test]
+    fn a_message_that_can_never_fit_is_dropped_not_left_blocking() {
+        let mut ring = UserDataRing::default();
+        ring.push(message(0, 5000));
+        ring.push(message(1, 10));
+        let got = ring.drain(10, 1000);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].pts_us, 1);
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn both_ring_bounds_drop_oldest() {
+        let mut ring = UserDataRing::default();
+        for i in 0..(USER_DATA_RING as i64 + 5) {
+            ring.push(message(i, 1));
+        }
+        assert_eq!(ring.len(), USER_DATA_RING);
+        assert_eq!(ring.drain(1, 1).remove(0).pts_us, 5);
+
+        let mut ring = UserDataRing::default();
+        let per = USER_DATA_PAYLOAD_CAP;
+        let fits = USER_DATA_RING_BYTES / per;
+        for i in 0..(fits as i64 + 2) {
+            ring.push(message(i, per));
+        }
+        assert_eq!(ring.len(), fits);
+        assert_eq!(ring.bytes, fits * per);
+        assert_eq!(ring.drain(1, per).remove(0).pts_us, 2);
+        // Over the per-message cap is refused outright.
+        ring.push(message(99, per + 1));
+        assert_eq!(ring.len(), fits - 1);
+    }
+
+    #[test]
+    fn a_new_epoch_clears_the_old_pass_even_where_timestamps_overlap() {
+        // The old pass's opening messages sit at the same timestamps a
+        // loop restarts into, so the clear is unconditional rather than
+        // a pts comparison.
+        let mut ring = UserDataRing::default();
+        ring.push(message(0, 100));
+        ring.push(message(500_000, 100));
+        ring.push(message(10_000_000, 100));
+        let restart = message(0, 7);
+        ring.clear();
+        ring.push(restart);
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.bytes, 7);
+        assert_eq!(ring.drain(1, 7)[0].pts_us, 0);
     }
 }
 

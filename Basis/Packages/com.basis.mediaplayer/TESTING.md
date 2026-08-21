@@ -251,6 +251,20 @@ Opening a URL by hand after Play Mode has settled shows none of it. Judge
 startup behaviour in a standalone build, where the first frames are
 milliseconds; in the editor, judge it on the second load.
 
+## In-band user data
+
+`BasisMediaPlayer.UserDataReceived` has a managed compile and nothing else. The
+engine half has its rows (`Native~/TESTING.md`, "SEI user-data lane"); what a
+person still has to run is the delivery timing, which only exists with a
+playback clock underneath it.
+
+| Row | What it proves | What good looks like |
+| --- | --- | --- |
+| Ordered delivery | A script subscribing and logging, against `Native~/fixtures/h264-sei-userdata-640x360-30fps.ts` over HTTP | Frame indices 0..179 arrive in order, one per video frame, each as the position crosses its PTS; x264's `dc45e9bd-…` message once at the start |
+| Seek | Seek back mid-clip | Logging resumes from the landed frame with nothing from the old position in between |
+| Late subscriber | Subscribe a few seconds in | The first message is the one due at the moment of subscribing, neither a replay of the opening nor anything later: what was already past is gone, what was still to come all arrives |
+| Subscriber one frame late | A component that assigns its player reference after `Open` and subscribes from its own `Update` (so one tick after the player's first drain) | It receives the stream's first message. An on-demand open banks the whole pre-roll before the first frame shows, and the first drain takes a tick's worth of it; none of that may be lost to a subscriber that was a frame away |
+
 ## What still needs a person
 
 Picture and sound quality, in a headset, on the live transports. No harness

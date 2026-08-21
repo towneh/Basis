@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use media_diag::CaptureRecorder;
-use media_engine::{OpenRequest, Session, State};
+use media_engine::{OpenRequest, PipelineShared, Session, State};
 
 pub struct Options {
     pub url: String,
@@ -53,6 +53,9 @@ pub fn run(options: &Options) -> ExitCode {
 
     let mut audio_frames = 0u64;
     let mut caption_count = 0u64;
+    // SEI user data per UUID: messages and payload bytes.
+    let mut user_data: std::collections::BTreeMap<[u8; 16], (u64, u64)> =
+        std::collections::BTreeMap::new();
     let mut audio_epoch: Option<Instant> = None;
     let mut audio_buf = vec![0.0f32; 2048];
     let mut next_sample = Instant::now();
@@ -87,6 +90,8 @@ pub fn run(options: &Options) -> ExitCode {
                 text.replace('\n', " / ")
             );
         }
+
+        drain_user_data(&px, &mut user_data);
 
         // Pull audio at the hardware cadence, as the Unity audio thread
         // will.
@@ -158,8 +163,25 @@ pub fn run(options: &Options) -> ExitCode {
         shared.position_us.load(Ordering::Relaxed) / 1000,
         shared.duration_us.load(Ordering::Relaxed) / 1000,
     );
+    // The loop leaves on a deadline or a settled state, either of which
+    // can land between drains; what arrived since is still owed to the
+    // totals. Bounded at the ring's depth in passes: the session is still
+    // open here, so a live source dense enough to refill the ring faster
+    // than it drains would otherwise hold the summary hostage.
+    let mut passes = 0;
+    while drain_user_data(&px, &mut user_data) > 0 {
+        passes += 1;
+        if passes == 16 {
+            println!("user data: still arriving at the deadline; later messages not counted");
+            break;
+        }
+    }
     if caption_count > 0 {
         println!("captions:  {caption_count} cues");
+    }
+    for (uuid, (count, bytes)) in &user_data {
+        let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+        println!("user data: {hex} {count} messages, {bytes} bytes");
     }
     for event in diag.take_events() {
         println!(
@@ -180,4 +202,19 @@ pub fn run(options: &Options) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// One pass over the pending SEI user data, tallied per UUID as
+/// (messages, payload bytes); returns how many it took.
+fn drain_user_data(
+    px: &PipelineShared,
+    totals: &mut std::collections::BTreeMap<[u8; 16], (u64, u64)>,
+) -> usize {
+    let messages = Session::drain_user_data(px, 64, 1 << 20);
+    for m in &messages {
+        let e = totals.entry(m.uuid).or_default();
+        e.0 += 1;
+        e.1 += m.payload.len() as u64;
+    }
+    messages.len()
 }

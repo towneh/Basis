@@ -383,6 +383,61 @@ feed and reverting to -1 brings it straight back. Sidecar fetches go out over
 `UnityWebRequest`, so they are checked against the client's URL security before
 the request is made — the engine's own vetting doesn't cover them.
 
+### In-band user data
+
+A video stream can carry application data inside the picture itself, as SEI
+`user_data_unregistered` messages (H.264 and H.265 payload type 5): a lighting
+relay stamping DMX snapshots frame by frame, say, so the data stays locked to
+the picture through any CDN that remuxes rather than transcodes. The engine
+surfaces every such message with the 16-byte UUID that opens it and the bytes
+that follow, unparsed, and `BasisMediaPlayer.UserDataReceived` raises each one
+when playback reaches its timestamp:
+
+```csharp
+static readonly Guid Mine = Guid.Parse("b1f0a7d4-9c3e-4a52-8f61-2d7c5e0b93a8");
+
+player.UserDataReceived += (ptsUs, uuid, payload) =>
+{
+    if (uuid != Mine) return;      // x264 stamps its own build string this way
+    Decode(payload);               // borrowed for the call; copy what outlives it
+};
+```
+
+Every UUID is delivered and the consumer filters, so the player carries no
+particular application's identity. Messages arrive in timestamp order; a seek
+drops whatever was queued from the old position, and a loop drops what the
+previous pass left behind. Messages are held until due whether or not anyone is
+subscribed, so a subscriber that attaches mid-session receives everything still
+to come and nothing already past. The engine holds up to 64 KiB
+per message and refuses larger ones, and a stream carrying more than this lane
+can hold loses oldest first.
+
+Writing a consumer, in short:
+
+- The delegate is `UserDataHandler(long ptsUs, Guid uuid, ReadOnlySpan<byte> payload)`.
+  It runs on the main thread inside the player's tick, once per message, in
+  timestamp order. Keep the handler short; anything slow delays the frame.
+- `payload` is borrowed for the call. Copy out what you keep; do not hold the span.
+- Filter on `uuid` first. The encoder's own messages arrive through the same event.
+  A UUID you hold as the 16 wire bytes converts with
+  `BasisMediaPlayer.GuidFromRfc4122(ReadOnlySpan<byte>)`, whose text form matches the
+  RFC string (`new Guid(byte[])` would not: it reads the first three fields
+  little-endian).
+- Subscribe whenever suits you. Messages are held until due whether or not anyone is
+  listening, so subscribing a frame after `Open` loses nothing that is still to come.
+- Unsubscribe in `OnDisable`, and compare the player reference by
+  `ReferenceEquals` when doing so: a destroyed player compares equal to `null` the
+  Unity way while the managed object still holds your delegate.
+- Treat the bytes as untrusted. Whatever format they carry should verify itself
+  (a length, a CRC) before you act on it; the player checks nothing past the UUID.
+
+SEI rides inside the video elementary stream, so it survives a pipeline that
+copies that stream through unchanged (the usual remux), and is dropped by one
+that re-encodes it, unless the transcoder goes out of its way to carry it
+across. A remux that runs bitstream filters over the video can also strip or
+add SEI. When the lane goes quiet on a path that worked elsewhere, that is the
+first thing to check.
+
 ### Choosing an audio track
 
 A container can carry several audio tracks: one per language on a film, or one

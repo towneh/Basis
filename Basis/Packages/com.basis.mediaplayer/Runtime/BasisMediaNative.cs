@@ -59,6 +59,19 @@ public static class BasisMediaNative
     public static extern unsafe int bm_session_drain_captions(ulong handle, BmCaption* captions, uint capacity);
 
     /// <summary>
+    /// Drain pending SEI user-data messages: records into
+    /// <paramref name="records"/> (up to <paramref name="capacity"/>),
+    /// their payloads packed into <paramref name="bytes"/> (up to
+    /// <paramref name="bytesCapacity"/>), each record's Offset/Len locating
+    /// its payload. Returns the record count. Only whole messages that fit
+    /// are taken; the rest wait. A message whose payload alone exceeds
+    /// bytesCapacity is dropped, so size bytes to at least the engine's
+    /// 64 KiB per-message ceiling to see everything.
+    /// </summary>
+    [DllImport(Dll)]
+    public static extern unsafe int bm_session_drain_user_data(ulong handle, BmUserData* records, uint capacity, byte* bytes, uint bytesCapacity);
+
+    /// <summary>
     /// How many audio tracks the source offers instead of the bound one.
     /// 0 = nothing to choose between (one track, or a container that does
     /// not enumerate them). Stable for the session's life: switching track
@@ -207,6 +220,22 @@ public unsafe struct BmCaption
     /// the contract — always 0. The struct is 272 bytes either way.
     /// </summary>
     public uint Reserved;
+}
+
+/// <summary>
+/// One SEI user_data_unregistered message, surfaced with its UUID and left
+/// unparsed. The payload lands in the caller's byte buffer at Offset for
+/// Len; this record only points at it. Messages arrive ahead of
+/// presentation — act on one when the session position reaches PtsUs.
+/// 32 bytes, no padding.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct BmUserData
+{
+    public long PtsUs;
+    public fixed byte Uuid[16];
+    public uint Offset;
+    public uint Len;
 }
 
 /// <summary>

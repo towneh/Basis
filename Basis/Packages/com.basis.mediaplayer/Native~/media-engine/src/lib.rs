@@ -409,6 +409,7 @@ impl Session {
             decode_preference: request.decode_preference,
             presentation_origin_us: AtomicI64::new(i64::MIN),
             captions: Mutex::new(std::collections::VecDeque::new()),
+            user_data: Mutex::new(pipeline::UserDataRing::default()),
             audio_tracks: Mutex::new(Vec::new()),
             artwork: Mutex::new(None),
             present: present::PresentShared::new(),
@@ -538,6 +539,24 @@ impl Session {
         let mut ring = px.captions.lock().expect("captions lock");
         let n = ring.len().min(max);
         ring.drain(..n).collect()
+    }
+
+    /// Drain pending SEI user-data messages: up to `max` of them, and
+    /// no more than `max_bytes` of payload between them, so a caller
+    /// copying into a fixed buffer takes exactly what fits and the rest
+    /// waits. A message that could never fit on its own (payload above
+    /// `max_bytes`) is dropped rather than left blocking the head.
+    /// Surfaced on arrival — the consumer schedules delivery against the
+    /// session position.
+    pub fn drain_user_data(
+        px: &PipelineShared,
+        max: usize,
+        max_bytes: usize,
+    ) -> Vec<media_bitstream::SeiUserData> {
+        px.user_data
+            .lock()
+            .expect("user data lock")
+            .drain(max, max_bytes)
     }
 
     /// Report the managed sink's estimated output latency (µs): the chain

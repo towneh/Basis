@@ -79,6 +79,7 @@ const _: () = {
     assert!(size_of::<BmSnapshot>() == 88);
     assert!(size_of::<BmEvent>() == 8 + 4 + 4 + 4 + BM_EVENT_DETAIL_CAP);
     assert!(size_of::<BmCaption>() == 8 + 4 + BM_CAPTION_TEXT_CAP + 4);
+    assert!(size_of::<BmUserData>() == 8 + BM_USER_DATA_UUID_LEN + 4 + 4);
     assert!(size_of::<BmAudioTrack>() == 4 * 4 + BM_TRACK_LANG_CAP + 4 + BM_TRACK_LABEL_CAP);
 };
 
@@ -112,6 +113,21 @@ pub struct BmCaption {
     /// they are written rather than left holding whatever the stack slot
     /// did. Not part of the contract — always 0.
     pub reserved: u32,
+}
+
+pub const BM_USER_DATA_UUID_LEN: usize = 16;
+
+/// One SEI `user_data_unregistered` message, surfaced with its UUID and
+/// left unparsed. The bytes themselves land in the caller's byte buffer
+/// at `offset` for `len`; this record only points at them. Messages
+/// surface on arrival (ahead of presentation); act on one when the
+/// session position reaches `pts_us`.
+#[repr(C)]
+pub struct BmUserData {
+    pub pts_us: i64,
+    pub uuid: [u8; BM_USER_DATA_UUID_LEN],
+    pub offset: u32,
+    pub len: u32,
 }
 
 /// The JSON descriptor `bm_session_open` accepts. The resolver-facing
@@ -668,6 +684,61 @@ pub unsafe extern "C" fn bm_session_drain_captions(
             unsafe { out.add(i).write(record) };
         }
         cues.len() as i32
+    }))
+    .unwrap_or(BM_ERR_PANIC)
+}
+
+/// Drain pending SEI user-data messages: records into `out` (up to
+/// `cap`), their bytes packed into `bytes` (up to `bytes_cap`), each
+/// record's `offset`/`len` locating its payload. Returns the record
+/// count. Takes only whole messages that fit; the rest stay queued up to
+/// the engine's ring depth (oldest dropped beyond it). A message whose
+/// payload alone exceeds `bytes_cap` can never be delivered through this
+/// buffer and is dropped, so size `bytes` to at least the engine's
+/// per-message ceiling (64 KiB) to see everything the stream carries.
+///
+/// # Safety
+/// `out` must point to `cap` writable `BmUserData`s and `bytes` to
+/// `bytes_cap` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bm_session_drain_user_data(
+    handle: u64,
+    out: *mut BmUserData,
+    cap: u32,
+    bytes: *mut u8,
+    bytes_cap: u32,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if out.is_null() || cap == 0 || bytes.is_null() || bytes_cap == 0 {
+            return BM_ERR_INVALID_ARG;
+        }
+        let Some(entry) = lookup(handle) else {
+            return BM_ERR_INVALID_HANDLE;
+        };
+        let messages = Session::drain_user_data(&entry.pipeline, cap as usize, bytes_cap as usize);
+        let mut offset = 0usize;
+        for (i, m) in messages.iter().enumerate() {
+            let record = BmUserData {
+                pts_us: m.pts_us,
+                uuid: m.uuid,
+                offset: offset as u32,
+                len: m.payload.len() as u32,
+            };
+            // SAFETY: caller contract — out points to cap writable
+            // BmUserDatas and bytes to bytes_cap writable bytes; i <
+            // messages.len() <= cap, and the drain bounded the payload
+            // total to bytes_cap, so offset + len <= bytes_cap.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    m.payload.as_ptr(),
+                    bytes.add(offset),
+                    m.payload.len(),
+                );
+                out.add(i).write(record);
+            }
+            offset += m.payload.len();
+        }
+        messages.len() as i32
     }))
     .unwrap_or(BM_ERR_PANIC)
 }

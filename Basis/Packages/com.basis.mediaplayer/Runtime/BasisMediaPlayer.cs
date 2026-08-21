@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -127,6 +128,27 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     // read each other rather than in registration order.
     readonly System.Collections.Generic.List<IBasisMediaTickConsumer> _consumers = new();
     readonly System.Collections.Generic.Queue<(long ptsUs, string text)> _captionQueue = new();
+    // Pending messages in timestamp order, delivered from the front. The
+    // engine hands them over in decode order, and under B-frames that runs
+    // up to a reorder depth ahead of presentation, so a FIFO would hold a
+    // B-frame's message behind the P-frame's that was decoded before it.
+    readonly System.Collections.Generic.List<(long ptsUs, Guid uuid, byte[] buffer, int length)> _userDataPending = new();
+    // The largest timestamp queued, so a backwards jump is measured against
+    // the far end of the backlog. long.MinValue while nothing is queued.
+    long _userDataMaxPtsUs = long.MinValue;
+    // The entries due this tick, lifted out of the pending list before any
+    // handler runs, so a handler that seeks (and so clears the list) meets
+    // a consistent one.
+    readonly System.Collections.Generic.List<(long ptsUs, Guid uuid, byte[] buffer, int length)> _userDataDue = new();
+    // Bumped by every clear, so a delivery loop can tell that a handler
+    // abandoned the timeline under it and stop handing out the rest.
+    int _userDataTimeline;
+    // Sized to the engine's per-message ceiling, so nothing it holds is
+    // ever too large to cross; allocated on the first drain and kept for
+    // the component's life.
+    byte[] _userDataBytes;
+    const int UserDataBytesCapacity = 64 * 1024;
+    const int UserDataRecordsPerDrain = 64;
     readonly BasisSidecarSubtitleEngine _subtitles = new();
     readonly System.Collections.Generic.List<BasisSubtitleTrack> _subtitleTracks = new();
 
@@ -305,6 +327,28 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// </summary>
     public event Action<string> CaptionChanged;
 
+    /// <summary>
+    /// One SEI user-data message due at the playback position. The engine
+    /// hands these over unparsed: <paramref name="payload"/> is whatever
+    /// followed the 16-byte UUID inside the `user_data_unregistered`
+    /// message, and the handler decides what it means. It is borrowed for
+    /// the call — copy what outlives it.
+    /// </summary>
+    public delegate void UserDataHandler(long ptsUs, Guid uuid, ReadOnlySpan<byte> payload);
+
+    /// <summary>
+    /// Raised for each SEI user_data_unregistered message (H.264 and H.265
+    /// payload type 5) once playback reaches its timestamp, in timestamp
+    /// order (messages with equal timestamps keep their stream order).
+    /// Every UUID arrives, the encoder's own included (x264 stamps its build
+    /// string on keyframes this way), so a consumer filters on the UUID it
+    /// expects. A seek drops whatever was queued from the old position.
+    /// Messages are held until due whether or not anyone is subscribed, so
+    /// a subscriber attaching mid-session receives everything still to come
+    /// and nothing already past.
+    /// </summary>
+    public event UserDataHandler UserDataReceived;
+
     /// <summary>Out-of-band subtitle tracks offered for this source. The
     /// media carries none of these — a resolver or other enrichment source
     /// supplies them through <see cref="SetSubtitleTracks"/>.</summary>
@@ -447,6 +491,15 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         SelectedSubtitleTrackIndex = -1;
         _subtitles.Clear();
         SubtitleTrackChanged?.Invoke(-1);
+    }
+
+    void ClearUserData()
+    {
+        foreach (var pending in _userDataPending)
+            ArrayPool<byte>.Shared.Return(pending.buffer);
+        _userDataPending.Clear();
+        _userDataMaxPtsUs = long.MinValue;
+        _userDataTimeline++;
     }
 
     void ClearCaptionDisplay()
@@ -762,6 +815,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         // they would either flush in a burst or sit undue past a backwards
         // seek. The engine emits its own clear at the landed position.
         ClearCaptionDisplay();
+        ClearUserData();
     }
 
     /// <summary>
@@ -827,6 +881,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             SubtitleTrackChanged?.Invoke(-1);
         }
         ClearCaptionDisplay();
+        ClearUserData();
         if (hadTexture)
             OutputTextureChanged?.Invoke(null);
     }
@@ -916,6 +971,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
         DrainEvents();
         DrainCaptions(snapshot.PositionUs);
+        DrainUserData(snapshot.PositionUs);
         RefreshAudioTracks();
         RefreshArtwork(snapshot);
 
@@ -939,6 +995,9 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
                 $"[BasisMedia] session error {snapshot.ErrorCode} " +
                 $"({(BmErrorCategory)snapshot.ErrorCategory}): {why} [{url}]",
                 BasisDebug.LogTag.Video);
+            // Nothing ticks this session again, so what is queued would hold
+            // its pooled buffers until the next open.
+            ClearUserData();
             _open = false;
             return;
         }
@@ -1159,6 +1218,116 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             due = _captionQueue.Dequeue().text;
         if (due != null)
             SetCaption(due);
+    }
+
+    // The engine ring is drained every tick and everything drained is held
+    // until the playback position reaches it, subscriber or not. An
+    // on-demand open banks seconds of media before the first frame shows,
+    // so what the engine hands over here is mostly still in the future; a
+    // subscriber that attaches a frame after Open (a component whose
+    // Update runs after this one's, say) must see all of it. Without a
+    // subscriber a message is dropped only as it falls due.
+    unsafe void DrainUserData(long positionUs)
+    {
+        var handler = UserDataReceived;
+        _userDataBytes ??= new byte[UserDataBytesCapacity];
+
+        var records = stackalloc BmUserData[UserDataRecordsPerDrain];
+        int count;
+        fixed (byte* bytes = _userDataBytes)
+        {
+            count = BasisMediaNative.bm_session_drain_user_data(
+                _handle, records, UserDataRecordsPerDrain, bytes, UserDataBytesCapacity);
+        }
+        for (int i = 0; i < count; i++)
+        {
+            int length = (int)records[i].Len;
+            long ptsUs = records[i].PtsUs;
+            // A backwards jump past the engine's 1 s reordering slack is a
+            // new timeline (a loop, or a discontinuity the engine did not
+            // flag); what is queued from the old one would sit undue in
+            // front of it. Within the slack it is B-frame reordering, and
+            // the ordered insert below puts it where it belongs.
+            if (_userDataPending.Count > 0
+                && _userDataMaxPtsUs != long.MinValue
+                && ptsUs < _userDataMaxPtsUs - 1_000_000)
+                ClearUserData();
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+            Buffer.BlockCopy(_userDataBytes, (int)records[i].Offset, buffer, 0, length);
+            // After every entry with the same or an earlier timestamp, so
+            // equal timestamps keep their stream order. Walks from the
+            // back: the common case lands on the end.
+            int at = _userDataPending.Count;
+            while (at > 0 && _userDataPending[at - 1].ptsUs > ptsUs)
+                at--;
+            _userDataPending.Insert(at, (ptsUs, GuidFromRfc4122(records[i].Uuid), buffer, length));
+            if (ptsUs > _userDataMaxPtsUs)
+                _userDataMaxPtsUs = ptsUs;
+        }
+
+        // One removal for the whole due run: a catch-up tick after the
+        // open-time burst can have hundreds due, and shifting the list
+        // once per entry would make that quadratic.
+        int due = 0;
+        while (due < _userDataPending.Count && _userDataPending[due].ptsUs <= positionUs)
+            due++;
+        if (due == 0)
+            return;
+        _userDataDue.Clear();
+        for (int i = 0; i < due; i++)
+            _userDataDue.Add(_userDataPending[i]);
+        _userDataPending.RemoveRange(0, due);
+        int timeline = _userDataTimeline;
+        for (int i = 0; i < _userDataDue.Count; i++)
+        {
+            var (ptsUs, uuid, buffer, length) = _userDataDue[i];
+            // A handler that seeks or closes has left this timeline; what
+            // is still due belongs to it and is not delivered. With no
+            // handler at all, due messages are simply let go.
+            if (handler == null || _userDataTimeline != timeline)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                continue;
+            }
+            try
+            {
+                handler?.Invoke(ptsUs, uuid, new ReadOnlySpan<byte>(buffer, 0, length));
+            }
+            catch (Exception e)
+            {
+                BasisDebug.LogErrorOnce($"[BasisMedia] user data handler failed: {e}", BasisDebug.LogTag.Video);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        _userDataDue.Clear();
+    }
+
+    /// <summary>
+    /// A UUID as the wire carries it (RFC 4122, big-endian fields) as a
+    /// <see cref="Guid"/> whose text form matches — so
+    /// <c>Guid.Parse("b1f0a7d4-...")</c> compares equal to the UUID an
+    /// encoder wrote as those bytes. <c>new Guid(byte[])</c> would not: it
+    /// reads the first three fields little-endian. Exactly 16 bytes.
+    /// </summary>
+    public static unsafe Guid GuidFromRfc4122(ReadOnlySpan<byte> uuid)
+    {
+        if (uuid.Length != 16)
+            throw new ArgumentException("a UUID is 16 bytes", nameof(uuid));
+        fixed (byte* p = uuid)
+            return GuidFromRfc4122(p);
+    }
+
+    // The pointer form the drain uses on the record's fixed buffer; the
+    // caller vouches for 16 readable bytes.
+    static unsafe Guid GuidFromRfc4122(byte* uuid)
+    {
+        int a = uuid[0] << 24 | uuid[1] << 16 | uuid[2] << 8 | uuid[3];
+        short b = (short)(uuid[4] << 8 | uuid[5]);
+        short c = (short)(uuid[6] << 8 | uuid[7]);
+        return new Guid(a, b, c, uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
     }
 
     // ---- IBasisPcmSource: the decoded ring, offered to the audio stack ----
