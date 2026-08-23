@@ -1,8 +1,8 @@
 //! ABI v2 boundary (§7): opaque generational handles, one snapshot poll
 //! per frame, SPSC event drain, a lock-free audio pull, and one
-//! render-event function pointer. Poll-driven, no reverse callbacks;
-//! UTF-8 both directions; `catch_unwind` at every export; `unsafe` at the
-//! boundary only.
+//! render-event function pointer, whose event id selects the pass.
+//! Poll-driven, no reverse callbacks; UTF-8 both directions;
+//! `catch_unwind` at every export; `unsafe` at the boundary only.
 //!
 //! Graphics contract (D3D11, normative): the engine owns a shared
 //! BGRA texture sized to the *coded* frame; the managed side creates a
@@ -14,7 +14,8 @@
 //! keyed-mutex acquire + `CopyResource` — it never waits on a media-path
 //! lock. Teardown order: stop issuing render events, then
 //! `bm_session_close`; the Unity texture must outlive the last issued
-//! event, and on Vulkan by a few render events more (see
+//! event, and on Vulkan by a few render events more, which the caller
+//! keeps issuing as `BM_EVENT_COLLECT` (see
 //! `bm_session_set_output_texture`).
 
 mod host_log;
@@ -38,6 +39,17 @@ pub const BM_OK: i32 = 0;
 pub const BM_ERR_INVALID_ARG: i32 = -1;
 pub const BM_ERR_INVALID_HANDLE: i32 = -2;
 pub const BM_ERR_PANIC: i32 = -3;
+
+/// Render-event id for the per-session present pass: `data` is the session
+/// handle. The id the graphics contract has always named.
+pub const BM_EVENT_PRESENT: i32 = 1;
+
+/// Render-event id for a collect-only pass on Android: `data` is ignored and
+/// no session is looked up. Issued by the managed side while it is holding a
+/// retired output texture, so the Vulkan objects made over that texture are
+/// destroyed before it releases the image beneath them. On every other
+/// platform it finds no session and does nothing.
+pub const BM_EVENT_COLLECT: i32 = 2;
 
 /// One poll fills this; the managed side dispatches locally. Fixed layout,
 /// append-only across minor revisions.
@@ -958,6 +970,11 @@ fn copy_utf8(text: Option<&str>, buf: &mut [u8]) -> u32 {
 /// Neither is enforced here. Enforcing would mean the plugin gating the
 /// caller's own release on GPU completion, which is a contract the
 /// managed side has to keep rather than one this boundary can impose.
+/// What the boundary does provide is the means: the objects are destroyed
+/// by a render event, and a closed session has no render events of its
+/// own, so the caller issues `BM_EVENT_COLLECT` for the frames it holds
+/// the retired texture. Releasing without it destroys the image under a
+/// live view no matter how long the wait was.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bm_session_set_output_texture(handle: u64, texture: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
@@ -1047,7 +1064,10 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
 unsafe extern "system" fn on_render_event(_event_id: i32, _data: *mut c_void) {}
 
 /// Returns the render-event callback for
-/// `CommandBuffer.IssuePluginEventAndData`; `data` is the session handle.
+/// `CommandBuffer.IssuePluginEventAndData`. The event id selects the pass:
+/// `BM_EVENT_PRESENT` with `data` as the session handle, or (Android)
+/// `BM_EVENT_COLLECT` with no data, which destroys retired Vulkan objects
+/// and needs no session.
 #[unsafe(no_mangle)]
 pub extern "C" fn bm_render_event_func() -> *mut c_void {
     on_render_event as *mut c_void
@@ -1090,8 +1110,14 @@ fn stable_texture(generation: &AtomicU64, load: impl Fn() -> usize) -> Option<(u
 /// registered Unity RenderTexture (see `media_present::android` for the
 /// managed graphics contract).
 #[cfg(target_os = "android")]
-unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
+unsafe extern "system" fn on_render_event(event_id: i32, data: *mut c_void) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
+        if event_id == BM_EVENT_COLLECT {
+            // Deliberately ahead of any handle lookup: the case this
+            // exists for is the one where no session is left to find.
+            media_present::android::drain_graveyard();
+            return;
+        }
         let handle = data as usize as u64;
         let Some(entry) = lookup(handle) else { return };
         let Some((texture, generation)) = stable_texture(&entry.texture_generation, || {

@@ -17,7 +17,7 @@ mod intercept;
 mod renderer;
 mod unity;
 
-pub use renderer::SessionRenderer;
+pub use renderer::{SessionRenderer, drain_graveyard};
 
 /// Forward of `UnityPluginLoad`.
 ///

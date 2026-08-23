@@ -9,6 +9,7 @@
 //! buffer might still read it.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ash::vk;
 use ash::vk::Handle;
@@ -971,6 +972,56 @@ fn import_buffer(
         })
     }
 }
+
+/// Destroy graveyard entries whose frames are provably retired, with no
+/// session involved.
+///
+/// `SessionRenderer::render` collects as part of its own pass, but it is
+/// reached only through a live session's handle, and `bm_session_close`
+/// retires that handle before the renderer's objects reach the graveyard.
+/// A closing session's objects are therefore destroyed by some *other*
+/// live session's render events, and the last session to close leaves
+/// nothing that can ever run the collector: its buried view outlives the
+/// image it was made over, whatever the managed side then does with the
+/// texture. This is the drain that the caller issues instead.
+///
+/// Silent where the device context or the recording state is absent, save
+/// for one line the first time the latter happens: it means the drain ran
+/// and destroyed nothing, while its caller is counting down to releasing
+/// the texture regardless.
+pub fn drain_graveyard() {
+    let mut guard = CTX.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(ctx) = guard.as_mut() else {
+        return;
+    };
+    // SAFETY: Unity vtable call on the render thread, the documented call
+    // site. Same query the render pass makes, and the command buffer is
+    // checked with it for the same reason: both are how Unity says the
+    // call arrived inside a render event, and the frame numbers below mean
+    // nothing anywhere else.
+    let recording = unsafe {
+        let mut state = core::mem::zeroed::<unity::UnityVulkanRecordingState>();
+        let recording_state = (*ctx.vulkan_iface).command_recording_state;
+        if !recording_state.is_some_and(|f| f(&mut state, unity::QUEUE_ACCESS_DONT_CARE))
+            || state.command_buffer == vk::CommandBuffer::null()
+        {
+            if !WARNED_NO_RECORDING.swap(true, Ordering::Relaxed) {
+                unity::log(
+                    "collect: no command recording state at the event's call site — retired views cannot be destroyed",
+                );
+            }
+            return;
+        }
+        state
+    };
+    graveyard::collect(
+        ctx,
+        recording.current_frame_number,
+        recording.safe_frame_number,
+    );
+}
+
+static WARNED_NO_RECORDING: AtomicBool = AtomicBool::new(false);
 
 mod graveyard {
     //! Vulkan objects whose owner (a closing session) cannot prove GPU

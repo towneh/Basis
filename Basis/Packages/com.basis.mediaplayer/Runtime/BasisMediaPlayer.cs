@@ -861,11 +861,9 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
             _renderHooked = false;
         }
-        if (_texture is RenderTexture renderTexture)
-            renderTexture.Release();
 #endif
         bool hadTexture = _texture != null;
-        _texture = null;
+        SetOutputTexture(null);
         _textureIsArtwork = false;
         _artworkRead = false;
         if (_artwork != null)
@@ -884,6 +882,39 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         ClearUserData();
         if (hadTexture)
             OutputTextureChanged?.Invoke(null);
+    }
+
+    /// <summary>
+    /// Install <paramref name="texture"/> as the output and dispose of whatever
+    /// it replaces.
+    ///
+    /// On Vulkan the plugin holds an image view over the texture it was
+    /// registered with and can only destroy it from a later render event, so
+    /// the image has to stay alive past the call that ends the registration —
+    /// a close or a replacement alike — and the retirement queue is what holds
+    /// it. Elsewhere the plugin owns nothing that outlives the session, so the
+    /// texture is destroyed here; Unity releases the graphics resource through
+    /// the render command queue, which orders it after the events already
+    /// issued for it.
+    ///
+    /// The replacement case cannot arise today, since the texture is only
+    /// created where there is none. Routing it through here anyway is what
+    /// covers a future resolution change by construction rather than by memory.
+    /// </summary>
+    void SetOutputTexture(Texture texture)
+    {
+        Texture previous = _texture;
+        _texture = texture;
+        // The cover art has an owner already: Close destroys it by name, and it
+        // is the one texture here the session never drew into.
+        if (previous == null || ReferenceEquals(previous, texture)
+            || ReferenceEquals(previous, _artwork))
+            return;
+#if UNITY_ANDROID && !UNITY_EDITOR
+        BasisMediaTextureRetirement.Retire(previous);
+#else
+        Destroy(previous);
+#endif
     }
 
     void Update() => _frameTick.RunFromUpdate();
@@ -1015,11 +1046,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
                 enableRandomWrite = true,
             };
             target.Create();
-            _texture = target;
+            SetOutputTexture(target);
             BasisMediaNative.bm_session_set_output_texture(_handle, target.GetNativeTexturePtr());
 #else
             var texture = new Texture2D((int)snapshot.Width, (int)snapshot.Height, TextureFormat.BGRA32, false);
-            _texture = texture;
+            SetOutputTexture(texture);
             BasisMediaNative.bm_session_set_output_texture(_handle, texture.GetNativeTexturePtr());
 #endif
             OutputTextureChanged?.Invoke(_texture);
@@ -1036,7 +1067,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
                 if (!_renderHooked)
                 {
                     _commandBuffer.Clear();
-                    _commandBuffer.IssuePluginEventAndData(BasisMediaNative.bm_render_event_func(), 1, (IntPtr)_handle);
+                    _commandBuffer.IssuePluginEventAndData(BasisMediaNative.bm_render_event_func(),
+                        BasisMediaNative.RenderEventPresent, (IntPtr)_handle);
                     RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
                     _renderHooked = true;
                 }
@@ -1044,12 +1076,14 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             else
             {
                 _commandBuffer.Clear();
-                _commandBuffer.IssuePluginEventAndData(BasisMediaNative.bm_render_event_func(), 1, (IntPtr)_handle);
+                _commandBuffer.IssuePluginEventAndData(BasisMediaNative.bm_render_event_func(),
+                    BasisMediaNative.RenderEventPresent, (IntPtr)_handle);
                 Graphics.ExecuteCommandBuffer(_commandBuffer);
             }
 #else
             _commandBuffer.Clear();
-            _commandBuffer.IssuePluginEventAndData(BasisMediaNative.bm_render_event_func(), 1, (IntPtr)_handle);
+            _commandBuffer.IssuePluginEventAndData(BasisMediaNative.bm_render_event_func(),
+                BasisMediaNative.RenderEventPresent, (IntPtr)_handle);
             Graphics.ExecuteCommandBuffer(_commandBuffer);
 #endif
         }
@@ -1143,7 +1177,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         // only when there is no video to show.
         if (snapshot.Width == 0 && _texture == null)
         {
-            _texture = _artwork;
+            SetOutputTexture(_artwork);
             _textureIsArtwork = true;
             VideoSize = new Vector2Int(_artwork.width, _artwork.height);
             OutputTextureChanged?.Invoke(_texture);

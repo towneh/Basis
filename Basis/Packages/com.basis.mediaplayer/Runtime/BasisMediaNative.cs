@@ -107,6 +107,15 @@ public static class BasisMediaNative
     /// </summary>
     [DllImport(Dll)] public static extern int bm_session_set_output_texture(ulong handle, IntPtr texture);
     [DllImport(Dll)] public static extern IntPtr bm_render_event_func();
+
+    /// <summary>The per-session present pass: the event data is the session
+    /// handle (BM_EVENT_PRESENT).</summary>
+    internal const int RenderEventPresent = 1;
+
+    /// <summary>Destroy Vulkan objects retired by a closed session, with no
+    /// session looked up and no event data (BM_EVENT_COLLECT). Android only;
+    /// every other platform finds no session and does nothing.</summary>
+    internal const int RenderEventCollect = 2;
 }
 
 /// <summary>What kind of source this is. Every transport bar bare
