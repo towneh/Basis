@@ -216,6 +216,22 @@ Both were re-serialised on 2026-08-16, which is when the older component's
 field names left `MediaPlayerStreaming` and the networking component stopped
 sitting at the end of the file where it had been hand-written in.
 
+## The Picture foldout on the output sinks
+
+`BasisVideoPicture` carries the per-output brightness, contrast, saturation and gamma,
+and both sinks expose it as an inspector field. It is a plain struct, so it serialises
+only because it is marked `[System.Serializable]`; without that Unity skips the field
+entirely, the SDK inspector's `PropertyField` has no `SerializedProperty` to bind to,
+and the foldout comes up empty. Nothing fails at compile time — the compiler is happy
+either way, and Unity's serialization analyzer only says so on a real recompile of the
+assembly, so a cached editor session shows nothing.
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| The foldout is populated | on `BasisVideoMaterialOutput`, the Picture foldout shows four sliders at their default of 1 (gamma included) rather than being empty | select a player's material output in the inspector |
+| The values persist | move a slider, enter and leave Play Mode, reopen the scene: the value is still there | |
+| Brightness reaches the picture | on `BasisVideoDisplay` it multiplies into `RawImage.color`; the other three need a material carrying the `_Basis*` properties | |
+
 ## Known: media starts loud and drops, once, at scene init
 
 Not a media player defect and not worth re-investigating. Basis's scene
