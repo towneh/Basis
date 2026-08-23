@@ -576,6 +576,16 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// </summary>
     public void OpenUserUrl(string sourceUrl)
     {
+        // Refused up front as well as at Open, so a locked client never hands a page
+        // URL to the resolver: that route leaves this method and comes back through
+        // OpenResolved later, by which time the extraction has already happened.
+        if (BasisNetworkModeration.MediaPlayerBlockedLocally)
+        {
+            BasisDebug.LogWarning(
+                "BasisMediaPlayer.OpenUserUrl blocked: media players are locked by an admin.",
+                BasisDebug.LogTag.Video);
+            return;
+        }
         sourceUrl = BasisMediaUrlRouter.NormalizeUrl(sourceUrl);
         if (string.IsNullOrEmpty(sourceUrl))
             return;
@@ -653,6 +663,16 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// </summary>
     public void Open(string sourceUrl)
     {
+        // The load funnel: the split-pair overload, OpenUserUrl's direct path, a
+        // resolver's OpenResolved and the re-open all land here, so the moderation
+        // lock is enforced here rather than at each of them.
+        if (BasisNetworkModeration.MediaPlayerBlockedLocally)
+        {
+            BasisDebug.LogWarning(
+                "BasisMediaPlayer.Open blocked: media players are locked by an admin.",
+                BasisDebug.LogTag.Video);
+            return;
+        }
         LoadGeneration++;
         // The track list belongs to a source. A switch re-opens the same
         // one and keeps its choice; anything else starts over, because a

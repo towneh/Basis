@@ -265,6 +265,30 @@ playback clock underneath it.
 | Late subscriber | Subscribe a few seconds in | The first message is the one due at the moment of subscribing, neither a replay of the opening nor anything later: what was already past is gone, what was still to come all arrives |
 | Subscriber one frame late | A component that assigns its player reference after `Open` and subscribes from its own `Update` (so one tick after the player's first drain) | It receives the stream's first message. An on-demand open banks the whole pre-roll before the first frame shows, and the first drain takes a tick's worth of it; none of that may be lost to a subscriber that was a frame away |
 
+## The admin media lock
+
+`BasisNetworkModeration.MediaPlayerBlockedLocally` is the instance-wide moderation lock: a
+client under it may not load media at all, in either direction, and admins are exempt
+through the global-lock bypass. It is client-enforced, so the check in this package is the
+whole gate rather than a hint to a server that will re-check.
+
+It is checked in two places, and both are needed. `Open(string)` is the funnel every route
+reaches — the split-pair overload, `OpenUserUrl`'s direct path, a resolver's `OpenResolved`,
+and the internal re-open — so it catches everything including a peer's synced state.
+`OpenUserUrl` refuses ahead of that as well, because a page URL leaves the method for the
+resolver and returns through `OpenResolved` only after extraction has already happened; a
+locked client should not have handed the URL out in the first place.
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Locked client cannot load | with the global media lock on and no bypass permission, a URL entered locally is refused with a `Video`-tagged warning naming the entry point, and no session opens | set the lock server-side, then type a URL into the panel |
+| Locked client is not driven by a peer | a second, unlocked client loading a URL does not start playback on the locked one — the synced state routes through `OpenUserUrl`, so the same gate applies inbound | two clients, one locked |
+| A page URL never reaches the resolver | with the lock on, a YouTube or Twitch watch page produces the refusal and **no** resolver activity in the log | needs the yt-dlp integration installed |
+| An admin is exempt | the same three rows with the `*` permission held: all of them load normally | |
+
+None of these has run yet. They want a server that can set the lock, which the local rig
+cannot do.
+
 ## What still needs a person
 
 Picture and sound quality, in a headset, on the live transports. No harness
