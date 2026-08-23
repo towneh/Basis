@@ -40,6 +40,15 @@ const DECODE_TICK: Duration = Duration::from_millis(4);
 /// A consumer pull within this window keeps audio as the clock master.
 const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 
+/// Whether the audio consumer is still pulling, as of `wall`.
+///
+/// `i64::MIN` is `last_pull_wall_us`'s never-pulled sentinel and would
+/// overflow the subtraction, so it is screened before rather than after:
+/// a consumer that never arrived is not one to hold anything open for.
+fn consumer_live(wall: MediaTime, last_pull_us: i64) -> bool {
+    last_pull_us != i64::MIN && wall - MediaTime::from_micros(last_pull_us) <= AUDIO_LIVENESS
+}
+
 /// The engine wall clock: monotonic µs that freeze while paused, so the
 /// Bank's release schedule and the media clock pause together without
 /// either component knowing about pause.
@@ -116,6 +125,21 @@ pub struct PipelineShared {
     /// decode thread owns declaring Ended.
     pub video_active: std::sync::atomic::AtomicBool,
     pub audio_active: std::sync::atomic::AtomicBool,
+    /// The generation the audio thread has nothing further to play out for:
+    /// its post-EOS drain finished and the ring is empty, or the consumer
+    /// stopped pulling, or no decoder was ever built for the track. The video
+    /// thread waits on it before declaring Ended, so a session carrying both
+    /// kinds of track no longer ends on the last *picture* while the ring
+    /// still holds sound — which cut the tail by up to the ring's full depth.
+    ///
+    /// It carries the generation rather than a bare flag because the two decode
+    /// threads observe a seek independently: a bare flag set before the seek is
+    /// still true while the video thread races ahead into the new generation,
+    /// and clearing it at the advance only moves the race, since the audio
+    /// thread can publish for the generation it is leaving a moment later.
+    /// Stamped with the publisher's own generation, a stale one simply fails to
+    /// match. `u64::MAX` = nothing published.
+    pub audio_tail_out: std::sync::atomic::AtomicU64,
     /// Lock-free mirror of the clock's playing-ness for the audio pull
     /// path: the ring serves silence while the clock is parked (startup,
     /// seeks), so a seek settle can never play out the post-seek tail
@@ -1716,6 +1740,9 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             && pending_frame.is_none()
             && px.pool.ready_count() == 0
             && px.state() == State::Playing as u32
+            && (!px.audio_active.load(Ordering::Relaxed)
+                || px.audio_tail_out.load(Ordering::Relaxed)
+                    == px.shared.generation.load(Ordering::Relaxed))
         {
             eos_after_drain = false;
             px.set_state(State::Ended);
@@ -1864,11 +1891,10 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     }
                     if written == 0 {
                         let wall = px.wall.now();
-                        let last_pull_us =
-                            px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed);
-                        // i64::MIN = never pulled (and would overflow Sub).
-                        let live_consumer = last_pull_us != i64::MIN
-                            && wall - MediaTime::from_micros(last_pull_us) <= AUDIO_LIVENESS;
+                        let live_consumer = consumer_live(
+                            wall,
+                            px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed),
+                        );
                         // On video-led live lanes a stuck chunk is at/after
                         // the join point: it only discards once Playing (a
                         // dead consumer), never during the hold — that
@@ -1984,9 +2010,11 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         {
             let wall = px.wall.now();
             let playhead = px.audio_shared.playhead(wall);
-            let last_pull =
-                MediaTime::from_micros(px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed));
-            let consumer_live = playhead.is_some() && wall - last_pull <= AUDIO_LIVENESS;
+            let pulling = consumer_live(
+                wall,
+                px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed),
+            );
+            let consumer_live = playhead.is_some() && pulling;
             let mut clock = px.clock.lock().expect("clock lock");
             // Mirror the clock for the pull path's serve trim: the
             // pull must never take this lock. MIN while parked disables
@@ -2231,12 +2259,15 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         }
                         draining = true;
                     }
-                    // Audio was refused and no video exists: nothing left
-                    // to play out.
-                    None if !px.video_active.load(Ordering::Relaxed) => {
-                        px.set_state(State::Ended);
+                    // No decoder was built for the track, so there is no
+                    // tail to wait for. Saying so is what stops a refused
+                    // audio track holding a video session open for ever.
+                    None => {
+                        px.audio_tail_out.store(generation.0, Ordering::Relaxed);
+                        if !px.video_active.load(Ordering::Relaxed) {
+                            px.set_state(State::Ended);
+                        }
                     }
-                    None => {}
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -2275,19 +2306,21 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 }
             }
         }
-        if decoder_dry
-            && pending.is_none()
-            && !px.video_active.load(Ordering::Relaxed)
-            && px.state() == State::Playing as u32
-        {
+        if decoder_dry && pending.is_none() && px.state() == State::Playing as u32 {
             let wall = px.wall.now();
-            let last_pull =
-                MediaTime::from_micros(px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed));
-            let consumer_live = wall - last_pull <= AUDIO_LIVENESS;
+            let consumer_live = consumer_live(
+                wall,
+                px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed),
+            );
             let ring_drained = producer.as_ref().is_none_or(|p| p.is_drained());
             if ring_drained || !consumer_live {
                 decoder_dry = false;
-                px.set_state(State::Ended);
+                // Published before ending, so the video thread's own end
+                // condition and this one agree on what "played out" means.
+                px.audio_tail_out.store(generation.0, Ordering::Relaxed);
+                if !px.video_active.load(Ordering::Relaxed) {
+                    px.set_state(State::Ended);
+                }
             }
         }
     }
@@ -2376,6 +2409,28 @@ mod user_data_ring_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The never-pulled sentinel is `i64::MIN`, and `MediaTime`'s `Sub` is a
+    /// plain subtraction, so reaching it with any positive wall clock panics
+    /// the audio thread rather than returning a verdict. Three of the four
+    /// sites that ask this question screened it; one asked directly.
+    #[test]
+    fn a_consumer_that_never_pulled_is_not_live_and_does_not_overflow() {
+        let wall = MediaTime::from_millis(10_000);
+        assert!(!consumer_live(wall, i64::MIN), "never pulled is not live");
+    }
+
+    #[test]
+    fn consumer_liveness_tracks_the_last_pull() {
+        let wall = MediaTime::from_millis(10_000);
+        let at = |ms: i64| MediaTime::from_millis(ms).as_micros();
+        assert!(consumer_live(wall, at(10_000)), "pulled now");
+        assert!(
+            consumer_live(wall, at(9_500)),
+            "exactly AUDIO_LIVENESS ago still counts — the bound is inclusive"
+        );
+        assert!(!consumer_live(wall, at(9_499)), "past the bound");
+    }
 
     /// The dts either side of the subtraction is the container's, scaled
     /// by a timescale the container also states, so nothing bounds the

@@ -86,6 +86,135 @@ fn audio_only_plays_out_the_tail() {
     session.close();
 }
 
+/// The A/V twin of `audio_only_plays_out_the_tail`. A session carrying both
+/// kinds of track used to declare Ended the moment the last *picture* was
+/// presented, with no regard for what the audio ring still held, and
+/// `read_audio` serves nothing outside Playing — so whatever had not been
+/// pulled by then was simply unreachable.
+///
+/// Asserted as an invariant rather than a frame total, because a total
+/// cannot separate this from the serve-side lateness trim, which discards
+/// late audio deliberately and would be blamed for the same shortfall. At
+/// Ended every frame pushed into the ring must have been accounted for:
+/// handed to the consumer, or trimmed. Anything else was cut.
+#[test]
+fn an_av_session_plays_out_the_audio_tail() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-aac-640x360-30fps.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+
+    let mut pulled = 0u64;
+    let mut buf = vec![0f32; 2048];
+    let mut epoch: Option<Instant> = None;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(30) {
+        let state = shared.state.load(Ordering::Relaxed);
+        assert_ne!(
+            state,
+            State::Error as u32,
+            "error {}",
+            shared.last_error.load(Ordering::Relaxed)
+        );
+        if state == State::Ended as u32 {
+            break;
+        }
+        let rate = shared.audio_rate.load(Ordering::Relaxed);
+        let channels = shared.audio_channels.load(Ordering::Relaxed).max(1);
+        if rate > 0 && state == State::Playing as u32 {
+            let at = *epoch.get_or_insert_with(Instant::now);
+            let budget = at.elapsed().as_micros() as u64 * u64::from(rate) / 1_000_000 - pulled;
+            if budget as usize >= buf.len() / channels as usize {
+                pulled += Session::read_audio(&px, &mut buf) as u64;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Ended as u32,
+        "an A/V session must still end naturally"
+    );
+    let pushed = px.audio_shared.pushed_frames.load(Ordering::Relaxed);
+    let consumed = px.audio_shared.consumed_frames.load(Ordering::Relaxed);
+    let trimmed = px.audio_shared.trimmed_frames.load(Ordering::Relaxed);
+    assert!(pushed > 0, "the fixture has audio");
+    assert_eq!(
+        pushed,
+        consumed + trimmed,
+        "Ended left {} frames in the ring — the tail was cut when the picture ran out          (pushed {pushed}, consumed {consumed}, trimmed {trimmed})",
+        pushed - consumed - trimmed
+    );
+    session.close();
+}
+
+/// A seek issued near EOS, where the audio side has already announced that it
+/// has nothing left to play out for the generation being left behind.
+///
+/// The two decode threads observe a seek independently, so the video thread can
+/// process its Flush, run the short remainder of the new generation and reach
+/// its end check while the audio thread is still on the old one. Reading a bare
+/// "audio is done" flag there ends the session on the previous generation's
+/// answer, cutting the new one off before it plays. The published value carries
+/// the generation it belongs to for that reason.
+///
+/// This row guards the outcome rather than the race: the window is two threads
+/// wide and cannot be scheduled on demand.
+#[test]
+fn a_seek_near_eos_does_not_end_the_new_generation_early() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-aac-640x360-30fps.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+
+    let mut buf = vec![0f32; 2048];
+    let pull = |pulled: &mut u64, buf: &mut [f32]| {
+        if shared.audio_rate.load(Ordering::Relaxed) > 0
+            && shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        {
+            *pulled += Session::read_audio(&px, buf) as u64;
+        }
+    };
+
+    // Up to the tail of the fixture, so the audio side has drained and said so.
+    let mut before = 0u64;
+    let reached = wait_for(Duration::from_secs(20), || {
+        pull(&mut before, &mut buf);
+        std::thread::sleep(Duration::from_millis(2));
+        shared.position_us.load(Ordering::Relaxed) > 5_400_000
+            || shared.state.load(Ordering::Relaxed) == State::Ended as u32
+    });
+    assert!(reached, "never reached the tail of the fixture");
+
+    session.seek(MediaTime::from_millis(5_400));
+
+    // The new generation has only ~0.6 s to play, which is the point: the
+    // video thread finishes it almost at once, so if the end check took the
+    // old generation's answer the session is Ended before any of it is heard.
+    let mut after = 0u64;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if shared.state.load(Ordering::Relaxed) == State::Ended as u32 {
+            break;
+        }
+        pull(&mut after, &mut buf);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    assert!(
+        after >= 20_000,
+        "pulled only {after} frames after the seek — the new generation was cut short"
+    );
+    session.close();
+}
+
 /// The PCM interleave for multichannel audio is WAV/channel-mask order —
 /// FL FR C LFE BL BR — the order every decoder behind the engine emits
 /// (Media Foundation's PCM convention here; the Android AAC decoder's FDK

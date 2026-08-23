@@ -27,6 +27,14 @@ fn audio_leg() -> String {
     fixture("split/aac-48k-stereo-audio.m4a")
 }
 
+/// Separates "the second leg is playing" from "the second leg was dropped".
+/// Not a throughput measure: `run` pulls at wall-clock cadence, so the total
+/// also reflects how the test thread was scheduled, and the whole workspace
+/// suite running alongside it can cost a second no amount of correctness wins
+/// back. A dropped leg pulls approximately zero, so the bar sits well under
+/// the fixtures' six seconds on purpose and should stay there.
+const AUDIO_LEG_PLAYING: u64 = 3 * 48_000;
+
 fn wait_for(deadline: Duration, mut check: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + deadline;
     while Instant::now() < end {
@@ -100,7 +108,7 @@ fn a_split_pair_plays_both_legs_to_a_natural_end() {
         shared.frames_decoded.load(Ordering::Relaxed)
     );
     assert!(
-        pulled >= 5 * 48_000,
+        pulled >= AUDIO_LEG_PLAYING,
         "pulled only {pulled} audio frames — the audio leg is not playing"
     );
     assert_eq!(
@@ -181,7 +189,10 @@ fn each_leg_contributes_only_its_own_kind_of_track() {
         2,
         "audio must be announced exactly once"
     );
-    assert!(pulled >= 5 * 48_000, "pulled only {pulled} audio frames");
+    assert!(
+        pulled >= AUDIO_LEG_PLAYING,
+        "pulled only {pulled} audio frames"
+    );
     // 180 frames in the fixture. Decoding appreciably more would mean the
     // audio leg's video track was banked as well.
     let decoded = shared.frames_decoded.load(Ordering::Relaxed);

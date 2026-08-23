@@ -119,8 +119,12 @@ needs — the offset is arithmetic — so it lands on the exact frame. MP3 and O
 Opus have neither, so they estimate: MP3 through its Xing table where the file
 has one and a constant-bitrate guess where it does not, Ogg by bisecting on
 granule positions. Both report the landing at the request and resume near it,
-which is what every player does with these formats. Raw FLAC and raw ADTS
-refuse outright rather than guess.
+which is what every player does with these formats. Raw FLAC reads its own
+frame headers back, so it reports the exact instant playback resumes at:
+through a SEEKTABLE where the file carries one, by bisecting over confirmed
+frame headers where it does not. Raw ADTS states neither a length nor a frame
+count, so it estimates from a byte rate measured over its leading frames and
+rounds the landing down to a frame.
 
 ```csharp
 if (player.DurationSeconds > 0)
@@ -560,9 +564,6 @@ librist against that same NDK.
 
 - **No RTMP.** The C player had a minimal RTMP client; this engine does not.
   Use RTSP, HLS or MPEG-TS over HTTPS.
-- **Raw FLAC and raw ADTS do not seek.** Neither carries an index, and neither
-  has the table MP3 and Ogg estimate from. The same codecs seek normally inside
-  MP4 or Matroska.
 - **WebM/Matroska seek** needs a Cues index and a range-capable host.
 - **HLS** picks the highest-bandwidth rendition and stays there; there is no
   adaptive switching. Encrypted playlists (`EXT-X-KEY`), byte-range segments

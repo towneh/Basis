@@ -404,6 +404,7 @@ impl Session {
             io_cancel: media_io::CancelToken::new(),
             video_active: AtomicBool::new(false),
             audio_active: AtomicBool::new(false),
+            audio_tail_out: AtomicU64::new(u64::MAX),
             clock_playing: AtomicBool::new(false),
             audio_leading: request.audio_leading,
             decode_preference: request.decode_preference,
