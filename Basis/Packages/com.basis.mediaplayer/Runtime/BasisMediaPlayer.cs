@@ -265,7 +265,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// that source, which no other client shares and no world can know.
     /// Read when a session opens, so <see cref="ReopenAtPosition"/> is what
     /// makes a change take effect on one already running.</summary>
-    public int? BufferDepthOverrideMs;
+    /// <remarks><see cref="NonSerializedAttribute"/> states what the comment above
+    /// already says. Unity cannot serialise a nullable either way, so the attribute
+    /// changes no behaviour — it stops the serialization analyzer reporting a field
+    /// that is skipped on purpose, and keeps a real one from hiding among those.</remarks>
+    [NonSerialized] public int? BufferDepthOverrideMs;
 
     /// <summary>The depth this player actually opens with.</summary>
     public int EffectiveBufferDepthMs => BufferDepthOverrideMs ?? DefaultBufferDepthMs;
