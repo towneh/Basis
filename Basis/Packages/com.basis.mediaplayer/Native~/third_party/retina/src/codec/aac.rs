@@ -376,6 +376,11 @@ pub(crate) struct Depacketizer {
     state: DepacketizerState,
     framing: Framing,
 
+    /// Whether any packet on this stream has carried the marker bit. A
+    /// sender that uses it can be taken to mean end-of-AU by it; one that
+    /// never sets it says nothing by leaving it clear.
+    seen_mark: bool,
+
     /// The original `AudioSpecificConfig` bytes, preserved so that
     /// `extra_data` can be restored if framing is switched back to `Raw`.
     audio_specific_config: Vec<u8>,
@@ -429,6 +434,33 @@ struct Fragment {
     buf: BytesMut,
 }
 
+/// The received prefix of an access unit whose sender sizes every
+/// fragment's AU-header to that fragment alone and sets the marker bit
+/// only on the last packet. RFC 3640's fragment form states the whole
+/// access unit's size in every fragment's header, which is what
+/// [`Fragment`] keys on; under this shape a header states only what its
+/// own packet carries, so the marker bit is the only end-of-AU signal.
+#[derive(Debug)]
+struct MarkFragment {
+    rtp_timestamp: u16,
+
+    /// Number of RTP packets lost between the previous output AudioFrame
+    /// and now.
+    loss: u16,
+
+    /// True iff packets have been lost since the last mark, so this
+    /// fragment may be incomplete.
+    loss_since_mark: bool,
+
+    buf: BytesMut,
+}
+
+/// Ceiling on an access unit reassembled by marker bit. The AU-size field
+/// is 13 bits, so no conforming sender describes a larger access unit in
+/// one; with no total stated up front the accumulation needs a bound of
+/// its own, or a sender that never marks grows it without limit.
+const MAX_MARK_FRAGMENT_BYTES: usize = 8191;
+
 /// State of the depacketizer between calls to `push` and `pull`.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -446,6 +478,10 @@ enum DepacketizerState {
 
     /// State when a prefix of a fragmented packet has been received.
     Fragmented(Fragment),
+
+    /// State when a prefix of a marker-bit-terminated access unit has been
+    /// received.
+    MarkFragmented(MarkFragment),
     Ready(super::AudioFrame),
 }
 
@@ -478,6 +514,7 @@ impl Depacketizer {
             config,
             state: DepacketizerState::default(),
             framing: Framing::default(),
+            seen_mark: false,
             audio_specific_config,
         })
     }
@@ -538,18 +575,24 @@ impl Depacketizer {
     }
 
     pub(super) fn push(&mut self, pkt: ReceivedPacket) -> Result<(), String> {
+        let in_progress = match self.state {
+            DepacketizerState::Fragmented(ref f) => Some(f.loss),
+            DepacketizerState::MarkFragmented(ref f) => Some(f.loss),
+            _ => None,
+        };
         if pkt.loss() > 0
-            && let DepacketizerState::Fragmented(ref mut f) = self.state
+            && let Some(loss) = in_progress
         {
             log::debug!(
                 "Discarding in-progress fragmented AAC frame due to loss of {} RTP packets.",
                 pkt.loss(),
             );
             self.state = DepacketizerState::Idle {
-                prev_loss: f.loss, // note this packet's loss will be added in later.
+                prev_loss: loss, // note this packet's loss will be added in later.
                 loss_since_mark: true,
             };
         }
+        self.seen_mark |= pkt.mark();
 
         // Read the AU headers.
         let payload = pkt.payload();
@@ -625,6 +668,52 @@ impl Depacketizer {
                     std::cmp::Ordering::Greater => return Err("too much data in fragment".into()),
                 }
             }
+            DepacketizerState::MarkFragmented(frag) => {
+                if au_headers_count != 1 {
+                    return Err(format!(
+                        "Got {au_headers_count}-AU packet while fragment in progress"
+                    ));
+                }
+                if (pkt.timestamp().timestamp as u16) != frag.rtp_timestamp {
+                    return Err(format!(
+                        "Timestamp changed from 0x{:04x} to 0x{:04x} mid-fragment",
+                        frag.rtp_timestamp,
+                        pkt.timestamp().timestamp as u16
+                    ));
+                }
+                let au_header = u16::from_be_bytes([payload[2], payload[3]]);
+                let size = usize::from(au_header >> 3);
+                let data = &payload[data_off..];
+                if size > data.len() {
+                    return Err(format!(
+                        "fragment states {size} bytes, packet carries {}",
+                        data.len()
+                    ));
+                }
+                if frag.buf.len() + size > MAX_MARK_FRAGMENT_BYTES {
+                    return Err(format!(
+                        "fragmented AU exceeds {MAX_MARK_FRAGMENT_BYTES} bytes"
+                    ));
+                }
+                frag.buf.extend_from_slice(&data[..size]);
+                if pkt.mark() {
+                    if frag.loss_since_mark {
+                        self.state = DepacketizerState::Idle {
+                            prev_loss: frag.loss,
+                            loss_since_mark: false,
+                        };
+                        return Ok(());
+                    }
+                    self.state = DepacketizerState::Ready(super::AudioFrame {
+                        ctx: *pkt.ctx(),
+                        loss: frag.loss,
+                        frame_length: NonZeroU32::from(self.config.frame_length),
+                        stream_id: pkt.stream_id(),
+                        timestamp: pkt.timestamp(),
+                        data: std::mem::take(&mut frag.buf).freeze(),
+                    });
+                }
+            }
             DepacketizerState::Aggregated(_) => panic!("push when already in state aggregated"),
             DepacketizerState::Idle {
                 prev_loss,
@@ -664,7 +753,9 @@ impl Depacketizer {
 
     pub(super) fn pull(&mut self) -> Option<Result<super::CodecItem, DepacketizeError>> {
         match std::mem::take(&mut self.state) {
-            s @ DepacketizerState::Idle { .. } | s @ DepacketizerState::Fragmented(..) => {
+            s @ DepacketizerState::Idle { .. }
+            | s @ DepacketizerState::Fragmented(..)
+            | s @ DepacketizerState::MarkFragmented(..) => {
                 self.state = s;
                 None
             }
@@ -732,13 +823,28 @@ impl Depacketizer {
                     });
                     return None;
                 }
-                // basis-media patch: RFC 3640 wants the marker bit set on a
-                // packet carrying a complete AU, but some servers (mediamtx's
-                // RTSP output among them) omit it. The AU-header size already
-                // says the AU is complete; mainstream clients accept it, so
-                // tolerate the missing mark instead of failing the session.
-                if !mark {
-                    log::debug!("accepting complete AAC AU without marker bit");
+                // basis-media patch: some servers (mediamtx's RTSP output
+                // among them) fragment an access unit by giving each packet
+                // an AU-header sized to that packet alone, setting the marker
+                // bit only on the last. The fragment branch above keys on a
+                // header stating more than its packet carries, so it never
+                // sees this shape: every fragment looks like a complete
+                // access unit, and emitting them separately hands the decoder
+                // one access unit in pieces. Accumulate to the marker bit
+                // instead. The bit is only meaningful once the stream has
+                // been seen to use it: a sender that never marks anything
+                // says nothing by leaving it clear, and still gets an access
+                // unit per packet as before.
+                if !mark && self.seen_mark && agg.frame_count == 1 {
+                    let mut buf = BytesMut::with_capacity(size);
+                    buf.extend_from_slice(&payload[agg.data_off..agg.data_off + size]);
+                    self.state = DepacketizerState::MarkFragmented(MarkFragment {
+                        rtp_timestamp: agg.pkt.timestamp().timestamp as u16,
+                        loss: agg.loss,
+                        loss_since_mark: agg.loss_since_mark,
+                        buf,
+                    });
+                    return None;
                 }
 
                 let delta = u32::from(agg.frame_i) * u32::from(self.config.frame_length.get());
