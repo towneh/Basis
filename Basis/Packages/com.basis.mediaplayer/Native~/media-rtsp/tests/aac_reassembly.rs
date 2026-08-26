@@ -246,3 +246,71 @@ fn a_prefix_refused_for_a_timestamp_change_is_also_discarded() {
         );
     }
 }
+
+/// Overrun the accumulation ceiling and return the next sequence number.
+/// The marked packet first is load-bearing: reassembly only engages once the
+/// stream has been seen to set the marker bit, so without it these packets
+/// leave as one access unit each and nothing ever accumulates.
+fn overrun(d: &mut Depacketizer, mut seq: u16, ts: i64) -> u16 {
+    assert_eq!(feed(d, packet(seq, ts, true, 0, b"prime")), [b"prime"]);
+    seq += 1;
+    let chunk = vec![b'x'; 1400];
+    while d.push(packet(seq, ts, false, 0, &chunk)).is_ok() {
+        while d.pull().is_some() {}
+        seq += 1;
+        assert!(seq < 64, "the ceiling never refused a packet");
+    }
+    seq + 1
+}
+
+/// What the discard leaves behind: the reset raises the damaged flag, and a
+/// reassembly completing on the next marker is dropped rather than trusted.
+/// The one after it is trusted again, so the flag is spent, not sticky.
+#[test]
+fn the_damaged_flag_drops_the_next_reassembly() {
+    let mut d = depacketizer();
+    let mut seq = overrun(&mut d, 1, 1024);
+
+    assert!(d.push(packet(seq, 8192, false, 0, b"aaaa")).is_ok());
+    while d.pull().is_some() {}
+    seq += 1;
+    assert!(
+        feed(&mut d, packet(seq, 8192, true, 0, b"bbbb")).is_empty(),
+        "the first reassembly after a discard must not be trusted"
+    );
+
+    seq += 1;
+    assert!(d.push(packet(seq, 12288, false, 0, b"cccc")).is_ok());
+    while d.pull().is_some() {}
+    seq += 1;
+    assert_eq!(
+        feed(&mut d, packet(seq, 12288, true, 0, b"dddd")),
+        [b"ccccdddd".to_vec()],
+        "the flag should clear once spent"
+    );
+}
+
+/// The flag is spent by the next marker whatever carries it: a complete
+/// access unit arriving in one marked packet is kept, and clears it, so a
+/// reassembly after that one is trusted.
+#[test]
+fn a_complete_access_unit_spends_the_damaged_flag_and_survives() {
+    let mut d = depacketizer();
+    let mut seq = overrun(&mut d, 1, 1024);
+
+    assert_eq!(
+        feed(&mut d, packet(seq, 8192, true, 0, b"solo")),
+        [b"solo"],
+        "a complete access unit is not caught by the damaged flag"
+    );
+
+    seq += 1;
+    assert!(d.push(packet(seq, 12288, false, 0, b"eeee")).is_ok());
+    while d.pull().is_some() {}
+    seq += 1;
+    assert_eq!(
+        feed(&mut d, packet(seq, 12288, true, 0, b"ffff")),
+        [b"eeeeffff".to_vec()],
+        "the marker in between should already have spent the flag"
+    );
+}

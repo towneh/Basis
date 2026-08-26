@@ -15,14 +15,30 @@ dropped; source otherwise identical to the crates.io release except:
   packets and mainstream clients tolerate that.
 - `src/codec/aac.rs`, `push`: the body moved to `push_inner` and the
   public entry point discards an in-progress reassembly whenever it
-  returns an error. Upstream leaves the fragment state intact on every
-  refusal, which is harmless under retina's own interleaved receive loop
-  because that turns a refusal into a session error. A UDP loop that
-  treats refusals as recoverable loss and keeps feeding the same
-  depacketizer instead has the next marked packet appended to a prefix
-  the depacketizer already rejected, and emits it as a truncated access
-  unit. Doing it at the boundary rather than at each refusal covers the
-  header checks that run before the state is examined, and any refusal
+  returns an error.
+
+  *Upstream behaviour, which this replaces:* the fragment state survives
+  every refusal. That is harmless under retina's own interleaved receive
+  loop, because it turns a refusal into a session error and never pushes
+  again. A UDP loop that treats refusals as recoverable loss and keeps
+  feeding the same depacketizer got the next marked packet appended to a
+  prefix the depacketizer had already rejected, and emitted the result as
+  a truncated access unit.
+
+  *State after a refusal:* the depacketizer returns to `Idle` carrying the
+  RTP loss count forward and with the damaged flag (`loss_since_mark`)
+  raised. That flag is spent by the next marker, whatever carries it, and
+  what it costs depends on what arrives: an access unit that completes by
+  *reassembly* at that marker is dropped rather than emitted, while one
+  arriving complete in a single marked packet is kept and merely clears
+  the flag. It is not sticky — the unit after it is trusted again — and
+  nothing is emitted with a damage marker on it, so a consumer sees a
+  gap, never a doctored access unit. Both halves are pinned by rows in
+  `media-rtsp/tests/aac_reassembly.rs`.
+
+  Doing this at the boundary rather than at the refusal that was reported
+  covers the ten refusals across the two fragment states, the three header
+  checks that run before the state is examined at all, and any refusal
   added later.
 
 - `src/client/mod.rs`, `Session<Playing>`: two additions for callers
