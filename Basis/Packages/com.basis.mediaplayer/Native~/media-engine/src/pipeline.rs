@@ -2091,6 +2091,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 Ordering::Relaxed,
             );
             let trimmed = px.audio_shared.trimmed_frames.load(Ordering::Relaxed);
+            px.diag.set_audio_trimmed(trimmed);
             let wall = px.wall.now();
             if trimmed > trimmed_reported && wall - last_trim_event >= MediaTime::from_secs(5) {
                 px.diag.event(

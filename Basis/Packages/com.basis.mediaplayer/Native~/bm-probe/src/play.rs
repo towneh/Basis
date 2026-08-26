@@ -153,8 +153,9 @@ pub fn run(options: &Options) -> ExitCode {
         snapshot[media_diag::Stage::Pool as usize].drops,
     );
     println!(
-        "audio:     {} frames pulled @ {} Hz x {}",
+        "audio:     {} frames pulled, {} trimmed @ {} Hz x {}",
         audio_frames,
+        diag.audio_trimmed(),
         shared.audio_rate.load(Ordering::Relaxed),
         shared.audio_channels.load(Ordering::Relaxed),
     );

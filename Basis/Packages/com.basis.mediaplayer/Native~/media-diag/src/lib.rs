@@ -177,8 +177,9 @@ pub struct DiagEvent {
     pub detail: String,
 }
 
-/// Per-session diagnostics block: one set of stage counters plus the
-/// bounded event log. Shared by `Arc` across the session's threads.
+/// Per-session diagnostics block: one set of stage counters, the audio
+/// serve trim's running total and the bounded event log. Shared by `Arc`
+/// across the session's threads.
 #[derive(Debug)]
 pub struct SessionDiag {
     stages: [StageCounters; STAGE_COUNT],
@@ -186,6 +187,11 @@ pub struct SessionDiag {
     event_cap: usize,
     /// Events lost to the cap — visible, never silent.
     events_dropped: AtomicU64,
+    /// Frames discarded by the audio ring's serve-side trim. Session
+    /// level rather than a field on `Stage::AudioRing`, whose `drops`
+    /// already counts whole chunks dropped for an inert consumer: one
+    /// column cannot carry both units.
+    audio_trimmed_frames: AtomicU64,
 }
 
 impl SessionDiag {
@@ -195,6 +201,7 @@ impl SessionDiag {
             events: Mutex::new(Vec::new()),
             event_cap,
             events_dropped: AtomicU64::new(0),
+            audio_trimmed_frames: AtomicU64::new(0),
         }
     }
 
@@ -223,6 +230,17 @@ impl SessionDiag {
 
     pub fn events_dropped(&self) -> u64 {
         self.events_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Publish the audio ring's cumulative serve-trim total, in frames.
+    /// The trim itself runs on the pull path, which must not touch the
+    /// diag lock, so the audio thread carries the figure across.
+    pub fn set_audio_trimmed(&self, frames: u64) {
+        self.audio_trimmed_frames.store(frames, Ordering::Relaxed);
+    }
+
+    pub fn audio_trimmed(&self) -> u64 {
+        self.audio_trimmed_frames.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> [StageSnapshot; STAGE_COUNT] {
@@ -265,6 +283,10 @@ impl CaptureRecorder {
                 let _ = write!(h, ",{name}_{col}");
             }
         }
+        // Appended after the stage block: the serve trim is the audio
+        // path's only loss channel with no stage field of its own, and
+        // reconstructing it from in/out/occupancy is error-prone.
+        let _ = write!(h, ",audio_trimmed_frames");
         h
     }
 
@@ -285,6 +307,7 @@ impl CaptureRecorder {
                 snap.errors
             );
         }
+        let _ = write!(row, ",{}", diag.audio_trimmed());
         self.rows.push(row);
     }
 
@@ -325,9 +348,19 @@ mod tests {
     fn column_contract_is_stable() {
         let header = CaptureRecorder::header();
         assert!(header.starts_with("wall_us,source_in_count,"));
-        assert_eq!(header.split(',').count(), 1 + STAGE_COUNT * 8);
+        assert_eq!(header.split(',').count(), 1 + STAGE_COUNT * 8 + 1);
         assert!(header.contains(",bank_occupancy_bytes,"));
-        assert!(header.ends_with(",clock_errors"));
+        assert!(header.contains(",clock_errors,"));
+        assert!(header.ends_with(",audio_trimmed_frames"));
+    }
+
+    #[test]
+    fn the_serve_trim_total_reaches_the_capture() {
+        let diag = SessionDiag::default();
+        diag.set_audio_trimmed(21_535);
+        let mut rec = CaptureRecorder::default();
+        rec.sample(MediaTime::from_millis(16), &diag);
+        assert!(rec.rows()[0].ends_with(",21535"));
     }
 
     #[test]
