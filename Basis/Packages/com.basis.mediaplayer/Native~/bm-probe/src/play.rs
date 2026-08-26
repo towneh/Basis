@@ -187,6 +187,10 @@ pub fn run(options: &Options) -> ExitCode {
         shared.position_us.load(Ordering::Relaxed) / 1000,
         shared.duration_us.load(Ordering::Relaxed) / 1000,
     );
+    match shared.av_offset_us.load(Ordering::Relaxed) {
+        i32::MIN => println!("a/v:       unknown (no audio playhead or no frame presented)"),
+        us => println!("a/v:       {us} us (presented video pts minus audio playhead)"),
+    }
     // The loop leaves on a deadline or a settled state, either of which
     // can land between drains; what arrived since is still owed to the
     // totals. Bounded at the ring's depth in passes: the session is still

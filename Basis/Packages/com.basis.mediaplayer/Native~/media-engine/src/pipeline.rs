@@ -2010,6 +2010,29 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         {
             let wall = px.wall.now();
             let playhead = px.audio_shared.playhead(wall);
+            // Diagnostic A/V offset. Both terms are read here, one tick, so
+            // the figure is a real difference rather than two samples taken
+            // a frame apart by a poller. Only meaningful once a frame has
+            // presented: before that `position_us` is the clock, and the
+            // difference would be the ladder's own error read twice.
+            px.shared.av_offset_us.store(
+                match playhead {
+                    Some(ph)
+                        if px
+                            .diag
+                            .stage(Stage::Present)
+                            .out_count
+                            .load(Ordering::Relaxed)
+                            > 0 =>
+                    {
+                        (px.shared.position_us.load(Ordering::Relaxed) - ph.as_micros())
+                            .clamp(i64::from(i32::MIN) + 1, i64::from(i32::MAX))
+                            as i32
+                    }
+                    _ => i32::MIN,
+                },
+                Ordering::Relaxed,
+            );
             let pulling = consumer_live(
                 wall,
                 px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed),

@@ -157,7 +157,7 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
         "dsp_rate,dsp_buffer,dsp_buffers,listener_paused," +
         "sync_ppm,subtitle_track,caption_len," +
         "out_bound,out_playing,out_consumed,out_consumed_delta,out_peak,out_rms," +
-        "out_latency_us";
+        "out_latency_us,av_offset_us";
 
     BasisMediaTickStage IBasisMediaTickConsumer.TickStage => BasisMediaTickStage.Diagnostics;
 
@@ -219,7 +219,12 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
         Append(consumed - _lastOutputConsumed);
         Append(_audio != null ? _audio.LastPcmPeak : 0f);
         Append(_audio != null ? _audio.LastPcmRms : 0f);
-        Append(_audio != null ? _audio.EstimatedOutputLatencyUs : 0, last: true);
+        Append(_audio != null ? _audio.EstimatedOutputLatencyUs : 0);
+        // The engine's own A/V figure, beside the host's view of the same
+        // moment. out_latency_us is what the engine was told to compensate
+        // for; this is what it believes it achieved. They disagreeing is
+        // the interesting case.
+        Append(_player.AvOffsetUs, last: true);
 
         _lastPresented = presented;
         _lastDecoded = decoded;

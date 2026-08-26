@@ -117,6 +117,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     int _engineChannels;
     int _engineSampleRate;
     int _syncRatePpm;
+    int _avOffsetUs = int.MinValue;
     BasisMediaPlayerAudio _audio;
     BasisMediaDriverTick _frameTick;
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -732,6 +733,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         System.Threading.Volatile.Write(ref _engineChannels, 0);
         System.Threading.Volatile.Write(ref _engineSampleRate, 0);
         System.Threading.Volatile.Write(ref _syncRatePpm, 0);
+        System.Threading.Volatile.Write(ref _avOffsetUs, int.MinValue);
         // Re-resolved here as well as in Awake, so a rig that adds the sink
         // after the player still gets sound.
         if (_audio == null) TryGetComponent(out _audio);
@@ -866,6 +868,13 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// (0 = none). Applied by the audio pull automatically; exposed
     /// for diagnostics/UI.</summary>
     public int SyncRatePpm => System.Threading.Volatile.Read(ref _syncRatePpm);
+
+    /// <summary>Presented video pts minus the audio playhead, microseconds,
+    /// as the engine measures it (both read on one engine tick, so it is a
+    /// difference rather than two samples taken a frame apart).
+    /// <c>int.MinValue</c> until audio and a presented frame both exist.
+    /// Diagnostics only.</summary>
+    public int AvOffsetUs => System.Threading.Volatile.Read(ref _avOffsetUs);
 
     public void Close()
     {
@@ -1006,6 +1015,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         System.Threading.Volatile.Write(ref _engineChannels, (int)snapshot.AudioChannels);
         System.Threading.Volatile.Write(ref _engineSampleRate, (int)snapshot.AudioSampleRate);
         System.Threading.Volatile.Write(ref _syncRatePpm, snapshot.SyncRatePpm);
+        System.Threading.Volatile.Write(ref _avOffsetUs, snapshot.AvOffsetUs);
         if (_audio != null && snapshot.AudioSampleRate > 0 && snapshot.AudioChannels > 0)
             _audio.SetExpectedFormat((int)snapshot.AudioSampleRate, (int)snapshot.AudioChannels);
 

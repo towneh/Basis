@@ -192,7 +192,12 @@ public struct BmSnapshot
     public uint BankHolding;
     public uint AudioSampleRate;
     public uint AudioChannels;
-    public uint Reserved;
+    /// <summary>
+    /// Presented video pts minus the audio playhead, microseconds — the
+    /// engine's own account of its A/V alignment. <c>int.MinValue</c>
+    /// while either side is unknown. Diagnostic: nothing steers on it.
+    /// </summary>
+    public int AvOffsetUs;
     /// <summary>
     /// Sync ladder's wanted rate offset from 1x, ppm. The audio pull
     /// must consume source frames at (1 + ppm/1e6) × stream rate

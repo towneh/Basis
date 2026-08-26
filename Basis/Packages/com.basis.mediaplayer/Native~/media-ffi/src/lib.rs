@@ -73,7 +73,12 @@ pub struct BmSnapshot {
     pub bank_holding: u32,
     pub audio_sample_rate: u32,
     pub audio_channels: u32,
-    pub reserved: u32,
+    /// Presented video pts minus the audio playhead, µs — the engine's own
+    /// account of its A/V alignment. `i32::MIN` while either side is
+    /// unknown. Diagnostic: nothing in the engine steers on it. Took the
+    /// reserved slot at this offset, so the struct is unchanged at 88
+    /// bytes and every other field keeps its place.
+    pub av_offset_us: i32,
     /// Shared-playback sync (§8.4): the ladder's wanted rate offset from
     /// 1x, ppm, after a `bm_session_set_sync_target` call. On lanes with
     /// an audio track the managed audio pull MUST apply it — consume
@@ -489,7 +494,7 @@ pub unsafe extern "C" fn bm_session_poll(handle: u64, out: *mut BmSnapshot) -> i
             bank_holding: u32::from(shared.bank_holding.load(Ordering::Relaxed)),
             audio_sample_rate: shared.audio_rate.load(Ordering::Relaxed),
             audio_channels: shared.audio_channels.load(Ordering::Relaxed),
-            reserved: 0,
+            av_offset_us: shared.av_offset_us.load(Ordering::Relaxed),
             sync_rate_ppm: entry.pipeline.sync_rate_ppm.load(Ordering::Relaxed) as i32,
             reserved2: 0,
         };

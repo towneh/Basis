@@ -171,6 +171,13 @@ pub struct SessionShared {
     pub width: AtomicU32,
     pub height: AtomicU32,
     pub position_us: AtomicI64,
+    /// Presented video pts minus the audio playhead, µs: the engine's own
+    /// account of its A/V alignment, sampled where both are known at one
+    /// wall reading. `i32::MIN` until an audio playhead and a presented
+    /// frame both exist. Diagnostic only — nothing steers on it, and it is
+    /// deliberately *not* what the clock ladder acts on (that error is
+    /// clock-versus-playhead, which says nothing about the picture).
+    pub av_offset_us: AtomicI32,
     pub duration_us: AtomicI64,
     pub frames_decoded: AtomicU64,
     /// Render-side copies, incremented by the FFI render event.
