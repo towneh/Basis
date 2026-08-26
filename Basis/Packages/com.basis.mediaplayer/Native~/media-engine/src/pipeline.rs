@@ -2113,7 +2113,13 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 px.audio_shared.consumed_frames.load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
-            let trimmed = px.audio_shared.trimmed_frames.load(Ordering::Relaxed);
+            // The session total, not the generation's. A seek reinstalls the
+            // audio generation and resets the per-generation counter, so quoting
+            // that one lets the capture column fall — and `trimmed_reported`
+            // below is a high-water mark this loop keeps across generations, so a
+            // fallen counter also silences the event until the new generation
+            // passes the old session total.
+            let trimmed = px.audio_shared.trimmed_frames_total.load(Ordering::Relaxed);
             px.diag.set_audio_trimmed(trimmed);
             let wall = px.wall.now();
             if trimmed > trimmed_reported && wall - last_trim_event >= MediaTime::from_secs(5) {

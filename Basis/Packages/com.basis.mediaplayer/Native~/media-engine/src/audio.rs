@@ -82,8 +82,19 @@ pub struct AudioShared {
     pub clock_wall_us: AtomicI64,
     /// Interleaved frames pushed this generation (production counter).
     pub pushed_frames: AtomicU64,
-    /// Frames discarded by the serve-side lateness trim.
+    /// Frames discarded by the serve-side lateness trim, this generation.
+    /// Reset with the rest of the block, because the ring's own accounting
+    /// invariant — served plus trimmed equals pushed — only holds inside one
+    /// generation.
     pub trimmed_frames: AtomicU64,
+    /// The same trim, counted for the life of the session and never reset.
+    ///
+    /// Diagnostics want a figure that only ever climbs: a capture column that
+    /// drops after a seek loses the trims before it, and the event beside it is
+    /// rate-limited against a high-water mark that a reset leaves stranded above
+    /// the counter, silencing the event until the new generation passes the old
+    /// session total.
+    pub trimmed_frames_total: AtomicU64,
 }
 
 impl AudioShared {
@@ -100,6 +111,7 @@ impl AudioShared {
             clock_wall_us: AtomicI64::new(i64::MIN),
             pushed_frames: AtomicU64::new(0),
             trimmed_frames: AtomicU64::new(0),
+            trimmed_frames_total: AtomicU64::new(0),
         }
     }
 
@@ -314,6 +326,13 @@ impl AudioConsumer {
                 self.shared
                     .trimmed_frames
                     .fetch_add(trim as u64, Ordering::Relaxed);
+                // Both, at the one site that trims. Deriving the session figure
+                // from the per-generation one would need whoever installs a
+                // generation to snapshot it first, and the install resets the
+                // block from inside.
+                self.shared
+                    .trimmed_frames_total
+                    .fetch_add(trim as u64, Ordering::Relaxed);
             }
         }
 
@@ -417,6 +436,9 @@ fn audio_pair(format: AudioFormatInfo, shared: Arc<AudioShared>) -> (AudioProduc
     shared.clock_now_us.store(i64::MIN, Ordering::Relaxed);
     shared.pushed_frames.store(0, Ordering::Relaxed);
     shared.trimmed_frames.store(0, Ordering::Relaxed);
+    // trimmed_frames_total is deliberately not reset here. It is what the
+    // diagnostics quote, and a session total that restarts at a seek reports
+    // less loss than the session actually had.
     (
         AudioProducer {
             ring: producer,
@@ -871,6 +893,75 @@ mod tests {
             served + trimmed,
             pushed as u64,
             "served + trimmed must account for every pushed frame"
+        );
+    }
+
+    /// The session trim total survives a generation change; the
+    /// per-generation counter does not.
+    ///
+    /// A seek reinstalls the audio generation, which resets the shared block.
+    /// Diagnostics quote the total, so if that reset reached it the capture
+    /// column would fall after a seek and report less loss than the session
+    /// had — while the event beside it, rate-limited against a high-water
+    /// mark held across generations, would go quiet until the new generation
+    /// passed the old total.
+    #[test]
+    fn the_session_trim_total_survives_a_generation_change() {
+        fn trim_some(shared: &Arc<AudioShared>) {
+            let (mut producer, mut consumer) = audio_pair(
+                AudioFormatInfo {
+                    sample_rate: 48000,
+                    channels: 2,
+                },
+                Arc::clone(shared),
+            );
+            let chunk = vec![0.0f32; 1024 * 2];
+            let mut pts_us = 0i64;
+            loop {
+                let wrote = producer.push(pts_us, &chunk);
+                if wrote < chunk.len() {
+                    break;
+                }
+                // Half the sample count, so the head runs late against the
+                // clock and the serve trim engages.
+                pts_us += 512 * 1_000_000 / 48_000;
+            }
+            let mut out = vec![0.0f32; 512 * 2];
+            let mut wall = 0i64;
+            for _ in 0..200 {
+                wall += 10_000;
+                shared.clock_now_us.store(wall, Ordering::Relaxed);
+                shared.clock_wall_us.store(wall, Ordering::Relaxed);
+                consumer.pull(&mut out, wall);
+            }
+        }
+
+        let shared = new_audio_shared();
+
+        trim_some(&shared);
+        let first_generation = shared.trimmed_frames.load(Ordering::Relaxed);
+        let first_total = shared.trimmed_frames_total.load(Ordering::Relaxed);
+        assert!(first_generation > 0, "the fixture must actually trim");
+        assert_eq!(first_generation, first_total, "one generation, one figure");
+
+        // The seek. audio_pair is what install_audio_generation calls, and the
+        // reset lives there.
+        trim_some(&shared);
+        let second_generation = shared.trimmed_frames.load(Ordering::Relaxed);
+        let second_total = shared.trimmed_frames_total.load(Ordering::Relaxed);
+
+        assert!(
+            second_total > first_total,
+            "the session total only climbs: {second_total} against {first_total}"
+        );
+        // The two together, which is the whole point: the per-generation counter
+        // restarted and carries only this generation's share, while the total
+        // carries both. Either one alone passes with the reset reaching the wrong
+        // counter.
+        assert_eq!(
+            second_total,
+            first_total + second_generation,
+            "the total is every generation's trim summed"
         );
     }
 
