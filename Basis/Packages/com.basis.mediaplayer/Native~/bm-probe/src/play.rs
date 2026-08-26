@@ -57,6 +57,10 @@ pub fn run(options: &Options) -> ExitCode {
     let mut user_data: std::collections::BTreeMap<[u8; 16], (u64, u64)> =
         std::collections::BTreeMap::new();
     let mut audio_epoch: Option<Instant> = None;
+    // The rate the schedule below was last anchored at. A session can change it
+    // — a track switch, or a new generation after a seek — and the budget is
+    // counted in that rate's frames, so the two have to move together.
+    let mut scheduled_rate = 0u32;
     // Frames the host asked for, served or not. Unity's OnAudioFilterRead
     // hands over a fixed buffer and zero-fills whatever the ring could not
     // serve, so an underrun costs wall-clock time that never comes back.
@@ -65,6 +69,11 @@ pub fn run(options: &Options) -> ExitCode {
     // rate the producer fills it and hides every underrun this harness
     // exists to find.
     let mut budget_frames = 0u64;
+    // The same demand, counted since the schedule was last anchored. Separate
+    // from the total above because the two want opposite things at a pause: the
+    // schedule has to forget it, or the pause comes back as a burst, while the
+    // summary's silence figure is the session's and must not.
+    let mut scheduled_frames = 0u64;
     // Unity's DSP quantum, sized by the session's real channel count. A
     // flat sample count reads as a different frame count per geometry —
     // 341 frames on 5.1 against 1024 on mono — so the cadence stops
@@ -113,17 +122,35 @@ pub fn run(options: &Options) -> ExitCode {
         let rate = shared.audio_rate.load(Ordering::Relaxed);
         let channels = shared.audio_channels.load(Ordering::Relaxed).max(1);
         if rate > 0 && state == State::Playing as u32 {
+            // Anchored at the moment playback started at this rate, and re-anchored
+            // whenever either changes. Left running across a span that issued no
+            // pulls — buffering, a seek — the elapsed time banks as overdue demand
+            // and comes back as a block every 2 ms until the schedule catches up,
+            // which is the drain-as-fast-as-the-ring-fills shape this pacing exists
+            // to avoid. A rate *decrease* is worse than untidy: the budget was
+            // counted in the old rate's frames, so the subtraction below goes
+            // negative, wraps, and stays due forever.
+            if audio_epoch.is_none() || scheduled_rate != rate {
+                audio_epoch = Some(Instant::now());
+                scheduled_frames = 0;
+                scheduled_rate = rate;
+            }
             if sized_for != channels {
                 audio_buf = vec![0.0f32; DSP_FRAMES * channels as usize];
                 sized_for = channels;
             }
             let epoch = *audio_epoch.get_or_insert_with(Instant::now);
-            let due =
-                epoch.elapsed().as_micros() as u64 * u64::from(rate) / 1_000_000 - budget_frames;
+            // Saturating as well as re-anchored. The reset above is what keeps the
+            // two terms in the same rate; this keeps a wrap unrepresentable even if
+            // some later path reaches here without one, because the failure it
+            // produces is silent and permanent rather than loud.
+            let due = (epoch.elapsed().as_micros() as u64 * u64::from(rate) / 1_000_000)
+                .saturating_sub(scheduled_frames);
             if due as usize >= DSP_FRAMES {
                 let frames = Session::read_audio(&px, &mut audio_buf);
                 audio_frames += frames as u64;
                 budget_frames += DSP_FRAMES as u64;
+                scheduled_frames += DSP_FRAMES as u64;
                 if let Some(file) = audio_file.as_mut() {
                     // The whole buffer, zero-fill included: the capture is a
                     // timeline, and dropping the silence would close the gap
@@ -135,6 +162,14 @@ pub fn run(options: &Options) -> ExitCode {
                     }
                 }
             }
+        } else {
+            // Not playing, so nothing is being pulled and the schedule has
+            // nothing to be relative to. Dropped rather than carried, so the
+            // next Playing tick anchors on the moment playback actually
+            // resumed instead of owing the whole pause.
+            audio_epoch = None;
+            scheduled_frames = 0;
+            scheduled_rate = 0;
         }
         std::thread::sleep(Duration::from_millis(2));
     }
