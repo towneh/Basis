@@ -154,3 +154,95 @@ fn reassembly_is_bounded() {
     }
     assert!(refused, "unbounded reassembly accepted sixteen packets");
 }
+
+/// A refused packet takes the prefix with it. The UDP receive loop treats a
+/// refusal as loss and keeps feeding the same depacketizer, so a retained
+/// prefix would have the next marked packet appended to it and leave as a
+/// truncated access unit carrying bytes the depacketizer had already
+/// rejected.
+#[test]
+fn a_refused_fragment_does_not_survive_into_the_next_access_unit() {
+    let mut d = depacketizer();
+    assert_eq!(feed(&mut d, packet(0, 0, true, 0, b"whole")), [b"whole"]);
+
+    // Overrun the accumulation ceiling; the prefix is all 'x'.
+    let chunk = vec![b'x'; 1400];
+    let mut seq = 1u16;
+    loop {
+        if d.push(packet(seq, 1024, false, 0, &chunk)).is_err() {
+            break;
+        }
+        while d.pull().is_some() {}
+        seq += 1;
+        assert!(seq < 32, "the ceiling never refused a packet");
+    }
+
+    // Exactly the reported shape: the very next packet carries the marker
+    // bit and the fragment's own timestamp, which is what an unreset state
+    // machine appends to and emits. It must not carry the rejected prefix,
+    // and because a prefix was dropped the unit completing at this marker is
+    // not trustworthy either.
+    seq += 1;
+    let after = feed(&mut d, packet(seq, 1024, true, 0, b"tail"));
+    for au in &after {
+        assert!(
+            !au.contains(&b'x'),
+            "the rejected prefix was emitted as a truncated access unit: {au:?}"
+        );
+    }
+
+    // And the stream recovers on the units that follow.
+    let mut out = Vec::new();
+    for (i, tail) in [b"aaaa".as_slice(), b"bbbb".as_slice(), b"cccc".as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        seq += 1;
+        out.extend(feed(
+            &mut d,
+            packet(seq, 2048 + (i as i64) * 1024, true, 0, tail),
+        ));
+    }
+    for au in &out {
+        assert!(
+            !au.contains(&b'x'),
+            "a rejected prefix reached a later access unit: {au:?}"
+        );
+    }
+    assert!(
+        out.iter().any(|au| au == b"cccc"),
+        "the stream never recovered after the refusal: {out:?}"
+    );
+}
+
+/// The same contract on a different refusal: a mid-fragment timestamp change
+/// is refused, and the prefix it was accumulating must not reach the output
+/// either. The fix is at the push boundary rather than at each refusal, so
+/// this rides the same guarantee.
+#[test]
+fn a_prefix_refused_for_a_timestamp_change_is_also_discarded() {
+    let mut d = depacketizer();
+    assert_eq!(feed(&mut d, packet(0, 0, true, 0, b"whole")), [b"whole"]);
+    assert!(d.push(packet(1, 1024, false, 0, b"xxxxxxxx")).is_ok());
+    while d.pull().is_some() {}
+    assert!(
+        d.push(packet(2, 9999, false, 0, b"yyyy")).is_err(),
+        "a timestamp change mid-fragment must be refused"
+    );
+    let mut out = Vec::new();
+    for (i, tail) in [b"aaaa".as_slice(), b"cccc".as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        out.extend(feed(
+            &mut d,
+            packet(10 + i as u16, 20480 + (i as i64) * 1024, true, 0, tail),
+        ));
+    }
+    for au in &out {
+        assert!(
+            !au.contains(&b'x'),
+            "a rejected prefix reached the output: {au:?}"
+        );
+    }
+}

@@ -13,6 +13,17 @@ dropped; source otherwise identical to the crates.io release except:
   RTP marker bit is accepted instead of failing the session. RFC 3640
   wants the mark set, but mediamtx's RTSP output omits it on these
   packets and mainstream clients tolerate that.
+- `src/codec/aac.rs`, `push`: the body moved to `push_inner` and the
+  public entry point discards an in-progress reassembly whenever it
+  returns an error. Upstream leaves the fragment state intact on every
+  refusal, which is harmless under retina's own interleaved receive loop
+  because that turns a refusal into a session error. A UDP loop that
+  treats refusals as recoverable loss and keeps feeding the same
+  depacketizer instead has the next marked packet appended to a prefix
+  the depacketizer already rejected, and emits it as a truncated access
+  unit. Doing it at the boundary rather than at each refusal covers the
+  header checks that run before the state is examined, and any refusal
+  added later.
 
 - `src/client/mod.rs`, `Session<Playing>`: two additions for callers
   driving UDP receive outside the session — `take_udp_sockets(i)` hands

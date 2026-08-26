@@ -574,7 +574,37 @@ impl Depacketizer {
         Some(super::ParametersRef::Audio(&self.config.parameters))
     }
 
+    /// Push a packet, discarding any reassembly in progress if it is refused.
+    ///
+    /// The discard is here rather than at each refusal because callers
+    /// disagree about what a refusal means: the interleaved receive loop
+    /// turns it into a session error, while a UDP one treats it as loss and
+    /// keeps feeding the same depacketizer. Under the second, a retained
+    /// prefix has the next marked packet appended to it and leaves as a
+    /// truncated access unit, and every `Err` in the state machine — including
+    /// the header checks that run before the state is even examined — has
+    /// that shape. `loss_since_mark` so the unit completing at the next
+    /// marker is dropped rather than trusted, matching what the loss path
+    /// below already does.
     pub(super) fn push(&mut self, pkt: ReceivedPacket) -> Result<(), String> {
+        let r = self.push_inner(pkt);
+        if r.is_err() {
+            let in_progress = match &self.state {
+                DepacketizerState::Fragmented(f) => Some(f.loss),
+                DepacketizerState::MarkFragmented(f) => Some(f.loss),
+                _ => None,
+            };
+            if let Some(prev_loss) = in_progress {
+                self.state = DepacketizerState::Idle {
+                    prev_loss,
+                    loss_since_mark: true,
+                };
+            }
+        }
+        r
+    }
+
+    fn push_inner(&mut self, pkt: ReceivedPacket) -> Result<(), String> {
         let in_progress = match self.state {
             DepacketizerState::Fragmented(ref f) => Some(f.loss),
             DepacketizerState::MarkFragmented(ref f) => Some(f.loss),
