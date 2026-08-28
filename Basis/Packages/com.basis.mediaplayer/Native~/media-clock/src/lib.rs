@@ -133,13 +133,34 @@ pub enum Master {
 /// Ladder parameters. Defaults follow the calibration in the spec: 20 ms dead
 /// band (Media3's figure), 2% slew cap (validated on the C VOD branch, well
 /// under the ~6% audibility bound), 700 ms snap threshold (the C live
-/// branch's resync figure; configurable pending re-examination once slew
-/// exists).
+/// branch's resync figure). The correction is proportional with the cap as a
+/// ceiling, and carries a wider cap for a short window after a snap or a
+/// master adoption — the C live branch's two-phase shape, which is what makes
+/// a join converge in seconds rather than tens of seconds.
+/// The widest a slew ceiling may be. `ClockConfig`'s fields are public, so a
+/// ceiling is caller-supplied: a negative one inverts the correction, and one
+/// at or beyond 1x lets a negative correction stop or reverse `now()`, which
+/// nothing downstream of a monotonic clock survives.
+const MAX_SLEW_PPM: i64 = 999_999;
+
 #[derive(Debug, Clone)]
 pub struct ClockConfig {
     pub dead_band: MediaTime,
     pub snap_threshold: MediaTime,
     pub slew_cap_ppm: i64,
+    /// Time constant of the proportional correction: the rate offset is the
+    /// error divided by this, so an uncapped correction closes the error
+    /// exponentially with this constant rather than arriving at full rate and
+    /// overshooting. 0.25 s is the C live branch's figure.
+    pub slew_tau: MediaTime,
+    /// The cap in force for `fast_window` after a snap or a master adoption —
+    /// the two moments where the clock is knowingly far from its master and a
+    /// steady-state cap would take tens of seconds to close the gap. Audio is
+    /// master and is never rate-adjusted, so the whole correction lands on the
+    /// picture: a brief catch-up in the video and nothing in the sound.
+    pub fast_slew_cap_ppm: i64,
+    /// How long `fast_slew_cap_ppm` stays in force.
+    pub fast_window: MediaTime,
     /// Time constant of a first-order filter applied to the master error
     /// before the dead-band/slew rungs act on it. `None` acts on the raw
     /// error. Set this where the master's *measurement* carries platform
@@ -158,6 +179,9 @@ impl Default for ClockConfig {
             dead_band: MediaTime::from_millis(20),
             snap_threshold: MediaTime::from_millis(700),
             slew_cap_ppm: 20_000,
+            slew_tau: MediaTime::from_millis(250),
+            fast_slew_cap_ppm: 500_000,
+            fast_window: MediaTime::from_millis(1200),
             master_filter: None,
         }
     }
@@ -194,6 +218,9 @@ pub struct MediaClock {
     /// and master switch so a fresh timeline seeds from its first
     /// observation.
     filtered: Option<(MediaTime, MediaTime)>,
+    /// Wall time the fast cap stops applying. Opened by a snap and by
+    /// adopting the audio master; `None` outside a fast window.
+    fast_until: Option<MediaTime>,
 }
 
 impl MediaClock {
@@ -212,6 +239,7 @@ impl MediaClock {
             playing: false,
             generation,
             filtered: None,
+            fast_until: None,
         }
     }
 
@@ -261,8 +289,14 @@ impl MediaClock {
         self.rebase(wall);
         self.master = master;
         self.filtered = None;
-        if master == Master::Wall {
-            self.rate_ppm = 0;
+        match master {
+            Master::Wall => {
+                self.rate_ppm = 0;
+                self.fast_until = None;
+            }
+            // Adopting audio is a join: the clock has been running on wall
+            // time and the first real master report can be a long way off.
+            Master::Audio => self.fast_until = Some(wall + self.cfg.fast_window),
         }
     }
 
@@ -276,6 +310,7 @@ impl MediaClock {
         if self.master != Master::Audio || !self.playing {
             return Correction::None;
         }
+        self.enforce_slew_ceiling(wall);
         let raw = master_pos - self.now(wall);
         if raw.abs() >= self.cfg.snap_threshold {
             self.snap(wall, master_pos);
@@ -290,12 +325,14 @@ impl MediaClock {
             self.rate_ppm = 0;
             return Correction::None;
         }
-        // Fixed-rate catch-up at the cap, the dash.js/C-VOD-branch shape.
-        self.rate_ppm = if error > MediaTime::ZERO {
-            self.cfg.slew_cap_ppm
-        } else {
-            -self.cfg.slew_cap_ppm
-        };
+        // Proportional catch-up, capped. The rate that closes `error` with
+        // time constant `slew_tau`; the cap is a ceiling, not the operating
+        // point, so the correction decelerates as the error closes instead of
+        // arriving at full rate and overshooting into a limit cycle.
+        let tau = self.cfg.slew_tau.as_micros().max(1);
+        let ppm = error.as_micros().saturating_mul(1_000_000) / tau;
+        let cap = self.cap_ppm(wall);
+        self.rate_ppm = ppm.clamp(-cap, cap);
         Correction::Slew {
             rate_ppm: self.rate_ppm,
         }
@@ -355,10 +392,49 @@ impl MediaClock {
         Correction::Snap { error }
     }
 
+    /// The slew ceiling in force. `fast_slew_cap_ppm` for `fast_window`
+    /// after a snap or a master adoption, `slew_cap_ppm` otherwise.
+    fn cap_ppm(&self, wall: MediaTime) -> i64 {
+        let cap = match self.fast_until {
+            Some(until) if wall < until => self.cfg.fast_slew_cap_ppm,
+            _ => self.cfg.slew_cap_ppm,
+        };
+        // Caller-supplied, so bounded here rather than trusted: a negative
+        // ceiling would make the clamp below panic on `min > max`, and one at
+        // or beyond 1x could stop or reverse `now()`.
+        cap.clamp(0, MAX_SLEW_PPM)
+    }
+
+    /// Close out an expired fast window. `rate_ppm` persists between
+    /// observations, so a rate set just inside the window keeps running at the
+    /// wide ceiling until the next observation arrives — unbounded if the
+    /// master goes quiet. Rebasing first means the position already reported
+    /// at the old rate stands, and only the rate from here changes.
+    ///
+    /// Idempotent and cheap; call it wherever the clock is already held.
+    pub fn enforce_slew_ceiling(&mut self, wall: MediaTime) {
+        let Some(until) = self.fast_until else {
+            return;
+        };
+        if wall < until {
+            return;
+        }
+        self.fast_until = None;
+        let cap = self.cfg.slew_cap_ppm.clamp(0, MAX_SLEW_PPM);
+        if self.rate_ppm.abs() > cap {
+            self.rebase(wall);
+            self.rate_ppm = self.rate_ppm.clamp(-cap, cap);
+        }
+    }
+
     fn snap(&mut self, wall: MediaTime, pos: MediaTime) {
         self.anchor_wall = wall;
         self.anchor_media = pos;
         self.rate_ppm = 0;
         self.filtered = None;
+        // A snap lands the clock on the master but says nothing about the
+        // rate it should run at from here; the window lets the first
+        // corrections after it converge rather than crawl.
+        self.fast_until = Some(wall + self.cfg.fast_window);
     }
 }

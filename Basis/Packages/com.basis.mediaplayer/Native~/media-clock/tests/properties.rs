@@ -41,12 +41,44 @@ proptest! {
         }
     }
 
-    /// The instantaneous rate stays within the 2% cap between observations.
+    /// The instantaneous rate stays within whichever ceiling is in force:
+    /// the wide one for `fast_window` after the master is adopted, the 2%
+    /// one from then on. Both halves are asserted by the same row, so a
+    /// fast window that failed to close would fail here.
     #[test]
     fn rate_bounded(schedule in slew_regime_schedule()) {
-        let cap_ppm = ClockConfig::default().slew_cap_ppm;
+        let cfg = ClockConfig::default();
         let mut c = clock_at_zero();
         let mut wall = MediaTime::ZERO;
+        for (step, err) in schedule {
+            let target = c.now(wall) + MediaTime::from_micros(err);
+            c.observe_master(wall, target);
+            // `clock_at_zero` adopts the audio master at wall 0, so the fast
+            // window runs from there.
+            let cap_ppm = if wall < cfg.fast_window {
+                cfg.fast_slew_cap_ppm
+            } else {
+                cfg.slew_cap_ppm
+            };
+            let before = c.now(wall);
+            wall += MediaTime::from_micros(step);
+            let after = c.now(wall);
+            let advance = (after - before).as_micros();
+            let lo = step + step * -cap_ppm / 1_000_000 - 1;
+            let hi = step + step * cap_ppm / 1_000_000 + 1;
+            prop_assert!(advance >= lo && advance <= hi,
+                "advance {advance} outside [{lo}, {hi}] for step {step} at wall {wall}");
+        }
+    }
+
+    /// Past the fast window the ceiling is the steady-state cap, whatever
+    /// the error. This is the half a single-phase row could not distinguish.
+    #[test]
+    fn steady_state_rate_bounded_by_the_slew_cap(schedule in slew_regime_schedule()) {
+        let cfg = ClockConfig::default();
+        let mut c = clock_at_zero();
+        // Past the fast window before the first observation.
+        let mut wall = cfg.fast_window + MediaTime::from_millis(1);
         for (step, err) in schedule {
             let target = c.now(wall) + MediaTime::from_micros(err);
             c.observe_master(wall, target);
@@ -54,8 +86,8 @@ proptest! {
             wall += MediaTime::from_micros(step);
             let after = c.now(wall);
             let advance = (after - before).as_micros();
-            let lo = step + step * -cap_ppm / 1_000_000 - 1;
-            let hi = step + step * cap_ppm / 1_000_000 + 1;
+            let lo = step + step * -cfg.slew_cap_ppm / 1_000_000 - 1;
+            let hi = step + step * cfg.slew_cap_ppm / 1_000_000 + 1;
             prop_assert!(advance >= lo && advance <= hi,
                 "advance {advance} outside [{lo}, {hi}] for step {step}");
         }
@@ -204,4 +236,177 @@ fn slew_wall_clamps_to_the_cap_and_ignores_audio_master() {
     let mut audio = clock_at_zero();
     audio.slew_wall(MediaTime::ZERO, 20_000);
     assert_eq!(audio.rate_ppm(), 0, "audio master ignores slew_wall");
+}
+
+/// Convergence from an error the size the live join actually produces.
+///
+/// This is the row the fixed-rate law could not pass. At the 2% cap alone a
+/// 690 ms error needs ~34.5 s to close, and the measured Editor join took 45 s
+/// while shedding 2-3 frames a second throughout.
+///
+/// The bound here is 5 s rather than 1, and the arithmetic says why: the fast
+/// window is 1.2 s at 50% of wall rate, so it absorbs ~600 ms and leaves ~90 ms
+/// to clear at the steady cap. The residual is a function of how big the join
+/// error is, which is the presentation origin's problem and not the
+/// corrector's — sizing the fast window to swallow 690 ms would be tuning the
+/// controller around a defect rather than fixing it. See the companion row for
+/// the error size a corrected origin should produce.
+#[test]
+fn a_join_sized_error_converges_far_faster_than_the_cap_alone() {
+    let at = converge_from(MediaTime::from_millis(690));
+    // The cap alone would need 690 / 0.02 = 34_500 ms.
+    assert!(
+        at <= MediaTime::from_millis(5000),
+        "converged at {at}, expected within 5 s"
+    );
+    assert!(
+        at < MediaTime::from_millis(34_500),
+        "no better than the cap alone"
+    );
+}
+
+/// The error a corrected presentation origin should leave: both legs banked at
+/// the start point, so the clock begins close to its master. Sub-second.
+#[test]
+fn a_small_join_error_converges_within_a_second() {
+    let at = converge_from(MediaTime::from_millis(100));
+    assert!(
+        at <= MediaTime::from_millis(1000),
+        "converged at {at}, expected within 1 s"
+    );
+}
+
+/// Drive a 1x master sitting `offset` ahead and return the wall time at which
+/// the error first reaches the dead band.
+fn converge_from(offset: MediaTime) -> MediaTime {
+    let cfg = ClockConfig::default();
+    let mut c = clock_at_zero();
+    let mut wall = MediaTime::ZERO;
+    let mut master = offset;
+    let step = MediaTime::from_millis(20);
+    for _ in 0..5_000 {
+        c.observe_master(wall, master);
+        wall += step;
+        // A 1x master advances with wall time.
+        master += step;
+        if (master - c.now(wall)).abs() <= cfg.dead_band {
+            return wall;
+        }
+    }
+    panic!("never converged");
+}
+
+/// The correction decelerates as the error closes. A fixed-rate law runs at
+/// the cap right up to the dead band and then drops to zero, which is what
+/// produced the overshoot burst (11 events at one bound, then 13 at the other
+/// within 3 s). The discriminator is a strict decrease while the rate is still
+/// non-zero: a fixed-rate law never has one.
+#[test]
+fn the_rate_falls_as_the_error_closes() {
+    let mut c = clock_at_zero();
+    let mut wall = MediaTime::ZERO;
+    let step = MediaTime::from_millis(20);
+    let mut master = MediaTime::from_millis(690);
+    let mut previous: Option<i64> = None;
+    let mut decreased = false;
+    for _ in 0..2_000 {
+        c.observe_master(wall, master);
+        let rate = c.rate_ppm();
+        if rate == 0 {
+            break;
+        }
+        if let Some(prev) = previous
+            && rate < prev
+        {
+            decreased = true;
+        }
+        previous = Some(rate);
+        wall += step;
+        master += step;
+    }
+    assert!(
+        decreased,
+        "rate never fell while non-zero; the law is still fixed-rate"
+    );
+}
+
+/// The fast ceiling must stay under 1x or the clock could run backwards
+/// while correcting, which no amount of downstream tolerance survives.
+#[test]
+fn the_fast_ceiling_cannot_reverse_the_clock() {
+    let cfg = ClockConfig::default();
+    assert!(
+        cfg.fast_slew_cap_ppm < 1_000_000,
+        "a ceiling at or beyond 1x can drive position backwards"
+    );
+    assert!(cfg.slew_cap_ppm <= cfg.fast_slew_cap_ppm);
+}
+
+/// A caller-supplied ceiling is data, not a promise. `ClockConfig`'s fields are
+/// public, so a negative ceiling must not panic the clamp and a ceiling at or
+/// beyond 1x must not let a correction stop or reverse position.
+#[test]
+fn a_hostile_ceiling_neither_panics_nor_reverses_the_clock() {
+    for (fast, steady) in [
+        (-1i64, -1i64),
+        (i64::MIN, i64::MIN),
+        (5_000_000, 5_000_000),
+        (i64::MAX, i64::MAX),
+    ] {
+        let cfg = ClockConfig {
+            fast_slew_cap_ppm: fast,
+            slew_cap_ppm: steady,
+            ..ClockConfig::default()
+        };
+        let mut c = MediaClock::new(cfg, MediaTime::ZERO, MediaTime::ZERO, Generation(0));
+        c.set_playing(MediaTime::ZERO, true);
+        c.set_master(MediaTime::ZERO, Master::Audio);
+        let mut wall = MediaTime::ZERO;
+        let mut last = c.now(wall);
+        // Drive both signs of error so the clamp is exercised either way.
+        for i in 0..200 {
+            let err = if i % 2 == 0 { 400_000 } else { -400_000 };
+            let target = c.now(wall) + MediaTime::from_micros(err);
+            c.observe_master(wall, target);
+            wall += MediaTime::from_millis(20);
+            let now = c.now(wall);
+            assert!(
+                now >= last,
+                "position went backwards with ceilings ({fast}, {steady}): {last} -> {now}"
+            );
+            last = now;
+        }
+    }
+}
+
+/// The fast window is bounded by wall time, but `rate_ppm` persists between
+/// observations — so a rate set just inside the window would keep running at
+/// the wide ceiling for as long as the master stays quiet. Closing the window
+/// must not wait for the next observation.
+#[test]
+fn an_expired_fast_window_is_closed_without_an_observation() {
+    let cfg = ClockConfig::default();
+    let mut c = clock_at_zero();
+    // One observation just inside the window, with an error big enough to
+    // drive the rate to the wide ceiling.
+    let wall = cfg.fast_window - MediaTime::from_millis(1);
+    let target = c.now(wall) + MediaTime::from_millis(600);
+    c.observe_master(wall, target);
+    assert!(
+        c.rate_ppm() > cfg.slew_cap_ppm,
+        "expected the wide ceiling in force, got {}",
+        c.rate_ppm()
+    );
+
+    // The master then goes quiet well past the window.
+    let later = cfg.fast_window + MediaTime::from_secs(2);
+    let before = c.now(later);
+    c.enforce_slew_ceiling(later);
+    assert!(
+        c.rate_ppm().abs() <= cfg.slew_cap_ppm,
+        "rate {} still above the steady ceiling after the window closed",
+        c.rate_ppm()
+    );
+    // Closing the window must not move the position already reported.
+    assert_eq!(before, c.now(later), "closing the window moved `now`");
 }

@@ -2039,6 +2039,11 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             );
             let consumer_live = playhead.is_some() && pulling;
             let mut clock = px.clock.lock().expect("clock lock");
+            // Close an expired fast slew window here rather than waiting for
+            // the next master observation: the rate persists between them, so
+            // a master that goes quiet just after a join would otherwise keep
+            // the wide ceiling running indefinitely.
+            clock.enforce_slew_ceiling(wall);
             // Mirror the clock for the pull path's serve trim: the
             // pull must never take this lock. MIN while parked disables
             // the trim across startup, seeks and join holds.
