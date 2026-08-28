@@ -888,6 +888,20 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             _open = false;
         }
         State = BmState.Idle;
+        // The per-session engine readings describe a session that no longer
+        // exists. Left alone they survive into the next one: the open path
+        // clears them only after `bm_session_open` succeeds, so a close, or an
+        // open that fails or is refused before that point, leaves the previous
+        // session's values readable — and the diagnostics recorder writes them
+        // into its capture for an idle player, which is a poisoned column
+        // rather than a cosmetic wart. Clearing them here covers the open path
+        // too, since `Open` closes first; the one path that deliberately does
+        // not reach here is a moderation-blocked open, which returns before
+        // `Close` and leaves a still-playing session's readings alone.
+        System.Threading.Volatile.Write(ref _engineChannels, 0);
+        System.Threading.Volatile.Write(ref _engineSampleRate, 0);
+        System.Threading.Volatile.Write(ref _syncRatePpm, 0);
+        System.Threading.Volatile.Write(ref _avOffsetUs, int.MinValue);
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (_renderHooked)
         {
