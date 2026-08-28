@@ -2033,6 +2033,10 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 },
                 Ordering::Relaxed,
             );
+            // The capture takes the same value the ABI snapshot does, read
+            // from the one place it is computed.
+            px.diag
+                .set_av_offset(px.shared.av_offset_us.load(Ordering::Relaxed));
             let pulling = consumer_live(
                 wall,
                 px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed),

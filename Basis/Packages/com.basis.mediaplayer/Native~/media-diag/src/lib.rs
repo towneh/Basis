@@ -11,7 +11,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use media_clock::MediaTime;
 
@@ -192,6 +192,12 @@ pub struct SessionDiag {
     /// already counts whole chunks dropped for an inert consumer: one
     /// column cannot carry both units.
     audio_trimmed_frames: AtomicU64,
+    /// Presented video pts minus the audio playhead, microseconds, as the
+    /// engine measures it. `i32::MIN` while either term is missing; real
+    /// values are clamped clear of the sentinel so it stays unambiguous.
+    /// Session-level rather than a stage field: it is a relationship between
+    /// two stages, not a property of either.
+    av_offset_us: AtomicI32,
 }
 
 impl SessionDiag {
@@ -202,6 +208,7 @@ impl SessionDiag {
             event_cap,
             events_dropped: AtomicU64::new(0),
             audio_trimmed_frames: AtomicU64::new(0),
+            av_offset_us: AtomicI32::new(i32::MIN),
         }
     }
 
@@ -239,8 +246,19 @@ impl SessionDiag {
         self.audio_trimmed_frames.store(frames, Ordering::Relaxed);
     }
 
+    /// Publish the A/V offset for the capture. The engine already computes it
+    /// for the ABI snapshot; this is the same value, so the capture and the
+    /// snapshot can never disagree.
+    pub fn set_av_offset(&self, offset_us: i32) {
+        self.av_offset_us.store(offset_us, Ordering::Relaxed);
+    }
+
     pub fn audio_trimmed(&self) -> u64 {
         self.audio_trimmed_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn av_offset(&self) -> i32 {
+        self.av_offset_us.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> [StageSnapshot; STAGE_COUNT] {
@@ -287,6 +305,13 @@ impl CaptureRecorder {
         // path's only loss channel with no stage field of its own, and
         // reconstructing it from in/out/occupancy is error-prone.
         let _ = write!(h, ",audio_trimmed_frames");
+        // Also appended after the stage block, and for the same reason: the
+        // A/V offset is a relationship between the present and audio-ring
+        // stages rather than a counter belonging to either. Without it here
+        // nothing headless can see the offset's shape over time — it reached
+        // only the ABI snapshot and the managed frame capture, which is how a
+        // presentation lag came to be read as a clock error.
+        let _ = write!(h, ",av_offset_us");
         h
     }
 
@@ -308,6 +333,7 @@ impl CaptureRecorder {
             );
         }
         let _ = write!(row, ",{}", diag.audio_trimmed());
+        let _ = write!(row, ",{}", diag.av_offset());
         self.rows.push(row);
     }
 
@@ -348,19 +374,43 @@ mod tests {
     fn column_contract_is_stable() {
         let header = CaptureRecorder::header();
         assert!(header.starts_with("wall_us,source_in_count,"));
-        assert_eq!(header.split(',').count(), 1 + STAGE_COUNT * 8 + 1);
+        // wall_us + the stage block + the two appended session columns.
+        assert_eq!(header.split(',').count(), 1 + STAGE_COUNT * 8 + 2);
         assert!(header.contains(",bank_occupancy_bytes,"));
         assert!(header.contains(",clock_errors,"));
-        assert!(header.ends_with(",audio_trimmed_frames"));
+        assert!(header.ends_with(",audio_trimmed_frames,av_offset_us"));
     }
 
+    /// Both appended session columns reach the capture, in the order the
+    /// header states. Asserted by position rather than by suffix: a suffix
+    /// check silently becomes a check of whichever column was appended last.
     #[test]
-    fn the_serve_trim_total_reaches_the_capture() {
+    fn the_appended_session_columns_reach_the_capture() {
         let diag = SessionDiag::default();
         diag.set_audio_trimmed(21_535);
+        diag.set_av_offset(-27_475);
         let mut rec = CaptureRecorder::default();
         rec.sample(MediaTime::from_millis(16), &diag);
-        assert!(rec.rows()[0].ends_with(",21535"));
+        let fields: Vec<&str> = rec.rows()[0].split(',').collect();
+        let header_line = CaptureRecorder::header();
+        let header: Vec<&str> = header_line.split(',').collect();
+        assert_eq!(fields.len(), header.len());
+        assert_eq!(header[header.len() - 2], "audio_trimmed_frames");
+        assert_eq!(fields[fields.len() - 2], "21535");
+        assert_eq!(header[header.len() - 1], "av_offset_us");
+        assert_eq!(fields[fields.len() - 1], "-27475");
+    }
+
+    /// The unknown sentinel survives the round trip: a capture taken before
+    /// audio and a presented frame both exist must read as "no value", not as
+    /// an offset of zero.
+    #[test]
+    fn an_unmeasurable_av_offset_reaches_the_capture_as_the_sentinel() {
+        let diag = SessionDiag::default();
+        let mut rec = CaptureRecorder::default();
+        rec.sample(MediaTime::from_millis(16), &diag);
+        let last = rec.rows()[0].rsplit(',').next().expect("a last field");
+        assert_eq!(last, i32::MIN.to_string(), "default must be the sentinel");
     }
 
     #[test]
