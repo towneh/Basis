@@ -37,6 +37,13 @@ use crate::{EngineError, SessionShared, State};
 const IDLE_WAIT: Duration = Duration::from_millis(50);
 /// Decode-thread receive granularity: bounds presentation-timing error.
 const DECODE_TICK: Duration = Duration::from_millis(4);
+
+/// How long the clock waits for audio to reach the ring before starting on
+/// video alone. Bounds the preroll below: an audio leg that never arrives —
+/// a decoder that fails to build, a track the server announces and never
+/// sends — must not hold the picture indefinitely. Well clear of the ~0.78 s
+/// audio delivery lag measured on the live 5.1 lane.
+const AUDIO_PREROLL_CAP: Duration = Duration::from_millis(2000);
 /// A consumer pull within this window keeps audio as the clock master.
 const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 
@@ -45,6 +52,23 @@ const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 /// `i64::MIN` is `last_pull_wall_us`'s never-pulled sentinel and would
 /// overflow the subtraction, so it is screened before rather than after:
 /// a consumer that never arrived is not one to hold anything open for.
+/// Whether the clock should keep waiting for the other leg.
+///
+/// The wait is **per join**: `since` holds the wall time this one began, and
+/// carrying it across a generation would spend the next join's wait before it
+/// starts — a seek or a reconnect landing inside the wait is exactly when that
+/// happens. Callers clear `since` at a flush and once the clock runs; clearing
+/// it is what makes the next wait a fresh one, which is the property the rows
+/// below pin.
+fn preroll_wait(since: &mut Option<MediaTime>, wall: MediaTime, awaiting: bool) -> bool {
+    if !awaiting {
+        *since = None;
+        return false;
+    }
+    let start = *since.get_or_insert(wall);
+    wall - start < MediaTime::from_micros(AUDIO_PREROLL_CAP.as_micros() as i64)
+}
+
 fn consumer_live(wall: MediaTime, last_pull_us: i64) -> bool {
     last_pull_us != i64::MIN && wall - MediaTime::from_micros(last_pull_us) <= AUDIO_LIVENESS
 }
@@ -1375,6 +1399,9 @@ fn reroute_hw_fallback(
 /// decoded frame in `pending_frame`, a refusing MFT parks the AU in
 /// `pending_au`, and both retry each tick while presentation keeps running.
 pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
+    // Wall time the preroll wait began, so it can be bounded. Cleared
+    // whenever the wait does not apply, so a later join times its own.
+    let mut preroll_since: Option<MediaTime> = None;
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
     let mut sink = VideoSink::new();
     let mut generation = {
@@ -1472,7 +1499,36 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         {
             let parked = !px.clock.lock().expect("clock lock").is_playing();
             let gated = parked && px.bank.bank.lock().expect("bank lock").holding(wall);
-            if !gated {
+            // Preroll, the second half of the start condition. The Bank's hold
+            // above answers "is enough banked"; this answers "has the other leg
+            // anything to play", which is the question that was missing.
+            //
+            // Video is decodable a delivery latency ahead of the audio carrying
+            // the same timestamps — ~0.78 s on the live 5.1 lane. Starting the
+            // clock on video alone therefore starts it at a media time whose
+            // audio has not arrived, so every chunk is late the moment it lands
+            // and the serve trim discards it: 0.5 to 3 s of audio destroyed at
+            // every join, and a clock snap of seconds once the master appears.
+            //
+            // `pushed_frames` is the right signal rather than the ring's
+            // occupancy or its base pts: the shed already drops everything
+            // before the presentation origin, so a non-zero count means audio
+            // *at or after the origin* has reached the ring, which is the
+            // condition worth waiting for. It cannot deadlock against the audio
+            // thread, which takes that origin from the frame pool rather than
+            // from the clock and so can shed and push while this waits.
+            // Live and video-led only. The asymmetry this waits out is a
+            // live one: an on-demand source is read ahead of 1x and its two
+            // legs arrive together, so waiting there would add startup latency
+            // for nothing. An audio-leading start is by definition not waiting
+            // on audio.
+            let awaiting_audio = parked
+                && live
+                && !px.audio_leading
+                && px.audio_active.load(Ordering::Relaxed)
+                && px.audio_shared.pushed_frames.load(Ordering::Relaxed) == 0;
+            let preroll = preroll_wait(&mut preroll_since, wall, awaiting_audio);
+            if !gated && !preroll {
                 let mut clock = px.clock.lock().expect("clock lock");
                 // The generations must agree: after a seek parks the clock,
                 // pre-flush frames still sit in the pool until the Flush is
@@ -1496,6 +1552,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     px.present.mirror_clock(wall, clock.now(wall), true);
                     px.presentation_origin_us
                         .store(first_pts.as_micros(), Ordering::Relaxed);
+                    preroll_since = None;
                 }
             }
         }
@@ -1669,6 +1726,13 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 eos_after_drain = false;
                 pending_au = None;
                 pending_frame = None;
+                // The preroll wait belongs to the join it started in. Carried
+                // across a generation, its elapsed time is already spent and
+                // the next join starts the clock without waiting for audio at
+                // all — a seek or a reconnect landing inside the wait is
+                // exactly when that happens, and neither is a lane the gate's
+                // straight-through tests take.
+                preroll_since = None;
                 px.presentation_origin_us.store(i64::MIN, Ordering::Relaxed);
                 if let Some(active) = decoder.as_mut()
                     && let Err(e) = active.reset()
@@ -2457,6 +2521,60 @@ mod tests {
     fn a_consumer_that_never_pulled_is_not_live_and_does_not_overflow() {
         let wall = MediaTime::from_millis(10_000);
         assert!(!consumer_live(wall, i64::MIN), "never pulled is not live");
+    }
+
+    fn ms(v: i64) -> MediaTime {
+        MediaTime::from_millis(v)
+    }
+
+    #[test]
+    fn the_preroll_wait_is_bounded_and_ends_when_audio_arrives() {
+        let mut since = None;
+        assert!(
+            preroll_wait(&mut since, ms(0), true),
+            "waits from the start"
+        );
+        assert!(
+            preroll_wait(&mut since, ms(1_999), true),
+            "still inside the cap"
+        );
+        assert!(
+            !preroll_wait(&mut since, ms(2_001), true),
+            "an audio leg that never arrives must not hold the picture"
+        );
+        // Audio lands: the wait ends and its start is forgotten.
+        assert!(!preroll_wait(&mut since, ms(2_500), false));
+        assert!(since.is_none(), "a finished wait leaves no start behind");
+    }
+
+    /// The generation-boundary case. A seek or a reconnect landing inside the
+    /// wait must give the next join its own, not the remains of this one.
+    #[test]
+    fn a_new_join_gets_a_fresh_preroll_wait() {
+        let mut since = None;
+        assert!(preroll_wait(&mut since, ms(0), true));
+        // ... the wait expires without audio ever arriving.
+        assert!(!preroll_wait(&mut since, ms(3_000), true));
+
+        // Without the reset the next join inherits a spent wait: `since` still
+        // reads 0, so at 3 s it is already past the cap and the clock starts
+        // without waiting for audio at all.
+        assert!(
+            !preroll_wait(&mut since, ms(3_000), true),
+            "the spent wait is what a carried-over start looks like"
+        );
+
+        // The flush handler clears it; the next join waits its own cap.
+        since = None;
+        assert!(
+            preroll_wait(&mut since, ms(3_000), true),
+            "a fresh join must wait again"
+        );
+        assert!(
+            preroll_wait(&mut since, ms(4_999), true),
+            "and for the full cap, measured from its own start"
+        );
+        assert!(!preroll_wait(&mut since, ms(5_001), true));
     }
 
     #[test]
