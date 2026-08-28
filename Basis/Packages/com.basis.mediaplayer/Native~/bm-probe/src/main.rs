@@ -142,6 +142,9 @@ enum Command {
         /// Permit sources that resolve to private/loopback addresses.
         #[arg(long)]
         allow_local: bool,
+        /// Start the clock on audio and let video catch up.
+        #[arg(long)]
+        audio_lead: bool,
         /// Write the capture timeline.
         #[arg(long)]
         csv: Option<std::path::PathBuf>,
@@ -217,6 +220,7 @@ fn main() -> ExitCode {
             duration,
             depth_ms,
             allow_local,
+            audio_lead,
             csv,
         } => impair::run(&impair::Options {
             url,
@@ -224,6 +228,7 @@ fn main() -> ExitCode {
             duration,
             depth_ms,
             allow_local,
+            audio_leading: audio_lead,
             csv,
         }),
     }

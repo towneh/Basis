@@ -21,6 +21,7 @@ pub struct Options {
     pub duration: Option<u64>,
     pub depth_ms: Option<u32>,
     pub allow_local: bool,
+    pub audio_leading: bool,
     pub csv: Option<std::path::PathBuf>,
 }
 
@@ -91,6 +92,7 @@ pub fn run(options: &Options) -> ExitCode {
     request.liveness = SourceLiveness::Live;
     request.allow_local_addresses = options.allow_local;
     request.buffer_depth_ms = options.depth_ms;
+    request.audio_leading = options.audio_leading;
     let mut session = Session::open_with_source(request, Box::new(impaired));
     let shared = session.shared().clone();
     let px = session.pipeline().clone();
