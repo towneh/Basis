@@ -52,6 +52,26 @@ const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 /// `i64::MIN` is `last_pull_wall_us`'s never-pulled sentinel and would
 /// overflow the subtraction, so it is screened before rather than after:
 /// a consumer that never arrived is not one to hold anything open for.
+/// Presented video pts minus the audio playhead, or the unknown sentinel.
+///
+/// Both terms have to belong to the same generation for the difference to mean
+/// anything, which is why `presented_this_generation` is asked for rather than
+/// a cumulative presented count: mixing a stale video position with a fresh
+/// audio playhead produces a plausible-looking number rather than an absence,
+/// and this figure reaches a capture column where that is worse than a gap.
+fn av_offset_us(
+    playhead: Option<MediaTime>,
+    presented_this_generation: bool,
+    position_us: i64,
+) -> i32 {
+    match playhead {
+        Some(ph) if presented_this_generation => (position_us - ph.as_micros())
+            .clamp(i64::from(i32::MIN) + 1, i64::from(i32::MAX))
+            as i32,
+        _ => i32::MIN,
+    }
+}
+
 /// Whether the clock should keep waiting for the other leg.
 ///
 /// The wait is **per join**: `since` holds the wall time this one began, and
@@ -2080,21 +2100,20 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             // presented: before that `position_us` is the clock, and the
             // difference would be the ladder's own error read twice.
             px.shared.av_offset_us.store(
-                match playhead {
-                    Some(ph)
-                        if px
-                            .diag
-                            .stage(Stage::Present)
-                            .out_count
-                            .load(Ordering::Relaxed)
-                            > 0 =>
-                    {
-                        (px.shared.position_us.load(Ordering::Relaxed) - ph.as_micros())
-                            .clamp(i64::from(i32::MIN) + 1, i64::from(i32::MAX))
-                            as i32
-                    }
-                    _ => i32::MIN,
-                },
+                av_offset_us(
+                    playhead,
+                    // Per generation, not cumulative. `Present.out_count`
+                    // survives a flush, so on its own it says "something has
+                    // presented at some point in this session" — which after a
+                    // seek or a reconnect is true before the new timeline has
+                    // presented anything, and the figure exported in that
+                    // window is the old video position against the new audio
+                    // playhead. The origin is `i64::MIN` until this
+                    // generation's clock starts, so it answers the question
+                    // that was actually meant.
+                    px.presentation_origin_us.load(Ordering::Relaxed) != i64::MIN,
+                    px.shared.position_us.load(Ordering::Relaxed),
+                ),
                 Ordering::Relaxed,
             );
             // The capture takes the same value the ABI snapshot does, read
@@ -2525,6 +2544,30 @@ mod tests {
 
     fn ms(v: i64) -> MediaTime {
         MediaTime::from_millis(v)
+    }
+
+    /// The offset is a difference between two terms of the same generation,
+    /// or it is nothing. A cumulative "has anything ever presented" gate lets
+    /// the window after a flush export the old video position against the new
+    /// audio playhead, which reads as measurement rather than as absence.
+    #[test]
+    fn the_av_offset_is_unknown_until_this_generation_presents() {
+        let ph = Some(MediaTime::from_millis(1_000));
+        assert_eq!(
+            av_offset_us(ph, false, 5_000_000),
+            i32::MIN,
+            "nothing presented this generation: the offset is not knowable"
+        );
+        assert_eq!(av_offset_us(None, true, 5_000_000), i32::MIN, "no playhead");
+        assert_eq!(av_offset_us(ph, true, 1_020_000), 20_000);
+    }
+
+    /// The sentinel stays reachable: a real value is clamped clear of it, so
+    /// "unknown" and "a very large negative offset" never collide.
+    #[test]
+    fn a_real_av_offset_never_collides_with_the_sentinel() {
+        let ph = Some(MediaTime::from_micros(i64::MAX / 2));
+        assert!(av_offset_us(ph, true, i64::MIN / 2) > i32::MIN);
     }
 
     #[test]
