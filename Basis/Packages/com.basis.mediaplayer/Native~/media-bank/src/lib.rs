@@ -723,19 +723,25 @@ impl Bank {
 
     /// The engine's presentation signal, ending a priming join: the first
     /// frame is reaching the viewer at `wall`, so fix the 1x schedule
-    /// presentation-relative. The phase sits `decoder_cushion` ahead of
-    /// the join point (or the primed span, when less), making the
-    /// decoder's standing in-flight depth the cushion and leaving the
-    /// rest of the arrived span as upstream lag — the §6.5 split. Any
-    /// released-ahead media above the cushion drains back upstream while
-    /// the paused schedule lets arrivals refill the bank. No-op outside
-    /// a priming join.
+    /// presentation-relative. The phase sits at the whole released span,
+    /// so the schedule resumes 1x from wherever release actually reached
+    /// and never pauses: released-ahead media is in-flight depth held by
+    /// the decode channel, the frame pool and the audio ring, and the
+    /// remaining `arrived − released` is the bank's own lag — the §6.5
+    /// split. Crediting only the cushion here instead would defer the
+    /// schedule by the difference, and one anchor governs both tracks, so
+    /// that pause starves the audio ring as well as the pool (R4). No-op
+    /// outside a priming join.
+    ///
+    /// The Auto estimator is unaffected: it observes `behind + lag`, and
+    /// moving the anchor earlier grows `behind` by exactly what it takes
+    /// off `lag`.
     pub fn presentation_started(&mut self, wall: MediaTime) {
         let Hold::Primed { .. } = self.hold else {
             return;
         };
         self.hold = Hold::Released;
-        let sched_now = self.released_span().min(self.cfg.decoder_cushion);
+        let sched_now = self.released_span();
         self.anchor = Some(wall - sched_now);
         self.lag = (self.arrived() - sched_now)
             .max(MediaTime::ZERO)

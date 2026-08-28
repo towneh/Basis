@@ -108,16 +108,17 @@ fn priming_cap_is_a_moving_one_x_line() {
     );
 }
 
-/// The presentation signal fixes the schedule presentation-relative: the
-/// phase sits `decoder_cushion` ahead of the join point, the lag lands on
-/// the configured target exactly, and release pauses while the
-/// released-ahead depth above the cushion drains back upstream.
+/// The presentation signal fixes the schedule presentation-relative at
+/// the whole released span, so release carries straight on at 1x. The
+/// released-ahead media is in-flight depth downstream, so the bank's own
+/// lag is what is left un-released — near zero on a join that released
+/// everything it took. Crediting only the cushion would defer the
+/// schedule by the difference, and since one anchor governs both tracks
+/// that pause takes the audio ring down with the pool.
 #[test]
-fn presentation_anchor_sets_cushion_phase_and_exact_target_lag() {
+fn presentation_anchor_continues_the_schedule_without_a_pause() {
     let config = cfg(3000, 2000);
-    let cushion = config.decoder_cushion;
     let lead = config.pace_lead_with_lag;
-    let target_lag = MediaTime::from_millis(3000) - cushion;
     let mut bank = Bank::new(config, Generation(0)).unwrap();
 
     // 1x arrivals to the full depth; priming releases them all.
@@ -130,23 +131,39 @@ fn presentation_anchor_sets_cushion_phase_and_exact_target_lag() {
         i += 1;
         assert!(i < 200, "hold never lifted");
     }
-    let primed = wall; // ≈ the arrived span: everything released
+    // Everything that arrived was released: well past the 500ms cushion,
+    // which is the case that used to stall.
+    let primed = wall;
+    assert!(
+        primed > MediaTime::from_millis(1500),
+        "primed only {primed}"
+    );
 
     let present_at = wall + MediaTime::from_millis(50);
     bank.presentation_started(present_at);
-    let m = bank.metrics();
     let quantum = MediaTime::from_micros(INTERVAL_US);
     assert!(
-        (m.lag - target_lag).abs() <= quantum,
-        "lag {} after the presentation anchor, wanted ~{target_lag}",
-        m.lag
+        bank.metrics().lag <= quantum,
+        "lag {} after the anchor, wanted ~0: released media is downstream depth",
+        bank.metrics().lag
     );
 
-    // The next arrival banks; its release waits for the schedule to reach
-    // it: due ≈ present_at + (primed − cushion) − lead.
+    // The arrival that follows the join is due at once: the schedule is
+    // where release left it, not a cushion behind it.
     let next_dts = i * INTERVAL_US;
     push_ok(&mut bank, present_at, next_dts);
-    let due = present_at + (primed - cushion) - lead;
+    assert_eq!(
+        pop_all(&mut bank, present_at),
+        1,
+        "the schedule paused at the join"
+    );
+
+    // And it is still 1x, not a licence to run away: media half a second
+    // ahead of the line waits for the line.
+    let ahead = next_dts + 500_000;
+    push_ok(&mut bank, present_at, ahead);
+    assert_eq!(pop_all(&mut bank, present_at), 0);
+    let due = present_at + MediaTime::from_millis(500) - lead;
     assert_eq!(pop_all(&mut bank, due - MediaTime::from_millis(40)), 0);
     assert_eq!(pop_all(&mut bank, due + quantum), 1);
 }
