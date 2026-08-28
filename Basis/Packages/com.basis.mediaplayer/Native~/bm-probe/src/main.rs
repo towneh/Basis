@@ -66,10 +66,6 @@ enum Command {
         /// default; this overrules it (§6.11).
         #[arg(long)]
         live: bool,
-        /// Audio-leading start: live joins start audible at the
-        /// first banked audio; video appears at its keyframe.
-        #[arg(long)]
-        audio_lead: bool,
         /// Which of the container's audio tracks to bind, by index into
         /// the offered list. Out of range falls back to the first.
         #[arg(long, default_value_t = 0)]
@@ -98,10 +94,6 @@ enum Command {
         /// Open as a live source (no seek phase).
         #[arg(long)]
         live: bool,
-        /// Audio-leading start: the startup phase then measures
-        /// time-to-first-audio (Playing without a presented frame).
-        #[arg(long)]
-        audio_lead: bool,
         /// Skip the seek phase (lanes whose demuxer refuses seeks).
         #[arg(long)]
         no_seek: bool,
@@ -142,9 +134,6 @@ enum Command {
         /// Permit sources that resolve to private/loopback addresses.
         #[arg(long)]
         allow_local: bool,
-        /// Start the clock on audio and let video catch up.
-        #[arg(long)]
-        audio_lead: bool,
         /// Write the capture timeline.
         #[arg(long)]
         csv: Option<std::path::PathBuf>,
@@ -167,7 +156,6 @@ fn main() -> ExitCode {
             audio_out,
             allow_local,
             live,
-            audio_lead,
             audio_track,
             audio_url,
         } => play::run(&play::Options {
@@ -178,7 +166,6 @@ fn main() -> ExitCode {
             audio_out,
             allow_local,
             live,
-            audio_lead,
             audio_track,
             audio_url,
         }),
@@ -188,7 +175,6 @@ fn main() -> ExitCode {
             seek_to_ms,
             allow_local,
             live,
-            audio_lead,
             no_seek,
             timeout,
         } => bench::run(&bench::Options {
@@ -197,7 +183,6 @@ fn main() -> ExitCode {
             seek_to_ms,
             allow_local,
             live,
-            audio_lead,
             no_seek,
             timeout_s: timeout,
         }),
@@ -220,7 +205,6 @@ fn main() -> ExitCode {
             duration,
             depth_ms,
             allow_local,
-            audio_lead,
             csv,
         } => impair::run(&impair::Options {
             url,
@@ -228,7 +212,6 @@ fn main() -> ExitCode {
             duration,
             depth_ms,
             allow_local,
-            audio_leading: audio_lead,
             csv,
         }),
     }

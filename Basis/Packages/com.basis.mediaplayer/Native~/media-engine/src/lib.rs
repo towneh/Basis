@@ -269,7 +269,6 @@ pub struct OpenRequest {
     /// clock start (the parked-clock discipline only protects the track
     /// that starts the clock), so the picture can trail the sound by up
     /// to that depth. Default off: the join stays one coherent moment.
-    pub audio_leading: bool,
     /// Write the §12.4 capture-recorder CSV here on close, sampled at
     /// 100 ms by an engine-owned thread — for hosts that cannot drive
     /// the recorder themselves (the managed ABI; bm-probe polls it
@@ -300,7 +299,6 @@ impl OpenRequest {
             buffer_depth_ms: None,
             liveness: SourceLiveness::default(),
             audio_track: 0,
-            audio_leading: false,
             diag_csv: None,
             diag_csv_append: false,
             max_divergence_ms: None,
@@ -413,7 +411,12 @@ impl Session {
             audio_active: AtomicBool::new(false),
             audio_tail_out: AtomicU64::new(u64::MAX),
             clock_playing: AtomicBool::new(false),
-            audio_leading: request.audio_leading,
+            // Live playback is audio-leading, always: the sound is what a
+            // viewer notices, so a join starts audible at the first banked
+            // PCM and the picture arrives at its keyframe against the
+            // running clock. `audio_led` ands this with liveness, so VOD,
+            // whose two legs arrive together, is unaffected.
+            audio_leading: true,
             decode_preference: request.decode_preference,
             presentation_origin_us: AtomicI64::new(i64::MIN),
             captions: Mutex::new(std::collections::VecDeque::new()),

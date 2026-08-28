@@ -100,10 +100,12 @@ are modelled rather than tuned by feel, and the model is held to recorded
 delivery-gap captures from impaired live streams, committed as fixtures and run
 as tests.
 
-`audioLeadingStart` is for live sources where the audio is the content and the
-picture can trail: playback starts on the first audio rather than waiting for a
-video keyframe, which on a long-GOP lane is the difference between two seconds
-and ten.
+Live playback is audio-leading. A join starts on the first audio rather than
+waiting for a video keyframe, which on a long-GOP lane is the difference between
+two seconds and ten, and the picture arrives shortly after against the running
+clock. Audio is the master throughout: it is never rate-adjusted, time-stretched
+or discarded to let the picture catch up, so the video clock carries the whole
+correction. On-demand playback is unaffected, its two legs arriving together.
 
 ## Seeking
 

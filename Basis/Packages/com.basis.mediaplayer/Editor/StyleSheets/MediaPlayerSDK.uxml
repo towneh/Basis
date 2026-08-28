@@ -41,7 +41,6 @@
         </engine:Foldout>
 
         <engine:Foldout text="Buffering" name="BufferingFoldout" value="false" class="bvp-foldout">
-            <engine:Toggle label="Audio-Leading Start" name="AudioLeadingField" tooltip="Live sources only. Start on the first audio rather than waiting for a video keyframe — seconds faster on a long-GOP lane, at the cost of the picture trailing the sound briefly."/>
             <engine:IntegerField label="Max Divergence (ms)" name="MaxDivergenceField" tooltip="Shared playback on live sources: the furthest behind the live edge this player is allowed to fall while converging."/>
         </engine:Foldout>
 

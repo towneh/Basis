@@ -18,7 +18,6 @@ pub struct Options {
     pub audio_out: Option<std::path::PathBuf>,
     pub allow_local: bool,
     pub live: bool,
-    pub audio_lead: bool,
     pub audio_track: usize,
     pub audio_url: Option<String>,
 }
@@ -30,7 +29,6 @@ pub fn run(options: &Options) -> ExitCode {
     if options.live {
         request.liveness = media_engine::SourceLiveness::Live;
     }
-    request.audio_leading = options.audio_lead;
     request.audio_track = options.audio_track;
     let mut session = Session::open(request);
     let shared = session.shared().clone();

@@ -172,13 +172,6 @@ struct Descriptor {
     /// container's first. Switching track re-opens with a new value.
     #[serde(default)]
     audio_track: Option<u32>,
-    /// Audio-leading start: live sessions start audible at the
-    /// first banked audio instead of gating on the first video frame.
-    /// For sources where the audio is the content; the picture can
-    /// trail the sound by the video decoder's pipeline depth. Ignored
-    /// on VOD. Absent = false.
-    #[serde(default)]
-    audio_leading: bool,
     /// Absolute path the engine writes the §12.4 capture-recorder CSV
     /// to on close (sampled at 100 ms engine-side). Absent = off.
     #[serde(default)]
@@ -351,7 +344,7 @@ pub unsafe extern "C" fn bm_capabilities(out_buf: *mut u8, cap: usize) -> i32 {
 /// Open a session from a UTF-8 JSON descriptor (`desc_ptr`, `desc_len`):
 /// `{"url": "...", "audio_url": "..."?, "allow_local_addresses": bool?,
 /// "buffer_depth_ms": u32?,
-/// "liveness": "live"|"vod"?, "audio_leading": bool?, "diag_csv": "path"?,
+/// "liveness": "live"|"vod"?, "diag_csv": "path"?,
 /// "decode_preference": "hardware_with_fallback"|"hardware_only"|"software_only"?}`.
 /// Writes a generational handle to `out_handle`. Open runs asynchronously;
 /// failures surface through the snapshot (`state == Error` + error code),
@@ -388,7 +381,6 @@ pub unsafe extern "C" fn bm_session_open(
             Some("vod") => media_engine::SourceLiveness::Vod,
             _ => media_engine::SourceLiveness::Auto,
         };
-        request.audio_leading = descriptor.audio_leading;
         request.diag_csv = descriptor.diag_csv.map(std::path::PathBuf::from);
         request.diag_csv_append = descriptor.diag_csv_append;
         request.max_divergence_ms = descriptor.max_divergence_ms;

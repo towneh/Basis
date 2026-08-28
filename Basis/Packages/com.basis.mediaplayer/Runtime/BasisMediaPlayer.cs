@@ -66,12 +66,6 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
              "an HLS playlist decides for itself, whatever is set here.")]
     public BmLiveness liveness = BmLiveness.Auto;
 
-    [Tooltip("Audio-leading start for live sources where the audio is the content " +
-             "(DJ/club streams): sound starts at the first banked audio instead of " +
-             "waiting for a video keyframe. The picture appears at its keyframe and " +
-             "can trail the sound by the decoder's pipeline depth. Ignored on VOD.")]
-    public bool audioLeadingStart;
-
     [Tooltip("Shared playback, live sources: the furthest behind the live edge this " +
              "viewer may sit, milliseconds (a ceiling on automatic buffer growth). " +
              "Live position is never hard-synced between viewers — this bound is the " +
@@ -783,8 +777,6 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             json.Append(",\"liveness\":\"vod\"");
         if (_audioTrackIndex > 0)
             json.Append($",\"audio_track\":{_audioTrackIndex}");
-        if (audioLeadingStart)
-            json.Append(",\"audio_leading\":true");
         if (maxDivergenceMs > 0)
             json.Append($",\"max_divergence_ms\":{maxDivergenceMs}");
         if (DecodePreference == BmDecodePreference.HardwareOnly)

@@ -54,7 +54,6 @@ public class BasisMediaPlayerEditor : Editor
         BindByName("AndroidUrlField", "androidUrl");
         BindByName("LivenessField", "liveness");
         BindByName("PlayOnStartField", "playOnStart");
-        BindByName("AudioLeadingField", "audioLeadingStart");
         BindByName("MaxDivergenceField", "maxDivergenceMs");
         BindByName("EngineCaptureField", "engineCapture");
         BindByName("EngineCaptureFileField", "engineCaptureFileName");

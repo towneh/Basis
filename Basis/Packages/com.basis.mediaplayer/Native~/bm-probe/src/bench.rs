@@ -15,8 +15,6 @@ pub struct Options {
     pub seek_to_ms: Option<u64>,
     pub allow_local: bool,
     pub live: bool,
-    /// Audio-leading start: startup measures time-to-first-audio.
-    pub audio_lead: bool,
     /// Skip the seek phase (lanes whose demuxer refuses seeks).
     pub no_seek: bool,
     pub timeout_s: u64,
@@ -101,7 +99,6 @@ fn bench_run(options: &Options) -> Result<RunResult, String> {
     if options.live {
         request.liveness = media_engine::SourceLiveness::Live;
     }
-    request.audio_leading = options.audio_lead;
 
     let open_at = Instant::now();
     let mut session = Session::open(request);
@@ -142,11 +139,11 @@ fn bench_run(options: &Options) -> Result<RunResult, String> {
         // Audio-only lanes never present: their "first frame" is the
         // first audible audio. Playing is only reachable without video
         // via the audio thread, so this cannot fire early on A/V lanes.
-        // An audio-leading start is measured the same way — the
-        // budget it buys is time-to-sound.
+        // Live lanes are audio-leading, so their budget is time-to-sound
+        // and it is measured the same way.
         if state == State::Playing as u32
             && audio.frames > 0
-            && (options.audio_lead || !px.video_active.load(Ordering::Relaxed))
+            && (options.live || !px.video_active.load(Ordering::Relaxed))
         {
             result.ttff = Some(open_at.elapsed());
             break;
