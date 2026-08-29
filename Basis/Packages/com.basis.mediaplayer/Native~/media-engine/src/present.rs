@@ -148,6 +148,7 @@ fn presented(px: &PipelineShared, pts: MediaTime) {
     px.shared
         .position_us
         .store(pts.as_micros(), Ordering::Relaxed);
+    crate::pipeline::note_presented(&px.presentation_origin_us, pts);
     if px.state() == State::Buffering as u32 {
         px.set_state(State::Playing);
     }

@@ -72,6 +72,27 @@ fn av_offset_us(
     }
 }
 
+/// Record the media time video presentation began at, once per generation.
+///
+/// The A/V offset means nothing until video has presented, and the clock's
+/// own start cannot answer that: on an audio-leading start the ring starts
+/// the clock, so the video thread never reaches the clock-start branch and
+/// the origin would stay unset for the whole session. Every live session is
+/// audio-leading, so gating the offset on the clock origin alone left it
+/// reporting the unknown sentinel on exactly the lane it exists to measure.
+///
+/// First writer wins: a video-led start sets it at the clock, ahead of any
+/// presentation, and that is the origin worth keeping. A flush clears it, so
+/// the next generation arms its own.
+pub(crate) fn note_presented(origin: &std::sync::atomic::AtomicI64, pts: MediaTime) {
+    let _ = origin.compare_exchange(
+        i64::MIN,
+        pts.as_micros(),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
 /// Whether the clock should keep waiting for the other leg.
 ///
 /// The wait is **per join**: `since` holds the wall time this one began, and
@@ -1602,6 +1623,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         px.shared
                             .position_us
                             .store(lease.pts.as_micros(), Ordering::Relaxed);
+                        note_presented(&px.presentation_origin_us, lease.pts);
                         if px.state() == State::Buffering as u32 {
                             px.set_state(State::Playing);
                         }
@@ -2560,6 +2582,43 @@ mod tests {
         );
         assert_eq!(av_offset_us(None, true, 5_000_000), i32::MIN, "no playhead");
         assert_eq!(av_offset_us(ph, true, 1_020_000), 20_000);
+    }
+
+    /// What arms the offset's own gate. The clock's start cannot answer
+    /// "has video presented" on its own: an audio-leading start has the ring
+    /// start the clock, so the video thread never reaches the clock-start
+    /// branch, and every live session is audio-leading.
+    #[test]
+    fn presentation_arms_the_origin_and_the_first_writer_wins() {
+        use std::sync::atomic::AtomicI64;
+        let origin = AtomicI64::new(i64::MIN);
+        note_presented(&origin, ms(1_000));
+        assert_eq!(
+            origin.load(Ordering::Relaxed),
+            1_000_000,
+            "an audio-led start arms the origin at the first presented frame"
+        );
+        note_presented(&origin, ms(1_040));
+        assert_eq!(
+            origin.load(Ordering::Relaxed),
+            1_000_000,
+            "later frames of the same generation do not move it"
+        );
+
+        // A video-led start sets it at the clock, ahead of any presentation,
+        // and that is the origin worth keeping.
+        let led = AtomicI64::new(500_000);
+        note_presented(&led, ms(1_000));
+        assert_eq!(
+            led.load(Ordering::Relaxed),
+            500_000,
+            "the clock's origin wins"
+        );
+
+        // A flush clears it; the next generation arms its own.
+        led.store(i64::MIN, Ordering::Relaxed);
+        note_presented(&led, ms(9_000));
+        assert_eq!(led.load(Ordering::Relaxed), 9_000_000);
     }
 
     /// The sentinel stays reachable: a real value is clamped clear of it, so
