@@ -403,7 +403,7 @@ impl Session {
             audio_tail_out: AtomicU64::new(u64::MAX),
             clock_playing: AtomicBool::new(false),
             decode_preference: request.decode_preference,
-            presentation_origin_us: AtomicI64::new(i64::MIN),
+            presented_generation: AtomicU64::new(pipeline::NO_GENERATION),
             captions: Mutex::new(std::collections::VecDeque::new()),
             user_data: Mutex::new(pipeline::UserDataRing::default()),
             audio_tracks: Mutex::new(Vec::new()),

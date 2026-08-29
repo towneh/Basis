@@ -681,6 +681,21 @@ spread) is the richer shared corpus.
 Current state, not a plan. Each is something the engine does not do, phrased so
 a reader can tell a deliberate refusal from an unbuilt path.
 
+- **The A/V offset's flush race has no automated row.** The offset is computed
+  on the audio thread and gated on the presentation origin, which is cleared
+  where the generation advances — ahead of both Flush sends, so neither worker
+  can observe the new timeline against the old origin, and a pool lease carries
+  the generation it was published under so an in-flight render cannot re-arm
+  from a retired timeline. Both predicates are pinned by unit rows, and
+  `a_seek_clears_the_offset_and_re_arms_on_the_new_timeline` pins the end-to-end
+  clear and re-arm. **None of them pins the interleaving.** Reverting the
+  clear-to-the-generation-bump leaves every one of them green: the video thread
+  reaches its own Flush fast enough that the sentinel appears regardless, and
+  holding it back long enough to lose the race needs a pause point in
+  `run_video` that does not exist. Adding one is test-only instrumentation on
+  the media path, judged not worth it for a value nothing steers on — so the
+  ordering is carried by the code and its comments rather than by a row, and a
+  change to the seek path's ordering will not be caught here.
 - Nothing cancels a hostname resolution once the platform resolver has
   started one. The ceiling on a resolve bounds how long a caller waits,
   and the cap on resolves in flight bounds how many stuck lookups can

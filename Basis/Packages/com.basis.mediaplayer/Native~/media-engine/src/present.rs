@@ -140,7 +140,7 @@ pub fn select_for_render(
 /// Presentation bookkeeping, wherever selection ran: position, the
 /// Present out-count, the Buffering→Playing transition.
 #[cfg(any(windows, target_os = "android"))]
-fn presented(px: &PipelineShared, pts: MediaTime) {
+fn presented(px: &PipelineShared, pts: MediaTime, generation: u64) {
     px.diag
         .stage(Stage::Present)
         .out_count
@@ -148,7 +148,7 @@ fn presented(px: &PipelineShared, pts: MediaTime) {
     px.shared
         .position_us
         .store(pts.as_micros(), Ordering::Relaxed);
-    crate::pipeline::note_presented(&px.presentation_origin_us, pts);
+    crate::pipeline::note_presented(px, generation);
     if px.state() == State::Buffering as u32 {
         px.set_state(State::Playing);
     }
@@ -191,7 +191,7 @@ pub fn render_present(px: &PipelineShared) -> bool {
         }
     };
     if fresh {
-        presented(px, lease.pts);
+        presented(px, lease.pts, lease.generation);
     }
     px.pool.release(lease);
     fresh
@@ -211,7 +211,7 @@ pub fn render_take(px: &PipelineShared) -> Option<media_decode::VideoFrame> {
     let mut lease = select_for_render(&px.present, &px.pool, wall)?;
     let frame = lease.take_frame();
     if frame.is_some() {
-        presented(px, lease.pts);
+        presented(px, lease.pts, lease.generation);
     }
     px.pool.release(lease);
     frame
@@ -236,7 +236,7 @@ mod tests {
     fn parked_clock_selects_nothing() {
         let shared = PresentShared::new();
         let pool = FramePool::new();
-        assert!(pool.try_publish(frame(0)).is_ok());
+        assert!(pool.try_publish(frame(0), 0).is_ok());
         assert!(select_for_render(&shared, &pool, MediaTime::from_millis(100)).is_none());
         shared.mirror_clock(MediaTime::from_millis(100), MediaTime::ZERO, true);
         assert!(select_for_render(&shared, &pool, MediaTime::from_millis(100)).is_some());
@@ -297,7 +297,7 @@ mod tests {
                 let now = MediaTime::from_micros(wall);
                 // Decode runs ahead: keep the pool topped up with the next
                 // couple of frames, as the pipeline's cushion does.
-                while pool.try_publish(frame(next_pts)).is_ok() {
+                while pool.try_publish(frame(next_pts), 0).is_ok() {
                     next_pts += FRAME_US;
                 }
                 shared.note_event(now);
@@ -351,7 +351,7 @@ mod tests {
             let mut selections: Vec<(i64, i64)> = Vec::new();
             for event in 0..360 {
                 let now = MediaTime::from_micros(wall + jitter(event + 200));
-                while pool.try_publish(frame(next_pts)).is_ok() {
+                while pool.try_publish(frame(next_pts), 0).is_ok() {
                     next_pts += FRAME_US;
                 }
                 shared.note_event(now);

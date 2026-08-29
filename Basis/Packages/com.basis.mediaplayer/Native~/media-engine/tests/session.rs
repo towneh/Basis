@@ -872,3 +872,92 @@ fn user_data_lane_delivers_every_frames_message() {
     );
     assert_eq!(foreign[0].pts_us, ours[0].pts_us);
 }
+
+/// A seek clears the A/V offset and only re-arms it from the new timeline.
+///
+/// **This does not cover the interleaving it looks like it covers.** The
+/// defect it was written beside is a race: the offset is computed on the
+/// audio thread while the origin used to be cleared on the *video* thread's
+/// own Flush, so audio could install the new generation and publish an
+/// offset pairing the old video position with the new playhead. Reverting
+/// the fix leaves this row green — the video thread reaches its Flush fast
+/// enough that the sentinel appears anyway, and nothing here can hold it
+/// back. Forcing that order needs a seam in `run_video` that does not
+/// exist; the predicates on both sides are pinned by unit rows instead
+/// (`a_frame_from_a_retired_timeline_cannot_arm_the_origin` and
+/// `presentation_arms_the_origin_and_the_first_writer_wins`), and the gap
+/// is recorded in TESTING.md.
+///
+/// What it does pin, end to end: a seek clears the origin at all, and the
+/// offset comes back only once the new timeline has presented. Both halves
+/// assert they were reached, so neither can pass by never arriving.
+#[test]
+fn a_seek_clears_the_offset_and_re_arms_on_the_new_timeline() {
+    let session = Session::open(OpenRequest::new(fixture_path()));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    let mut buf = vec![0f32; 2048];
+    let pull = |buf: &mut [f32]| {
+        if shared.audio_rate.load(Ordering::Relaxed) > 0
+            && shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        {
+            Session::read_audio(&px, buf);
+        }
+    };
+
+    // Play until the offset is genuinely being exported, so the pre-seek
+    // state is "armed" and a stale carry-over would be visible.
+    let armed = wait_for(Duration::from_secs(20), || {
+        pull(&mut buf);
+        std::thread::sleep(Duration::from_millis(2));
+        shared.av_offset_us.load(Ordering::Relaxed) != i32::MIN
+    });
+    assert!(armed, "never exported an offset before the seek");
+    // `shared.frames_presented` counts host render events, so it stays 0
+    // in a headless session; the pipeline's own present path books into the
+    // diag stage instead.
+    let presented = || {
+        px.diag
+            .stage(media_diag::Stage::Present)
+            .out_count
+            .load(Ordering::Relaxed)
+    };
+    let presented_before = presented();
+
+    session.seek(MediaTime::from_millis(1_500));
+
+    // `seek` only queues the command, so the old timeline's offset is
+    // legitimately exported until the demux thread reaches it. The clear
+    // landing is the start of the window this row is about; from there the
+    // offset must stay unknown until the new timeline presents.
+    let cleared = wait_for(Duration::from_secs(10), || {
+        pull(&mut buf);
+        std::thread::sleep(Duration::from_millis(1));
+        shared.av_offset_us.load(Ordering::Relaxed) == i32::MIN
+    });
+    assert!(
+        cleared,
+        "the seek never cleared the offset, so the origin survived the flush"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_new_presentation = false;
+    while Instant::now() < deadline {
+        let offset = shared.av_offset_us.load(Ordering::Relaxed);
+        let now_presented = presented();
+        if offset != i32::MIN {
+            assert!(
+                now_presented > presented_before,
+                "offset {offset} exported after the flush before the new                  timeline presented anything ({now_presented} presented,                  {presented_before} before the seek)"
+            );
+            saw_new_presentation = true;
+            break;
+        }
+        pull(&mut buf);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        saw_new_presentation,
+        "the new timeline never re-armed the offset, so the row proved only          that it had been cleared"
+    );
+}

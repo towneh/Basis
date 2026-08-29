@@ -70,16 +70,28 @@ fn av_offset_us(
 /// audio-leading, so gating the offset on the clock origin alone left it
 /// reporting the unknown sentinel on exactly the lane it exists to measure.
 ///
-/// First writer wins: a video-led start sets it at the clock, ahead of any
-/// presentation, and that is the origin worth keeping. A flush clears it, so
-/// the next generation arms its own.
-pub(crate) fn note_presented(origin: &std::sync::atomic::AtomicI64, pts: MediaTime) {
-    let _ = origin.compare_exchange(
-        i64::MIN,
-        pts.as_micros(),
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    );
+/// No timeline has presented yet. Generations count up from zero, so this
+/// can never collide with a real one.
+pub(crate) const NO_GENERATION: u64 = u64::MAX;
+
+/// The written value **is** the answer, which is what makes this race-free.
+/// Validating a frame's generation and then arming a separate flag is a
+/// check-then-act: a render event in flight can pass the check, a seek can
+/// advance the generation, and the stale arm then lands as though the new
+/// timeline had presented — with a first-writer rule, permanently. Recording
+/// *which* timeline presented leaves a stale write self-identifying: it names
+/// the retired generation and [`presented_this_generation`] does not match
+/// it. Nothing needs clearing at a flush either, since a generation that has
+/// presented nothing has no write to match.
+pub(crate) fn note_presented(px: &PipelineShared, generation: u64) {
+    px.presented_generation.store(generation, Ordering::Relaxed);
+}
+
+/// Whether the timeline in force has presented a frame — the A/V offset's
+/// gate. Split out so it is assertable: nothing in a test can build a
+/// `PipelineShared`.
+fn presented_this_generation(presented: u64, current: u64) -> bool {
+    presented == current
 }
 
 /// Whether the audio consumer is still pulling, as of `wall`.
@@ -198,7 +210,12 @@ pub struct PipelineShared {
     /// the video thread or the render thread. Cleared at every flush. Its
     /// one consumer is the A/V offset's gate, which needs a
     /// per-generation answer to "has video presented".
-    pub presentation_origin_us: std::sync::atomic::AtomicI64,
+    /// The generation that has presented a frame, or [`NO_GENERATION`].
+    /// Read only by the A/V offset's gate, which needs a per-generation
+    /// answer to "has video presented". It holds the answer rather than a
+    /// timestamp, so a write from a retired timeline cannot be mistaken for
+    /// the current one's.
+    pub presented_generation: std::sync::atomic::AtomicU64,
     /// Caption cues scanned from the video AUs' SEI on the demux thread,
     /// surfaced on arrival with their due PTS (§6.2/§6.12 — captions
     /// bypass the Bank's release schedule so the consumer gets the full
@@ -1451,7 +1468,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
 
         // 1. Move a parked frame into the pool; only then pull more output.
         if let Some(frame) = pending_frame.take() {
-            match px.pool.try_publish(frame) {
+            match px.pool.try_publish(frame, generation.0) {
                 Ok(()) => {
                     px.diag
                         .stage(Stage::Decode)
@@ -1465,7 +1482,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             match decoder.as_mut().expect("decoder checked").try_output() {
                 Ok(Some(frame)) => {
                     px.shared.frames_decoded.fetch_add(1, Ordering::Relaxed);
-                    match px.pool.try_publish(frame) {
+                    match px.pool.try_publish(frame, generation.0) {
                         Ok(()) => {
                             px.diag
                                 .stage(Stage::Decode)
@@ -1537,8 +1554,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     clock.set_playing(wall, true);
                     px.clock_playing.store(true, Ordering::Relaxed);
                     px.present.mirror_clock(wall, clock.now(wall), true);
-                    px.presentation_origin_us
-                        .store(first_pts.as_micros(), Ordering::Relaxed);
+                    note_presented(px, generation.0);
                 }
             }
         }
@@ -1568,7 +1584,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         px.shared
                             .position_us
                             .store(lease.pts.as_micros(), Ordering::Relaxed);
-                        note_presented(&px.presentation_origin_us, lease.pts);
+                        note_presented(px, lease.generation);
                         if px.state() == State::Buffering as u32 {
                             px.set_state(State::Playing);
                         }
@@ -1713,10 +1729,6 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 eos_after_drain = false;
                 pending_au = None;
                 pending_frame = None;
-                // Cleared per generation: the offset's gate reads it, and a
-                // value carried across a flush would arm the new timeline
-                // from the old one's presentation.
-                px.presentation_origin_us.store(i64::MIN, Ordering::Relaxed);
                 if let Some(active) = decoder.as_mut()
                     && let Err(e) = active.reset()
                 {
@@ -2006,7 +2018,10 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     // playhead. The origin is `i64::MIN` until this
                     // generation's clock starts, so it answers the question
                     // that was actually meant.
-                    px.presentation_origin_us.load(Ordering::Relaxed) != i64::MIN,
+                    presented_this_generation(
+                        px.presented_generation.load(Ordering::Relaxed),
+                        px.shared.generation.load(Ordering::Relaxed),
+                    ),
                     px.shared.position_us.load(Ordering::Relaxed),
                 ),
                 Ordering::Relaxed,
@@ -2431,10 +2446,6 @@ mod tests {
         assert!(!consumer_live(wall, i64::MIN), "never pulled is not live");
     }
 
-    fn ms(v: i64) -> MediaTime {
-        MediaTime::from_millis(v)
-    }
-
     /// The offset is a difference between two terms of the same generation,
     /// or it is nothing. A cumulative "has anything ever presented" gate lets
     /// the window after a flush export the old video position against the new
@@ -2451,41 +2462,50 @@ mod tests {
         assert_eq!(av_offset_us(ph, true, 1_020_000), 20_000);
     }
 
-    /// What arms the offset's own gate. The clock's start cannot answer
-    /// "has video presented" on its own: an audio-leading start has the ring
-    /// start the clock, so the video thread never reaches the clock-start
-    /// branch, and every live session is audio-leading.
+    /// The gate answers for the timeline in force, and only that one.
+    ///
+    /// A render event in flight across a flush still carries a lease from
+    /// the retired timeline. Because the recorded value *is* the generation
+    /// that presented, such a write names the old timeline and the gate
+    /// simply does not match it — where a validate-then-arm would have let
+    /// it through whenever the seek landed between the two steps.
     #[test]
-    fn presentation_arms_the_origin_and_the_first_writer_wins() {
-        use std::sync::atomic::AtomicI64;
-        let origin = AtomicI64::new(i64::MIN);
-        note_presented(&origin, ms(1_000));
-        assert_eq!(
-            origin.load(Ordering::Relaxed),
-            1_000_000,
-            "an audio-led start arms the origin at the first presented frame"
+    fn the_gate_answers_only_for_the_timeline_in_force() {
+        assert!(
+            !presented_this_generation(NO_GENERATION, 0),
+            "nothing has presented yet"
         );
-        note_presented(&origin, ms(1_040));
-        assert_eq!(
-            origin.load(Ordering::Relaxed),
-            1_000_000,
-            "later frames of the same generation do not move it"
+        assert!(presented_this_generation(7, 7), "this timeline presented");
+        assert!(
+            !presented_this_generation(7, 8),
+            "a frame from the retired timeline armed the new one"
         );
+        assert!(
+            !presented_this_generation(8, 7),
+            "a generation that has not been reached yet cannot answer either"
+        );
+    }
 
-        // A video-led start sets it at the clock, ahead of any presentation,
-        // and that is the origin worth keeping.
-        let led = AtomicI64::new(500_000);
-        note_presented(&led, ms(1_000));
-        assert_eq!(
-            led.load(Ordering::Relaxed),
-            500_000,
-            "the clock's origin wins"
-        );
-
-        // A flush clears it; the next generation arms its own.
-        led.store(i64::MIN, Ordering::Relaxed);
-        note_presented(&led, ms(9_000));
-        assert_eq!(led.load(Ordering::Relaxed), 9_000_000);
+    /// A flush needs no clearing step: the new generation has no matching
+    /// write until it presents one of its own, and the frame that arms it
+    /// is the one that names it.
+    #[test]
+    fn a_new_generation_starts_unarmed_and_arms_itself() {
+        let presented = std::sync::atomic::AtomicU64::new(NO_GENERATION);
+        let arm = |g: u64| presented.store(g, Ordering::Relaxed);
+        let gate =
+            |current: u64| presented_this_generation(presented.load(Ordering::Relaxed), current);
+        assert!(!gate(0));
+        arm(0);
+        assert!(gate(0), "the first frame of generation 0 arms it");
+        // A seek advances the generation. Nothing was cleared, and the gate
+        // is false regardless.
+        assert!(!gate(1), "the new generation inherited the old answer");
+        // A late render from generation 0 lands after the seek.
+        arm(0);
+        assert!(!gate(1), "a stale render armed the new generation");
+        arm(1);
+        assert!(gate(1), "the new timeline's own frame arms it");
     }
 
     /// The sentinel stays reachable: a real value is clamped clear of it, so

@@ -29,6 +29,10 @@ struct Slot {
     state: SlotState,
     pts: MediaTime,
     frame: Option<VideoFrame>,
+    /// The timeline the frame was decoded on. A flush clears the pool, but
+    /// not before the render thread can take a lease published under the
+    /// previous generation, so the frame carries its own answer.
+    generation: u64,
 }
 
 struct PoolState {
@@ -48,6 +52,8 @@ pub struct FramePool {
 /// A filled frame currently owned by the present side.
 pub struct Lease {
     pub pts: MediaTime,
+    /// The generation this frame was published under; see [`Slot`].
+    pub generation: u64,
     frame: Option<VideoFrame>,
     slot: usize,
 }
@@ -73,6 +79,7 @@ impl FramePool {
                         state: SlotState::Free,
                         pts: MediaTime::ZERO,
                         frame: None,
+                        generation: 0,
                     })
                     .collect(),
                 published: 0,
@@ -87,7 +94,7 @@ impl FramePool {
     /// the frame back as backpressure — the caller holds it and keeps
     /// presenting; it never blocks, because on M2's folded thread the
     /// presenter is the only thing that frees slots.
-    pub fn try_publish(&self, frame: VideoFrame) -> Result<(), VideoFrame> {
+    pub fn try_publish(&self, frame: VideoFrame, generation: u64) -> Result<(), VideoFrame> {
         let mut state = self.state.lock().expect("pool lock");
         let Some(slot_index) = state.slots.iter().position(|s| s.state == SlotState::Free) else {
             return Err(frame);
@@ -100,6 +107,7 @@ impl FramePool {
         slot.state = SlotState::Ready;
         slot.pts = MediaTime::from_micros(frame.pts_us());
         slot.frame = Some(frame);
+        slot.generation = generation;
         Ok(())
     }
 
@@ -138,6 +146,7 @@ impl FramePool {
         slot.state = SlotState::Leased;
         let lease = Lease {
             pts: slot.pts,
+            generation: slot.generation,
             frame: slot.frame.take(),
             slot: newest,
         };
@@ -215,7 +224,7 @@ mod tests {
     fn newest_due_frame_wins_and_older_are_recycled() {
         let pool = FramePool::new();
         for ms in [0, 33, 66] {
-            assert!(pool.try_publish(frame(ms)).is_ok());
+            assert!(pool.try_publish(frame(ms), 0).is_ok());
         }
         // At t=50ms, frames 0 and 33 are due; 33 wins, 0 is dropped.
         let lease = pool.take_due(MediaTime::from_millis(50)).expect("due");
@@ -233,9 +242,9 @@ mod tests {
     fn full_pool_is_backpressure_not_a_drop() {
         let pool = FramePool::new();
         for ms in 0..POOL_SLOTS as i64 {
-            assert!(pool.try_publish(frame(ms * 33)).is_ok());
+            assert!(pool.try_publish(frame(ms * 33), 0).is_ok());
         }
-        assert!(pool.try_publish(frame(999)).is_err());
+        assert!(pool.try_publish(frame(999), 0).is_err());
         assert_eq!(pool.dropped(), 0);
         // Present frees slots (all four due: newest wins, three recycled);
         // the publish then lands.
@@ -246,6 +255,6 @@ mod tests {
         );
         assert_eq!(pool.dropped(), 3);
         pool.release(lease);
-        assert!(pool.try_publish(frame(999)).is_ok());
+        assert!(pool.try_publish(frame(999), 0).is_ok());
     }
 }
