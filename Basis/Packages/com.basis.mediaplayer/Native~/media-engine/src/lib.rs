@@ -411,12 +411,6 @@ impl Session {
             audio_active: AtomicBool::new(false),
             audio_tail_out: AtomicU64::new(u64::MAX),
             clock_playing: AtomicBool::new(false),
-            // Live playback is audio-leading, always: the sound is what a
-            // viewer notices, so a join starts audible at the first banked
-            // PCM and the picture arrives at its keyframe against the
-            // running clock. `audio_led` ands this with liveness, so VOD,
-            // whose two legs arrive together, is unaffected.
-            audio_leading: true,
             decode_preference: request.decode_preference,
             presentation_origin_us: AtomicI64::new(i64::MIN),
             captions: Mutex::new(std::collections::VecDeque::new()),

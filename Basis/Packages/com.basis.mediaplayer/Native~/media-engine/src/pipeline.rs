@@ -38,12 +38,6 @@ const IDLE_WAIT: Duration = Duration::from_millis(50);
 /// Decode-thread receive granularity: bounds presentation-timing error.
 const DECODE_TICK: Duration = Duration::from_millis(4);
 
-/// How long the clock waits for audio to reach the ring before starting on
-/// video alone. Bounds the preroll below: an audio leg that never arrives —
-/// a decoder that fails to build, a track the server announces and never
-/// sends — must not hold the picture indefinitely. Well clear of the ~0.78 s
-/// audio delivery lag measured on the live 5.1 lane.
-const AUDIO_PREROLL_CAP: Duration = Duration::from_millis(2000);
 /// A consumer pull within this window keeps audio as the clock master.
 const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 
@@ -91,23 +85,6 @@ pub(crate) fn note_presented(origin: &std::sync::atomic::AtomicI64, pts: MediaTi
         Ordering::Relaxed,
         Ordering::Relaxed,
     );
-}
-
-/// Whether the clock should keep waiting for the other leg.
-///
-/// The wait is **per join**: `since` holds the wall time this one began, and
-/// carrying it across a generation would spend the next join's wait before it
-/// starts — a seek or a reconnect landing inside the wait is exactly when that
-/// happens. Callers clear `since` at a flush and once the clock runs; clearing
-/// it is what makes the next wait a fresh one, which is the property the rows
-/// below pin.
-fn preroll_wait(since: &mut Option<MediaTime>, wall: MediaTime, awaiting: bool) -> bool {
-    if !awaiting {
-        *since = None;
-        return false;
-    }
-    let start = *since.get_or_insert(wall);
-    wall - start < MediaTime::from_micros(AUDIO_PREROLL_CAP.as_micros() as i64)
 }
 
 fn consumer_live(wall: MediaTime, last_pull_us: i64) -> bool {
@@ -215,7 +192,6 @@ pub struct PipelineShared {
     /// Audio-leading start requested by the descriptor (honoured on live
     /// sessions only; the audio thread combines it with the Bank's
     /// liveness).
-    pub audio_leading: bool,
     /// Decode-route preference from the descriptor (§6.7): consumed by
     /// the video thread's route resolution.
     pub decode_preference: crate::DecodePreference,
@@ -1440,9 +1416,6 @@ fn reroute_hw_fallback(
 /// decoded frame in `pending_frame`, a refusing MFT parks the AU in
 /// `pending_au`, and both retry each tick while presentation keeps running.
 pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
-    // Wall time the preroll wait began, so it can be bounded. Cleared
-    // whenever the wait does not apply, so a later join times its own.
-    let mut preroll_since: Option<MediaTime> = None;
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
     let mut sink = VideoSink::new();
     let mut generation = {
@@ -1563,13 +1536,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             // legs arrive together, so waiting there would add startup latency
             // for nothing. An audio-leading start is by definition not waiting
             // on audio.
-            let awaiting_audio = parked
-                && live
-                && !px.audio_leading
-                && px.audio_active.load(Ordering::Relaxed)
-                && px.audio_shared.pushed_frames.load(Ordering::Relaxed) == 0;
-            let preroll = preroll_wait(&mut preroll_since, wall, awaiting_audio);
-            if !gated && !preroll {
+            if !gated {
                 let mut clock = px.clock.lock().expect("clock lock");
                 // The generations must agree: after a seek parks the clock,
                 // pre-flush frames still sit in the pool until the Flush is
@@ -1593,7 +1560,6 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     px.present.mirror_clock(wall, clock.now(wall), true);
                     px.presentation_origin_us
                         .store(first_pts.as_micros(), Ordering::Relaxed);
-                    preroll_since = None;
                 }
             }
         }
@@ -1768,13 +1734,9 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 eos_after_drain = false;
                 pending_au = None;
                 pending_frame = None;
-                // The preroll wait belongs to the join it started in. Carried
-                // across a generation, its elapsed time is already spent and
-                // the next join starts the clock without waiting for audio at
-                // all — a seek or a reconnect landing inside the wait is
-                // exactly when that happens, and neither is a lane the gate's
-                // straight-through tests take.
-                preroll_since = None;
+                // Cleared per generation: the offset's gate reads it, and a
+                // value carried across a flush would arm the new timeline
+                // from the old one's presentation.
                 px.presentation_origin_us.store(i64::MIN, Ordering::Relaxed);
                 if let Some(active) = decoder.as_mut()
                     && let Err(e) = active.reset()
@@ -1887,19 +1849,6 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     // otherwise flood the bounded event queue).
     let mut trimmed_reported = 0u64;
     let mut last_trim_event = MediaTime::from_secs(-3600);
-    // Live video-led joins: the presentation origin — the pts the parked
-    // clock will start at, latched from the earliest decoded video frame
-    // (frames are not consumed before the clock starts, so the pool's
-    // oldest ready pts IS the start point). Audio preceding it is shed,
-    // audio at or after it is kept; until it is known, audio parks and
-    // banks upstream (the release gate keeps video flowing past it).
-    let mut join_origin: Option<i64> = None;
-    // Audio has reached the ring this generation: the join is over and
-    // the shed stands down.
-    let mut audio_joined = false;
-    // Pre-join span shed this generation, reported once at the join.
-    let mut shed_us: i64 = 0;
-    let mut shed_reported = false;
     let mut draining = false;
     let mut decoder_dry = false;
 
@@ -1923,29 +1872,6 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         // starts the clock exactly as an audio-only session would, so
         // the join is audible immediately and video appears at its
         // keyframe against the running clock.
-        let audio_led = live && px.audio_leading;
-        // The pre-join shed only applies to live video-led sessions: on
-        // VOD the read-ahead never runs meaningfully ahead of the origin,
-        // on audio-only sessions the ring itself starts the clock, and on
-        // an audio-leading start the first banked audio IS the join.
-        let video_led = live && !audio_led && px.video_active.load(Ordering::Relaxed);
-        // The shed is a join mechanism only: once audio has entered the
-        // ring this generation, later timeline breaks (HLS wrap splices
-        // restart timestamps) must not re-shed against a stale origin.
-        let gate = video_led && !audio_joined;
-        if gate && join_origin.is_none() {
-            // The clock-start store is authoritative; the pool sample
-            // covers the hold window, where decoded frames sit unconsumed
-            // (post-start, a frame can be published and presented inside
-            // one video-thread iteration — sampling would race).
-            let started = px.presentation_origin_us.load(Ordering::Relaxed);
-            join_origin = if started != i64::MIN {
-                Some(started)
-            } else {
-                px.pool.first_ready_pts().map(|p| p.as_micros())
-            };
-        }
-
         // 1. Move pending PCM into the ring. A full ring is backpressure
         //    while the consumer pulls — and briefly at startup, before its
         //    first pull. Video-led live joins gate admission on the
@@ -1961,54 +1887,31 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         //    discard in every state: with no video join point there is
         //    nothing to grade staleness against, and a headless session
         //    must not deadlock behind a consumer that never pulls.
-        let origin_pending = gate && join_origin.is_none();
-        if !origin_pending && let (Some(chunk), Some(out)) = (pending.as_mut(), producer.as_mut()) {
+        if let (Some(chunk), Some(out)) = (pending.as_mut(), producer.as_mut()) {
             let rate = out.sample_rate().max(1);
             let channels = out.channels().max(1) as usize;
             let remaining = &chunk.data[chunk.offset..];
             if !remaining.is_empty() {
                 let frames_left = remaining.len() / channels;
-                // Drop what still precedes the origin: encoder priming
-                // (negative pts), plus the pre-join span on gated lanes.
-                let origin = if gate { join_origin.unwrap_or(0) } else { 0 };
-                let drop_frames =
-                    frames_before_origin(chunk.pts_us.saturating_sub(origin), frames_left, rate);
+                // Drop what still precedes the media-time origin: encoder
+                // priming, which carries a negative pts.
+                let drop_frames = frames_before_origin(chunk.pts_us, frames_left, rate);
                 if drop_frames > 0 {
                     chunk.offset += drop_frames * channels;
-                    if gate && chunk.pts_us >= 0 {
-                        shed_us += drop_frames as i64 * 1_000_000 / i64::from(rate);
-                    }
                     chunk.pts_us += drop_frames as i64 * 1_000_000 / i64::from(rate);
                 } else {
                     let written = out.push(chunk.pts_us, remaining);
                     chunk.offset += written;
                     chunk.pts_us += (written / channels) as i64 * 1_000_000 / i64::from(rate);
-                    if written > 0 {
-                        audio_joined = true;
-                        if shed_us > 0 && !shed_reported {
-                            shed_reported = true;
-                            px.diag.event(
-                                px.wall.now(),
-                                EventCode::AudioShed,
-                                Stage::AudioRing,
-                                format!("pre-join audio shed: {} ms", shed_us / 1000),
-                            );
-                        }
-                    }
                     if written == 0 {
                         let wall = px.wall.now();
                         let live_consumer = consumer_live(
                             wall,
                             px.audio_shared.last_pull_wall_us.load(Ordering::Relaxed),
                         );
-                        // On video-led live lanes a stuck chunk is at/after
-                        // the join point: it only discards once Playing (a
-                        // dead consumer), never during the hold — that
-                        // primed audio is the depth the viewer joins with.
-                        let armed = !video_led || px.state() == State::Playing as u32;
                         if live_consumer {
                             park_since = None;
-                        } else if armed && wall - *park_since.get_or_insert(wall) > AUDIO_LIVENESS {
+                        } else if wall - *park_since.get_or_insert(wall) > AUDIO_LIVENESS {
                             px.diag
                                 .stage(Stage::AudioRing)
                                 .drops
@@ -2060,7 +1963,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         //     the parked clock at the first banked PCM's pts and own the
         //     clock-derived position (until video presents, nothing else
         //     does either).
-        if !px.video_active.load(Ordering::Relaxed) || audio_led {
+        if !px.video_active.load(Ordering::Relaxed) || live {
             let ringing = producer.as_ref().is_some_and(|p| !p.is_drained());
             let state = px.state();
             if ringing
@@ -2357,12 +2260,6 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 pending = None;
                 pending_au = None;
                 park_since = None;
-                // The pool was cleared with the old timeline: the join
-                // origin re-latches from the first post-seek frame.
-                join_origin = None;
-                audio_joined = false;
-                shed_us = 0;
-                shed_reported = false;
                 draining = false;
                 decoder_dry = false;
                 if let Some(active) = decoder.as_mut()
@@ -2627,56 +2524,6 @@ mod tests {
     fn a_real_av_offset_never_collides_with_the_sentinel() {
         let ph = Some(MediaTime::from_micros(i64::MAX / 2));
         assert!(av_offset_us(ph, true, i64::MIN / 2) > i32::MIN);
-    }
-
-    #[test]
-    fn the_preroll_wait_is_bounded_and_ends_when_audio_arrives() {
-        let mut since = None;
-        assert!(
-            preroll_wait(&mut since, ms(0), true),
-            "waits from the start"
-        );
-        assert!(
-            preroll_wait(&mut since, ms(1_999), true),
-            "still inside the cap"
-        );
-        assert!(
-            !preroll_wait(&mut since, ms(2_001), true),
-            "an audio leg that never arrives must not hold the picture"
-        );
-        // Audio lands: the wait ends and its start is forgotten.
-        assert!(!preroll_wait(&mut since, ms(2_500), false));
-        assert!(since.is_none(), "a finished wait leaves no start behind");
-    }
-
-    /// The generation-boundary case. A seek or a reconnect landing inside the
-    /// wait must give the next join its own, not the remains of this one.
-    #[test]
-    fn a_new_join_gets_a_fresh_preroll_wait() {
-        let mut since = None;
-        assert!(preroll_wait(&mut since, ms(0), true));
-        // ... the wait expires without audio ever arriving.
-        assert!(!preroll_wait(&mut since, ms(3_000), true));
-
-        // Without the reset the next join inherits a spent wait: `since` still
-        // reads 0, so at 3 s it is already past the cap and the clock starts
-        // without waiting for audio at all.
-        assert!(
-            !preroll_wait(&mut since, ms(3_000), true),
-            "the spent wait is what a carried-over start looks like"
-        );
-
-        // The flush handler clears it; the next join waits its own cap.
-        since = None;
-        assert!(
-            preroll_wait(&mut since, ms(3_000), true),
-            "a fresh join must wait again"
-        );
-        assert!(
-            preroll_wait(&mut since, ms(4_999), true),
-            "and for the full cap, measured from its own start"
-        );
-        assert!(!preroll_wait(&mut since, ms(5_001), true));
     }
 
     #[test]

@@ -151,9 +151,11 @@ pub enum EventCode {
     Discontinuity = 11,
     CapabilityProbe = 12,
     Error = 13,
-    /// Live join: audio preceding the presentation origin was shed
-    /// (never presentable — the clock starts at the video join point).
-    AudioShed = 14,
+    // 14 is retired. It reported the video-led join's pre-join audio
+    // shed, which no longer exists: every live session is audio-leading,
+    // so the first banked audio is the join and nothing precedes it.
+    // Codes carry explicit discriminants and are stable, so 14 stays
+    // spent rather than being reused.
     /// The ring's serve-side trim engaged: banked audio crossed the
     /// high-water mark and excess frames were discarded to keep the
     /// serve on the media timeline (a source delivering more samples
