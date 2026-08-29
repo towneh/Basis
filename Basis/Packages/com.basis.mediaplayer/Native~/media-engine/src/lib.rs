@@ -260,15 +260,6 @@ pub struct OpenRequest {
     /// an index remembered across a source change must not break
     /// playback.
     pub audio_track: usize,
-    /// Audio-leading start (descriptor-stated, live lanes only): the
-    /// session starts audible the moment banked audio is ready instead
-    /// of gating presentation on the first video frame — for sources
-    /// where the audio is the content and a keyframe wait would mute
-    /// the join. Video appears at its keyframe and runs against the
-    /// audio clock; its decode pipeline depth is not absorbed by the
-    /// clock start (the parked-clock discipline only protects the track
-    /// that starts the clock), so the picture can trail the sound by up
-    /// to that depth. Default off: the join stays one coherent moment.
     /// Write the §12.4 capture-recorder CSV here on close, sampled at
     /// 100 ms by an engine-owned thread — for hosts that cannot drive
     /// the recorder themselves (the managed ABI; bm-probe polls it

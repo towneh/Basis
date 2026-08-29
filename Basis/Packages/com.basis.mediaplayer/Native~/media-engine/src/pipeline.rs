@@ -41,11 +41,6 @@ const DECODE_TICK: Duration = Duration::from_millis(4);
 /// A consumer pull within this window keeps audio as the clock master.
 const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 
-/// Whether the audio consumer is still pulling, as of `wall`.
-///
-/// `i64::MIN` is `last_pull_wall_us`'s never-pulled sentinel and would
-/// overflow the subtraction, so it is screened before rather than after:
-/// a consumer that never arrived is not one to hold anything open for.
 /// Presented video pts minus the audio playhead, or the unknown sentinel.
 ///
 /// Both terms have to belong to the same generation for the difference to mean
@@ -87,6 +82,11 @@ pub(crate) fn note_presented(origin: &std::sync::atomic::AtomicI64, pts: MediaTi
     );
 }
 
+/// Whether the audio consumer is still pulling, as of `wall`.
+///
+/// `i64::MIN` is `last_pull_wall_us`'s never-pulled sentinel and would
+/// overflow the subtraction, so it is screened before rather than after:
+/// a consumer that never arrived is not one to hold anything open for.
 fn consumer_live(wall: MediaTime, last_pull_us: i64) -> bool {
     last_pull_us != i64::MIN && wall - MediaTime::from_micros(last_pull_us) <= AUDIO_LIVENESS
 }
@@ -189,17 +189,15 @@ pub struct PipelineShared {
     /// `set_playing` site; the `State` gate alone is not enough — a
     /// present in flight can race a seek back to Playing.
     pub clock_playing: std::sync::atomic::AtomicBool,
-    /// Audio-leading start requested by the descriptor (honoured on live
-    /// sessions only; the audio thread combines it with the Bank's
-    /// liveness).
     /// Decode-route preference from the descriptor (§6.7): consumed by
     /// the video thread's route resolution.
     pub decode_preference: crate::DecodePreference,
-    /// The pts the parked clock started presentation at this generation
-    /// (µs; `i64::MIN` = not started). Written by the video thread at
-    /// clock start — the authoritative join point for the audio thread's
-    /// pre-join shed, which cannot reliably sample the pool once frames
-    /// are being consumed.
+    /// The pts this generation began presenting at (µs; `i64::MIN` = not
+    /// yet armed). A video-led clock start arms it there; otherwise the
+    /// first presented frame does, through `note_presented`, from either
+    /// the video thread or the render thread. Cleared at every flush. Its
+    /// one consumer is the A/V offset's gate, which needs a
+    /// per-generation answer to "has video presented".
     pub presentation_origin_us: std::sync::atomic::AtomicI64,
     /// Caption cues scanned from the video AUs' SEI on the demux thread,
     /// surfaced on arrival with their due PTS (§6.2/§6.12 — captions
@@ -1513,29 +1511,10 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         {
             let parked = !px.clock.lock().expect("clock lock").is_playing();
             let gated = parked && px.bank.bank.lock().expect("bank lock").holding(wall);
-            // Preroll, the second half of the start condition. The Bank's hold
-            // above answers "is enough banked"; this answers "has the other leg
-            // anything to play", which is the question that was missing.
-            //
-            // Video is decodable a delivery latency ahead of the audio carrying
-            // the same timestamps — ~0.78 s on the live 5.1 lane. Starting the
-            // clock on video alone therefore starts it at a media time whose
-            // audio has not arrived, so every chunk is late the moment it lands
-            // and the serve trim discards it: 0.5 to 3 s of audio destroyed at
-            // every join, and a clock snap of seconds once the master appears.
-            //
-            // `pushed_frames` is the right signal rather than the ring's
-            // occupancy or its base pts: the shed already drops everything
-            // before the presentation origin, so a non-zero count means audio
-            // *at or after the origin* has reached the ring, which is the
-            // condition worth waiting for. It cannot deadlock against the audio
-            // thread, which takes that origin from the frame pool rather than
-            // from the clock and so can shed and push while this waits.
-            // Live and video-led only. The asymmetry this waits out is a
-            // live one: an on-demand source is read ahead of 1x and its two
-            // legs arrive together, so waiting there would add startup latency
-            // for nothing. An audio-leading start is by definition not waiting
-            // on audio.
+            // The Bank's hold is the whole start condition here: on a live
+            // lane the ring has normally started the clock already, and this
+            // branch is what starts it where nothing else has — an on-demand
+            // source, or a session with no audio at all.
             if !gated {
                 let mut clock = px.clock.lock().expect("clock lock");
                 // The generations must agree: after a seek parks the clock,
@@ -1868,25 +1847,16 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             pending_au = None;
         }
 
-        // Audio-leading start (descriptor-stated): the audio ring
-        // starts the clock exactly as an audio-only session would, so
-        // the join is audible immediately and video appears at its
-        // keyframe against the running clock.
-        // 1. Move pending PCM into the ring. A full ring is backpressure
-        //    while the consumer pulls — and briefly at startup, before its
-        //    first pull. Video-led live joins gate admission on the
-        //    presentation origin instead: pre-join audio is shed (never
-        //    heard — presentation starts at the video join point), primed
-        //    audio at or after it is kept even against a full ring, and
-        //    while the origin is unknown the chunk simply parks — the
-        //    Bank banks the track upstream in compressed form. Once
-        //    Playing, a consumer that stops pulling for the liveness
-        //    window is inert and the stuck chunk is discarded so it
-        //    cannot stall the pipeline behind it — the same rule the
-        //    Ended logic applies. Non-gated lanes keep the inert-consumer
-        //    discard in every state: with no video join point there is
-        //    nothing to grade staleness against, and a headless session
-        //    must not deadlock behind a consumer that never pulls.
+        // 1. Move pending PCM into the ring, dropping whatever still
+        //    precedes the media-time origin — encoder priming, which
+        //    carries a negative pts. A full ring is backpressure while the
+        //    consumer pulls, and briefly at startup before its first pull;
+        //    a chunk stuck against one is discarded once the consumer has
+        //    been inert for the liveness window, so it cannot stall the
+        //    pipeline behind it and a headless session cannot deadlock
+        //    behind a consumer that never pulls. That rule applies in
+        //    every state and on every lane — the same one the Ended logic
+        //    uses.
         if let (Some(chunk), Some(out)) = (pending.as_mut(), producer.as_mut()) {
             let rate = out.sample_rate().max(1);
             let channels = out.channels().max(1) as usize;
