@@ -303,18 +303,29 @@ fn converge_from(offset: MediaTime) -> MediaTime {
 /// non-zero: a fixed-rate law never has one.
 #[test]
 fn the_rate_falls_as_the_error_closes() {
+    // The ceiling itself steps down when the fast window expires, and a
+    // fixed-rate law pinned to the ceiling therefore *also* shows a fall
+    // there. Only decreases observed while one ceiling is in force
+    // discriminate the two, so the error starts inside the proportional
+    // region — below `fast_slew_cap_ppm * slew_tau` — and the walk is
+    // bounded to the fast window.
+    let cfg = ClockConfig::default();
     let mut c = clock_at_zero();
     let mut wall = MediaTime::ZERO;
     let step = MediaTime::from_millis(20);
-    let mut master = MediaTime::from_millis(690);
+    let mut master = MediaTime::from_millis(100);
     let mut previous: Option<i64> = None;
     let mut decreased = false;
-    for _ in 0..2_000 {
+    while wall < cfg.fast_window {
         c.observe_master(wall, master);
         let rate = c.rate_ppm();
         if rate == 0 {
             break;
         }
+        assert!(
+            rate < cfg.fast_slew_cap_ppm,
+            "rate {rate} is at the ceiling, so a fall would only be the cap stepping down"
+        );
         if let Some(prev) = previous
             && rate < prev
         {
@@ -326,7 +337,7 @@ fn the_rate_falls_as_the_error_closes() {
     }
     assert!(
         decreased,
-        "rate never fell while non-zero; the law is still fixed-rate"
+        "rate never fell inside the fast window while non-zero; the law is still fixed-rate"
     );
 }
 
