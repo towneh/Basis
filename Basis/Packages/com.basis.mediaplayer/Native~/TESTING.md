@@ -26,6 +26,15 @@ full test suite, cargo-deny (licence + advisories), cargo-vet, and the
 ffprobe conformance gate over `fixtures/` (skipped loudly if ffprobe is
 not on PATH). Everything below assumes this is green.
 
+**Toolchain baseline: 1.98.0**, pinned by `rust-toolchain.toml` along with
+`clippy`, `rustfmt` and the `aarch64-linux-android` target, so a fresh
+checkout provisions the same set and the Android lane is not skipped for
+want of a target. Because the gate denies warnings, an unpinned channel
+would let each new clippy lint fail the build on Rust's release schedule
+rather than ours, and green would stop meaning the same thing on two
+machines. Bumping is a deliberate commit: raise the channel, run the gate,
+fix what the new lints surface, and update this baseline in the same change.
+
 ## Diagnostics surfaces — what to read, and what good looks like
 
 Three surfaces, deliberately not overlapping. Grading a run means reading
