@@ -752,8 +752,10 @@ fn build_convert(
 
         const SPV: &[u8] = include_bytes!("../../shaders/yuv_to_rgba.spv");
         let code: Vec<u32> = SPV
-            .chunks_exact(4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
             .collect();
         let module_ci = vk::ShaderModuleCreateInfo {
             code_size: code.len() * 4,

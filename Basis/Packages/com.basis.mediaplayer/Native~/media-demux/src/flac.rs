@@ -259,7 +259,7 @@ impl FlacDemuxer {
                 // first frame, frame sample count. A placeholder point
                 // states u64::MAX and carries no position.
                 let stride = (body.len() / 18).div_ceil(MAX_SEEK_POINTS).max(1);
-                for point in body.chunks_exact(18).step_by(stride) {
+                for point in body.as_chunks::<18>().0.iter().step_by(stride) {
                     let sample = u64::from_be_bytes(point[..8].try_into().expect("sliced 8"));
                     let offset = u64::from_be_bytes(point[8..16].try_into().expect("sliced 8"));
                     if sample != u64::MAX {

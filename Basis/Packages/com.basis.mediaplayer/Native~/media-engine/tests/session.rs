@@ -270,7 +270,7 @@ fn multichannel_interleave_is_wav_order() {
         let w = 2.0 * std::f64::consts::PI * freq / 48_000.0;
         let c = 2.0 * w.cos();
         let (mut s1, mut s2) = (0.0f64, 0.0f64);
-        for frame in window.chunks_exact(6) {
+        for frame in window.as_chunks::<6>().0 {
             let s0 = f64::from(frame[slot]) + c * s1 - s2;
             s2 = s1;
             s1 = s0;
