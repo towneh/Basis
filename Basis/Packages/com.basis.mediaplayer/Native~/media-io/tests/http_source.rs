@@ -131,8 +131,7 @@ fn serve_connection(stream: TcpStream, body: &[u8], mode: Mode) {
 /// A server that answers a ranged GET with `serve` bytes of a body it
 /// never finishes, or with `serve` as `None` never answers at all. Both
 /// leave the client waiting on a socket nothing will write to again,
-/// which is what the request timeout, and only the request timeout,
-/// used to end.
+/// which only the read timeout and the cancel token end.
 fn start_stalling_server(total: u64, serve: Option<usize>) -> (String, mpsc::Receiver<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
@@ -171,6 +170,39 @@ fn start_stalling_server(total: u64, serve: Option<usize>) -> (String, mpsc::Rec
         }
     });
     (format!("http://127.0.0.1:{port}"), rx)
+}
+
+/// A server that accepts exactly one connection, answers it with the
+/// whole body however it was asked for, and then stops listening so a
+/// second connection is refused. This is the shape of the one-client-per-
+/// slot feeders the live rig runs, and of any origin that answers a
+/// ranged GET with a plain 200.
+fn spawn_single_slot_server(body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        drop(listener);
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut stream = stream;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            if line.trim_end().is_empty() {
+                break;
+            }
+        }
+        let mut response =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(&body);
+        let _ = stream.write_all(&response);
+        let _ = stream.flush();
+    });
+    format!("http://127.0.0.1:{port}")
 }
 
 fn redirect(to: &str) -> Vec<u8> {
@@ -249,6 +281,70 @@ fn sequential_server_demuxes_faststart() {
     let base = spawn_server(fixture("h264-aac-640x360-30fps.mp4"), Mode::Sequential);
     let source = open(&format!("{base}/media")).expect("open");
     assert_eq!(count_aus(source), (180, 283));
+}
+
+/// An origin that answers the opening ranged probe with a 200 has
+/// already handed over the whole entity from byte 0, so that response is
+/// the sequential stream. Opening a second one would cost a second
+/// connection, and the origins that answer this way are the ones least
+/// able to give it: every live edge answers 200, and a feeder serving one
+/// client at a time has nothing left once the probe has taken its slot.
+#[test]
+fn a_sequential_open_costs_one_connection() {
+    let base = spawn_single_slot_server(fixture("h264-aac-640x360-30fps.mp4"));
+    let source = open(&format!("{base}/media")).expect("open rides the connection it already has");
+    assert_eq!(count_aus(source), (180, 283));
+}
+
+/// The opening request carries no total timeout, because its response is
+/// the body itself on a server that answers 200 and no bound can be put
+/// on how long that runs. A link that simply goes quiet is held by the
+/// client's read timeout instead, which measures the wait rather than the
+/// exchange; without it the only way out of this read is the session's
+/// cancel token.
+#[test]
+fn a_quiet_link_surfaces_as_a_read_error() {
+    const SERVED: usize = 32;
+    let (base, _requested) = start_stalling_server(4 * 1024 * 1024, Some(SERVED));
+    let mut source = HttpSource::open(
+        &format!("{base}/media"),
+        IoLimits {
+            request_timeout: Duration::from_millis(500),
+            ..IoLimits::default()
+        },
+        Arc::new(AllowAllGate),
+        CancelToken::new(),
+    )
+    .expect("the open lands on the bytes the server did write");
+
+    let mut buf = [0u8; 16];
+    let mut got = 0usize;
+    while got < SERVED {
+        let n = source
+            .read_at(got as u64, &mut buf)
+            .expect("the served head reads back");
+        assert!(n > 0, "the server wrote {SERVED} bytes");
+        got += n;
+    }
+
+    // Read on a worker: without a bound on the wait this never comes
+    // back at all, and a row that hangs the suite says less than one
+    // that fails it.
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let outcome = source
+            .read_at(got as u64, &mut buf)
+            .map_err(|e| e.to_string());
+        let _ = tx.send(outcome);
+    });
+    let err = rx
+        .recv_timeout(CANCEL_WINDOW)
+        .expect("the read comes back on the timeout, not on the socket")
+        .expect_err("the quiet link is given up on");
+    assert!(
+        err.starts_with("Read:"),
+        "a stalled body is a read error: {err}"
+    );
 }
 
 #[test]

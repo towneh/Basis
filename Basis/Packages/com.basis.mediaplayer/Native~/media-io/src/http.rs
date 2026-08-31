@@ -9,17 +9,20 @@
 //! Reads on a range-capable server are chunked ranged requests under a
 //! per-request timeout, so a stalled link surfaces as a typed error rather
 //! than a silent hang; sequential reads ride one pooled connection, and a
-//! positioned read elsewhere costs one request. Servers without range
-//! support get an untimed sequential stream (forward reads discard,
-//! backward reads restart) so faststart files still play. Nothing bounds
-//! that body, so every request and every read races the session's
-//! [`CancelToken`] instead: the opener and demux threads this source runs
-//! on are both joined by a closing session, and a server that stops
-//! answering must hold neither of them.
+//! positioned read elsewhere costs one request. A server that answers the
+//! opening probe with a 200 has handed over the whole entity, so that
+//! response *is* the sequential stream (forward reads discard, backward
+//! reads restart) and the open costs one connection — which is all the
+//! origins that answer this way tend to have. No total timeout bounds
+//! that body, only the client's read timeout, so every request and every
+//! read races the session's [`CancelToken`] as well: the opener and demux
+//! threads this source runs on are both joined by a closing session, and a
+//! server that stops answering must hold neither of them.
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use media_demux::{ByteSource, SourceError};
@@ -239,7 +242,6 @@ impl HttpSource {
                     &current,
                     &limits,
                     gate.as_ref(),
-                    true,
                     Some((0, probe_end)),
                     IoErrorKind::Connect,
                 ),
@@ -288,8 +290,9 @@ impl HttpSource {
                 });
             }
 
-            // No range support: switch to an untimed client so the one
-            // long-lived body is not cut off by the request timeout.
+            // No range support: a 200 answers with the whole entity from
+            // byte 0, so this response is the sequential stream and the
+            // open is done on the one connection it already holds.
             let len = response.content_length();
             // A server can decline this range request and still honour
             // ranges generally; the advertised header is the second arm.
@@ -298,28 +301,6 @@ impl HttpSource {
                 .get("accept-ranges")
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"));
-            drop(response);
-            let (client, response) = awaiting(
-                &cancel,
-                IoErrorKind::Connect,
-                "open cancelled",
-                pinned_get(
-                    &current,
-                    &limits,
-                    gate.as_ref(),
-                    false,
-                    None,
-                    IoErrorKind::Connect,
-                ),
-            )?;
-            if !response.status().is_success() {
-                return Err(IoError {
-                    kind: IoErrorKind::Http,
-                    status: Some(response.status().as_u16()),
-                    detail: format!("GET {current}"),
-                });
-            }
-            let len = len.or(response.content_length());
             return Ok(Self {
                 client,
                 url: current,
@@ -364,6 +345,7 @@ impl HttpSource {
                     &self.client,
                     &self.url,
                     Some((offset, last)),
+                    Some(self.limits.request_timeout),
                     IoErrorKind::Read,
                 ),
             )?;
@@ -385,7 +367,7 @@ impl HttpSource {
             &self.cancel,
             IoErrorKind::Read,
             "read cancelled",
-            send_get(&self.client, &self.url, None, IoErrorKind::Read),
+            send_get(&self.client, &self.url, None, None, IoErrorKind::Read),
         )?;
         if !response.status().is_success() {
             return Err(IoError {
@@ -495,24 +477,33 @@ async fn pinned_get(
     url: &Url,
     limits: &IoLimits,
     gate: &dyn AddressGate,
-    timed: bool,
     range: Option<(u64, u64)>,
     kind: IoErrorKind,
 ) -> Result<(reqwest::Client, reqwest::Response), IoError> {
-    let client = build_pinned_client(url, limits, gate, timed).await?;
-    let response = send_get(&client, url, range, kind).await?;
+    let client = build_pinned_client(url, limits, gate).await?;
+    // Untimed: the opening probe's response becomes the body on a server
+    // that answers 200, and a total timeout would cut that body off.
+    let response = send_get(&client, url, range, None, kind).await?;
     Ok((client, response))
 }
 
+/// One GET, with `timeout` bounding the whole exchange — headers and
+/// body both. Only a request whose body is bounded in advance can carry
+/// one; an open-ended body is held to the client's read timeout and the
+/// session's cancel token instead.
 async fn send_get(
     client: &reqwest::Client,
     url: &Url,
     range: Option<(u64, u64)>,
+    timeout: Option<Duration>,
     kind: IoErrorKind,
 ) -> Result<reqwest::Response, IoError> {
     let mut request = client.get(url.clone());
     if let Some((first, last)) = range {
         request = request.header("Range", format!("bytes={first}-{last}"));
+    }
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
     }
     request
         .send()
@@ -524,16 +515,16 @@ async fn build_pinned_client(
     url: &Url,
     limits: &IoLimits,
     gate: &dyn AddressGate,
-    timed: bool,
 ) -> Result<reqwest::Client, IoError> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(limits.connect_timeout)
+        // Per read rather than per request, so a link that has gone quiet
+        // still surfaces as a typed error on the one client that has to
+        // carry an unbounded sequential body as well as bounded chunks.
+        .read_timeout(limits.request_timeout)
         .no_proxy()
         .user_agent("basis-media/0.1");
-    if timed {
-        builder = builder.timeout(limits.request_timeout);
-    }
 
     if let Some((domain, addrs)) = vet_url_async(url, gate).await? {
         builder = builder.resolve_to_addrs(&domain, &addrs);
