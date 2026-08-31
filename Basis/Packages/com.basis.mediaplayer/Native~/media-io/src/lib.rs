@@ -109,6 +109,22 @@ impl IoError {
             detail: detail.into(),
         }
     }
+
+    /// The same, with `e`'s `source()` chain flattened into the detail.
+    /// reqwest's `Display` names only the outermost layer — that a
+    /// request could not be sent, and to where — and drops the resolve,
+    /// connect or TLS error underneath it, which is the half that says
+    /// what actually went wrong.
+    fn from_chain(kind: IoErrorKind, e: &dyn std::error::Error) -> Self {
+        let mut detail = e.to_string();
+        let mut cause = e.source();
+        while let Some(e) = cause {
+            detail.push_str(": ");
+            detail.push_str(&e.to_string());
+            cause = e.source();
+        }
+        Self::new(kind, detail)
+    }
 }
 
 impl fmt::Display for IoError {

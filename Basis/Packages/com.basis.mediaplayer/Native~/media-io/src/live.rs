@@ -215,13 +215,13 @@ async fn open_streaming(
         }
         let client = builder
             .build()
-            .map_err(|e| IoError::new(IoErrorKind::Connect, e.to_string()))?;
+            .map_err(|e| IoError::from_chain(IoErrorKind::Connect, &e))?;
 
         let response = client
             .get(url.clone())
             .send()
             .await
-            .map_err(|e| IoError::new(IoErrorKind::Connect, e.to_string()))?;
+            .map_err(|e| IoError::from_chain(IoErrorKind::Connect, &e))?;
 
         let status = response.status().as_u16();
         if REDIRECT_STATUSES.contains(&status) {
@@ -283,7 +283,7 @@ async fn read_loop(
             Ok(Ok(None)) => return,
             Ok(Err(e)) => {
                 let _ = tx
-                    .send(Err(IoError::new(IoErrorKind::Read, e.to_string())))
+                    .send(Err(IoError::from_chain(IoErrorKind::Read, &e)))
                     .await;
                 return;
             }

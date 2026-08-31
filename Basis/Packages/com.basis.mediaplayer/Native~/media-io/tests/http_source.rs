@@ -531,6 +531,26 @@ fn a_zero_length_read_keeps_the_chunk_it_is_holding() {
     );
 }
 
+/// A transport failure has to say what failed. reqwest's own `Display`
+/// stops at "error sending request for url (...)" — the refusal, the TLS
+/// alert, the resolver's answer are all one `source()` hop below it, and
+/// naming only the outer layer leaves a diagnosis with nothing in it.
+#[test]
+fn a_transport_failure_names_its_cause() {
+    // A port that was bound long enough to be sure nothing else holds it,
+    // and released.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let err = open(&format!("http://127.0.0.1:{port}/media")).expect_err("nothing is listening");
+    assert_eq!(err.kind, IoErrorKind::Connect);
+    assert!(
+        err.detail.to_lowercase().contains("refused"),
+        "the detail carries the cause, not just the request: {err}"
+    );
+}
+
 #[test]
 fn unsupported_scheme_is_a_url_error() {
     let err = open("ftp://example.invalid/media").expect_err("ftp refused");

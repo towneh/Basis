@@ -197,7 +197,7 @@ impl StreamState {
                 self.response
                     .chunk()
                     .await
-                    .map_err(|e| IoError::new(IoErrorKind::Read, e.to_string()))
+                    .map_err(|e| IoError::from_chain(IoErrorKind::Read, &e))
             })?;
             match next {
                 Some(bytes) if !bytes.is_empty() => self.chunk = Some((bytes, 0)),
@@ -508,7 +508,7 @@ async fn send_get(
     request
         .send()
         .await
-        .map_err(|e| IoError::new(kind, e.to_string()))
+        .map_err(|e| IoError::from_chain(kind, &e))
 }
 
 async fn build_pinned_client(
@@ -532,7 +532,7 @@ async fn build_pinned_client(
 
     builder
         .build()
-        .map_err(|e| IoError::new(IoErrorKind::Connect, e.to_string()))
+        .map_err(|e| IoError::from_chain(IoErrorKind::Connect, &e))
 }
 
 fn content_range_total(response: &reqwest::Response) -> Option<u64> {
