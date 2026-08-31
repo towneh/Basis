@@ -402,6 +402,30 @@ fn error_status_fails_typed_and_gate_blocks_signalling() {
     );
 }
 
+/// A signalling failure has to say what failed. reqwest's own `Display`
+/// stops at "error sending request for url (...)", and the refusal, the
+/// TLS alert or the resolver's answer all sit one `source()` hop below
+/// it — so naming only the outer layer leaves an operator with a
+/// diagnosis that has nothing in it.
+#[test]
+fn a_signalling_transport_failure_names_its_cause() {
+    // A port held only long enough to be sure nothing else has it.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let err = open(
+        &format!("whep://127.0.0.1:{port}/stream"),
+        Arc::new(PermitAll),
+    )
+    .map(|_| ())
+    .expect_err("nothing is listening");
+    assert!(
+        err.to_string().to_lowercase().contains("refused"),
+        "the error carries the transport cause, not just the request: {err}"
+    );
+}
+
 /// §9.3: a candidate address the gate refuses never receives a packet —
 /// the check sits at the transmit boundary, so the connectivity check
 /// itself is what gets suppressed. The mirror case proves the machinery

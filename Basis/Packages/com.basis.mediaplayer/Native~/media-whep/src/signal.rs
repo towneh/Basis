@@ -129,7 +129,7 @@ async fn pinned_client(
     }
     builder
         .build()
-        .map_err(|e| WhepError::Protocol(format!("http client: {e}")))
+        .map_err(|e| WhepError::Protocol(format!("http client: {}", media_io::error_chain(&e))))
 }
 
 /// POST the SDP offer to the endpoint. Follows redirects (re-vetting
@@ -149,7 +149,9 @@ pub async fn post_offer(
             .body(offer_sdp.to_string())
             .send()
             .await
-            .map_err(|e| WhepError::Protocol(format!("POST {current}: {e}")))?;
+            .map_err(|e| {
+                WhepError::Protocol(format!("POST {current}: {}", media_io::error_chain(&e)))
+            })?;
 
         let status = response.status().as_u16();
         if REDIRECT_STATUSES.contains(&status) {
@@ -228,7 +230,9 @@ pub async fn patch_answer(
         .body(answer_sdp.to_string())
         .send()
         .await
-        .map_err(|e| WhepError::Protocol(format!("PATCH {resource}: {e}")))?;
+        .map_err(|e| {
+            WhepError::Protocol(format!("PATCH {resource}: {}", media_io::error_chain(&e)))
+        })?;
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
         Ok(())
@@ -254,11 +258,9 @@ pub async fn delete_resource(resource: &Url, gate: &Arc<dyn AddressGate>) -> Res
             ..IoLimits::default()
         };
         let client = pinned_client(resource, &limits, gate.as_ref()).await?;
-        client
-            .delete(resource.clone())
-            .send()
-            .await
-            .map_err(|e| WhepError::Protocol(format!("DELETE {resource}: {e}")))?;
+        client.delete(resource.clone()).send().await.map_err(|e| {
+            WhepError::Protocol(format!("DELETE {resource}: {}", media_io::error_chain(&e)))
+        })?;
         Ok(())
     })
     .await
@@ -281,11 +283,9 @@ fn header_str(response: &reqwest::Response, name: &str) -> Option<String> {
 async fn sdp_body(mut response: reqwest::Response, limits: &IoLimits) -> Result<String, WhepError> {
     let cap = limits.max_signalling_bytes;
     let mut buf = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| WhepError::Protocol(format!("reading SDP body: {e}")))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        WhepError::Protocol(format!("reading SDP body: {}", media_io::error_chain(&e)))
+    })? {
         if buf.len() as u64 + chunk.len() as u64 > cap {
             return Err(WhepError::Protocol(format!(
                 "SDP body exceeds the {cap}-byte cap"
