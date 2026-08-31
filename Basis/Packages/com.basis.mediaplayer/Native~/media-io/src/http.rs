@@ -333,6 +333,24 @@ impl HttpSource {
         self.finite && self.rangeable
     }
 
+    /// Surrender the open body so a live lane can adopt it instead of
+    /// connecting again. `Err(self)` when there is nothing to hand over:
+    /// a ranged source reads by request rather than off one body, and a
+    /// source a read has moved off the start holds bytes that would have
+    /// to be handed over with it.
+    pub(crate) fn into_streaming_body(mut self) -> Result<(reqwest::Response, Url), Box<Self>> {
+        let adoptable = !self.ranges
+            && self
+                .stream
+                .as_ref()
+                .is_some_and(|s| s.pos == 0 && s.chunk.is_none());
+        if !adoptable {
+            return Err(Box::new(self));
+        }
+        let stream = self.stream.take().expect("adoptable implies a stream");
+        Ok((stream.response, self.url))
+    }
+
     fn reopen_at(&mut self, offset: u64) -> Result<(), IoError> {
         self.stream = None;
         if self.ranges {

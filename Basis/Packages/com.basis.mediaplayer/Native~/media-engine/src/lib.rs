@@ -799,6 +799,20 @@ fn open_http_live(
             return;
         }
     };
+    open_http_live_with(px, url, source, allow_local, bank_cfg, threads, options);
+}
+
+/// The live lane from an already-open source, so the Auto probe can hand
+/// over the body it opened rather than spending a second connection.
+fn open_http_live_with(
+    px: Arc<PipelineShared>,
+    url: &str,
+    source: media_io::HttpLiveSource,
+    allow_local: bool,
+    bank_cfg: BankConfig,
+    threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    options: DemuxOptions,
+) {
     let mut counted = CountedSource {
         inner: source,
         diag: Arc::clone(&px.diag),
@@ -1276,9 +1290,6 @@ fn open_and_run(
         return;
     }
 
-    // Set by the HTTP arm below when the source reads as a live edge and
-    // the request left the call to us.
-    let mut inferred_live = false;
     let source: Box<dyn ByteSource> = if let Some(source) = source_override {
         Box::new(CountedSource {
             inner: source,
@@ -1298,9 +1309,49 @@ fn open_and_run(
                 // A split session is an on-demand shape by construction
                 // (the resolver states liveness for those), so the audio
                 // leg's own source keeps the declared answer.
-                inferred_live = request.liveness == SourceLiveness::Auto
+                if request.liveness == SourceLiveness::Auto
                     && request.audio_url.is_none()
-                    && !source.is_seekable();
+                    && !source.is_seekable()
+                {
+                    px.diag.event(
+                        px.wall.now(),
+                        EventCode::CapabilityProbe,
+                        Stage::Source,
+                        format!(
+                            "liveness inferred Live for {url}: the source states neither a usable length nor byte ranges"
+                        ),
+                    );
+                    // The probe's own body is the live stream, so the live
+                    // lane adopts it. Connecting again to read the same
+                    // bytes costs a handshake against the join budget and
+                    // rejoins the stream later than it left it, and an
+                    // origin serving one client at a time cannot give a
+                    // second connection at all.
+                    match media_io::HttpLiveSource::adopt(
+                        source,
+                        &IoLimits::default(),
+                        px.io_cancel.clone(),
+                    ) {
+                        Ok(live) => open_http_live_with(
+                            px,
+                            &url,
+                            live,
+                            request.allow_local_addresses,
+                            bank_cfg,
+                            threads,
+                            options,
+                        ),
+                        Err(_) => open_http_live(
+                            px,
+                            &url,
+                            request.allow_local_addresses,
+                            bank_cfg,
+                            threads,
+                            options,
+                        ),
+                    }
+                    return;
+                }
                 Box::new(CountedSource {
                     inner: source,
                     diag: Arc::clone(&diag),
@@ -1373,31 +1424,6 @@ fn open_and_run(
             px.fail(EngineError::demux(DemuxError::Source(e)));
             return;
         }
-    }
-    // Not a playlist, and the source answered as a live edge: hand it to
-    // the live lane, which brings the read-stall timeout, the cancel token
-    // and the reconnect factory a live source needs. Costs one extra
-    // connect on live lanes that left this on Auto; on-demand — the common
-    // case — pays nothing.
-    if inferred_live {
-        drop(source);
-        px.diag.event(
-            px.wall.now(),
-            EventCode::CapabilityProbe,
-            Stage::Source,
-            format!(
-                "liveness inferred Live for {url}: the source states neither a usable length nor byte ranges"
-            ),
-        );
-        open_http_live(
-            px,
-            &url,
-            request.allow_local_addresses,
-            bank_cfg,
-            threads,
-            options,
-        );
-        return;
     }
     let demuxer = match media_demux::open_auto_with(
         source,

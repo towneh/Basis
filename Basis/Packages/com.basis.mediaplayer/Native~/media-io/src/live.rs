@@ -20,7 +20,7 @@ use media_demux::{ByteSource, SourceError};
 use url::Url;
 
 use crate::cancel::CancelToken;
-use crate::http::{REDIRECT_STATUSES, vet_url_async};
+use crate::http::{HttpSource, REDIRECT_STATUSES, vet_url_async};
 use crate::runtime::runtime;
 use crate::{AddressGate, IoError, IoErrorKind, IoLimits};
 
@@ -93,19 +93,57 @@ impl HttpLiveSource {
             }
         };
 
-        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CHUNKS);
-        let reader_cancel = cancel.clone();
-        runtime().spawn(read_loop(response, tx, reader_cancel, limits.read_stall));
+        Ok(Self::from_response(
+            response,
+            final_url,
+            cancel,
+            limits.read_stall,
+        ))
+    }
 
-        Ok(Self {
+    /// Adopt an on-demand source's open body rather than connecting again
+    /// to ask a question its response has already answered. The probe
+    /// that settles Auto liveness is a GET whose 200 *is* the live
+    /// stream, and an origin serving one client at a time has nothing
+    /// left to give for the same bytes.
+    ///
+    /// The source comes back unchanged when there is nothing to adopt: a
+    /// ranged source reads by request rather than off one body, and a
+    /// source a read has already moved off the start holds bytes that
+    /// only it can serve back.
+    pub fn adopt(
+        source: HttpSource,
+        limits: &IoLimits,
+        cancel: CancelToken,
+    ) -> Result<Self, Box<HttpSource>> {
+        let (response, url) = source.into_streaming_body()?;
+        Ok(Self::from_response(
+            response,
+            url,
+            cancel.child(),
+            limits.read_stall,
+        ))
+    }
+
+    /// Wrap an open body. `cancel` is this source's own token — the one
+    /// its `Drop` retires — so callers pass a child of the session's.
+    fn from_response(
+        response: reqwest::Response,
+        url: Url,
+        cancel: CancelToken,
+        stall: std::time::Duration,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CHUNKS);
+        runtime().spawn(read_loop(response, tx, cancel.clone(), stall));
+        Self {
             rx,
             chunk: None,
             pos: 0,
             head: Vec::new(),
             cancel,
-            url: final_url,
+            url,
             ended: false,
-        })
+        }
     }
 
     /// The URL the source actually reads from (after redirects).

@@ -134,3 +134,67 @@ fn live_session_survives_a_dropped_connection() {
     );
     session.close();
 }
+
+/// Auto is the default liveness both engine-side and on the managed
+/// component, so a plain live URL settles it by probing — and that probe
+/// is a GET whose 200 *is* the stream. Opening a second connection to
+/// read the same bytes spends a handshake out of the join budget, rejoins
+/// the edge later than it left off, and is refused outright by an origin
+/// serving one client at a time. The live lane adopts the probe's body,
+/// so the whole session is one connection.
+#[test]
+fn an_auto_live_session_costs_one_connection() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/h264-aac-320x180-30s.ts"),
+    )
+    .expect("fixture readable");
+    let rate = bytes.len() as u64 / 30;
+    // Never killed: this row is about the join, not the rebuild.
+    let (url, connections) = spawn_live_server(bytes, rate, Duration::from_secs(3600));
+
+    let mut request = OpenRequest::new(url);
+    request.allow_local_addresses = true;
+    // Left at Auto deliberately — that is the lane under test.
+    assert_eq!(request.liveness, SourceLiveness::Auto);
+    request.buffer_depth_ms = Some(1000);
+    let mut session = Session::open(request);
+    let shared = session.shared().clone();
+
+    let start = Instant::now();
+    let mut playing = false;
+    while start.elapsed() < Duration::from_secs(20) {
+        let state = shared.state.load(Ordering::Relaxed);
+        assert_ne!(
+            state,
+            State::Error as u32,
+            "the Auto lane must play, not error (code {})",
+            shared.last_error.load(Ordering::Relaxed)
+        );
+        // A whole GOP past the join, so this cannot be the pool draining
+        // what the probe happened to have in hand.
+        if state == State::Playing as u32 && shared.frames_decoded.load(Ordering::Relaxed) > 60 {
+            playing = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(playing, "the Auto lane never reached playback");
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "the liveness probe reopened instead of handing its body over"
+    );
+
+    // Without this the row proves nothing: a source that read as
+    // on-demand would also take one connection, and never touch the
+    // handover at all.
+    let events = session.diag().take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.code, media_diag::EventCode::CapabilityProbe)),
+        "the session must have inferred Live, or this counted the on-demand lane"
+    );
+    session.close();
+}
