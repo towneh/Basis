@@ -518,20 +518,25 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         CaptionChanged?.Invoke(text);
     }
 
+#if UNITY_EDITOR
     /// Unity stamps a full call stack onto every Log-level Console line,
     /// which buries the event drain under a dozen frames of its own
-    /// plumbing. The setting is application-wide — Unity offers no
-    /// narrower one — so it is applied once, and only once a player
-    /// exists to need it.
+    /// plumbing. Editor only: the setting is application-wide and Unity
+    /// offers no narrower one, so a build would be taking every package's
+    /// Log-level traces away to tidy this one's. Applied once, and only
+    /// once a player exists to need it.
     static bool _logStackTracesTrimmed;
+#endif
 
     void Awake()
     {
+#if UNITY_EDITOR
         if (!_logStackTracesTrimmed)
         {
             _logStackTracesTrimmed = true;
             Application.SetStackTraceLogType(LogType.Log, StackTraceLogType.None);
         }
+#endif
 
         _frameTick = new BasisMediaDriverTick(Tick);
         // The sink lives beside the player, as it does in the authored

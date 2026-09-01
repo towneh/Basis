@@ -323,7 +323,7 @@ name; that is a gap in the mirror, not a failure.
 | Row | What it proves | How to run |
 | --- | --- | --- |
 | Named codes and a timebase | events read as `Code/Stage` with a session-relative timestamp, not `event 15 stage 6` | play any lane and read the Console; a `StateChange/Clock` line lands within the first second of every open |
-| No stack traces | Log-level Console lines carry no call stack, so a drain is readable during a pass | any scene holding a player; the first one to wake applies it |
+| No stack traces in the Editor | Log-level Console lines carry no call stack, so a drain is readable during a pass. Editor only — the setting is application-wide, so a build would be taking every package's Log-level traces away to tidy this one's | any scene holding a player; the first one to wake applies it |
 | An unknown code degrades to its number | a plugin ahead of the mirror still produces a readable line | temporarily delete `AudioTrim = 15` from `BmEventCode`, replay a lane that trims, confirm the line reads `15/AudioRing`, restore |
 | A burst arrives whole | the drain empties the queue in the frame it ran, rather than leaving a backlog | drop `EventDrainBatch` to 4, open a lane, confirm the open's events still all appear on the same frame; restore |
 | A full log says so | the drained sequence is never quietly incomplete: the engine's log has a cap, and what it refuses is reported once per step rather than every frame it stays non-zero | drop `SessionDiag::default`'s cap from 1024 to 2 in the engine, rebuild the plugin, play a lane; the Console warns `diagnostics log full: N event(s) refused, M this session`. Restore |
