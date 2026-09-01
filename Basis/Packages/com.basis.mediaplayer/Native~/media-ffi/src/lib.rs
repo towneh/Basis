@@ -105,6 +105,7 @@ const _: () = {
     assert!(size_of::<BmCaption>() == 8 + 4 + BM_CAPTION_TEXT_CAP + 4);
     assert!(size_of::<BmUserData>() == 8 + BM_USER_DATA_UUID_LEN + 4 + 4);
     assert!(size_of::<BmAudioTrack>() == 4 * 4 + BM_TRACK_LANG_CAP + 4 + BM_TRACK_LABEL_CAP);
+    assert!(size_of::<BmLogRecord>() == 8 + 8 + 4 * 4 + BM_LOG_DETAIL_CAP);
 };
 
 pub const BM_EVENT_DETAIL_CAP: usize = 116;
@@ -118,6 +119,34 @@ pub struct BmEvent {
     pub stage: u32,
     pub detail_len: u32,
     pub detail: [u8; BM_EVENT_DETAIL_CAP],
+}
+
+/// Twice the event detail's ceiling: a free-text line is a sentence
+/// rather than a field, and the ones worth having — a WHEP negotiation
+/// step, a transport refusal with its `source()` chain walked — run long.
+pub const BM_LOG_DETAIL_CAP: usize = 224;
+
+/// One process-log line, in the same shape a session event has.
+/// Process-level: `session` is a field rather than the addressing, because
+/// the channel exists for the lines emitted before a session handle exists
+/// and after it closes, and 0 means exactly that.
+///
+/// `wall_us` is microseconds since the engine's first diagnostic in this
+/// process, which is **not** a session's clock — `BmEvent::wall_us` counts
+/// from that session's start. The two origins differ; do not subtract one
+/// from the other.
+#[repr(C)]
+pub struct BmLogRecord {
+    pub wall_us: i64,
+    pub session: u64,
+    /// `media_diag::Level`: 0 error, 1 warn, 2 info.
+    pub level: u32,
+    /// `media_diag::EventCode`. Always `Log` (18) today; the field is
+    /// there because the record shape is shared with the session events.
+    pub code: u32,
+    pub stage: u32,
+    pub detail_len: u32,
+    pub detail: [u8; BM_LOG_DETAIL_CAP],
 }
 
 /// The C player's cue-text ceiling; a full 4-row pop-on screen fits well
@@ -663,6 +692,63 @@ pub unsafe extern "C" fn bm_session_drain_events(handle: u64, out: *mut BmEvent,
             };
             // SAFETY: caller contract — out points to cap writable
             // BmEvents; i < count <= cap.
+            unsafe { out.add(i).write(record) };
+        }
+        count as i32
+    }))
+    .unwrap_or(BM_ERR_PANIC)
+}
+
+/// Drain pending process-log lines into `out` (up to `cap`), oldest
+/// first; returns the count written. Lines beyond `cap` stay queued, so a
+/// caller loops until a call comes back short.
+///
+/// Process-level: there is no handle, and it answers before the first
+/// session opens and after the last one closes, which is where the lines
+/// worth having mostly are. `out_dropped`, when non-NULL, receives the
+/// cumulative count of lines the ring evicted to make room — non-zero
+/// means what follows has holes at its start, not at its end.
+///
+/// # Safety
+/// `out` must point to `cap` writable `BmLogRecord`s; `out_dropped` must
+/// be NULL or point to a writable `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bm_drain_log(
+    out: *mut BmLogRecord,
+    cap: u32,
+    out_dropped: *mut u64,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        host_log::install();
+        if out.is_null() || cap == 0 {
+            return BM_ERR_INVALID_ARG;
+        }
+        if !out_dropped.is_null() {
+            // SAFETY: caller contract — non-NULL points to a writable u64.
+            unsafe { out_dropped.write(media_diag::log_dropped()) };
+        }
+        let lines = media_diag::drain_log(cap as usize);
+        let count = lines.len();
+        for (i, line) in lines.into_iter().enumerate() {
+            let mut detail = [0u8; BM_LOG_DETAIL_CAP];
+            let bytes = line.detail.as_bytes();
+            let mut len = bytes.len().min(BM_LOG_DETAIL_CAP);
+            // Truncate on a UTF-8 boundary.
+            while len > 0 && !line.detail.is_char_boundary(len) {
+                len -= 1;
+            }
+            detail[..len].copy_from_slice(&bytes[..len]);
+            let record = BmLogRecord {
+                wall_us: line.wall_us,
+                session: line.session,
+                level: line.level as u32,
+                code: line.code as u32,
+                stage: line.stage as u32,
+                detail_len: len as u32,
+                detail,
+            };
+            // SAFETY: caller contract — out points to cap writable
+            // BmLogRecords; i < count <= cap.
             unsafe { out.add(i).write(record) };
         }
         count as i32
