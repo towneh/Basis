@@ -613,7 +613,9 @@ pub unsafe extern "C" fn bm_session_read_audio(
 }
 
 /// Drain pending diagnostics events into `out` (up to `cap`); returns the
-/// count written. Events not drained stay queued up to the engine's cap.
+/// count written, oldest first. Events beyond `cap` stay queued up to the
+/// engine's own cap, so a caller whose buffer is smaller than the burst
+/// calls again until a call comes back short.
 ///
 /// # Safety
 /// `out` must point to `cap` writable `BmEvent`s.
@@ -626,9 +628,9 @@ pub unsafe extern "C" fn bm_session_drain_events(handle: u64, out: *mut BmEvent,
         let Some(entry) = lookup(handle) else {
             return BM_ERR_INVALID_HANDLE;
         };
-        let events = entry.pipeline.diag.take_events();
-        let count = events.len().min(cap as usize);
-        for (i, event) in events.into_iter().take(count).enumerate() {
+        let events = entry.pipeline.diag.take_events_up_to(cap as usize);
+        let count = events.len();
+        for (i, event) in events.into_iter().enumerate() {
             let mut detail = [0u8; BM_EVENT_DETAIL_CAP];
             let bytes = event.detail.as_bytes();
             let mut len = bytes.len().min(BM_EVENT_DETAIL_CAP);

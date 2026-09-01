@@ -237,6 +237,16 @@ impl SessionDiag {
         std::mem::take(&mut *self.events.lock().expect("diag event lock"))
     }
 
+    /// Drain up to `max` pending events, oldest first, leaving the rest
+    /// queued. What a consumer cannot carry in one call it must be able
+    /// to come back for: a burst that outruns its buffer is a backlog,
+    /// not a loss.
+    pub fn take_events_up_to(&self, max: usize) -> Vec<DiagEvent> {
+        let mut events = self.events.lock().expect("diag event lock");
+        let take = max.min(events.len());
+        events.drain(..take).collect()
+    }
+
     pub fn events_dropped(&self) -> u64 {
         self.events_dropped.load(Ordering::Relaxed)
     }
@@ -440,6 +450,34 @@ mod tests {
         }
         assert_eq!(diag.take_events().len(), 2);
         assert_eq!(diag.events_dropped(), 1);
+    }
+
+    #[test]
+    fn a_bounded_drain_leaves_the_rest_queued() {
+        let diag = SessionDiag::default();
+        for i in 0..5 {
+            diag.event(
+                MediaTime::from_millis(i),
+                EventCode::CapHit,
+                Stage::Bank,
+                "byte cap",
+            );
+        }
+
+        let first = diag.take_events_up_to(2);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].wall, MediaTime::from_millis(0));
+        assert_eq!(first[1].wall, MediaTime::from_millis(1));
+
+        // The three the buffer could not carry are still there, in order,
+        // rather than having gone with the ones that were taken.
+        let rest = diag.take_events_up_to(64);
+        assert_eq!(rest.len(), 3);
+        assert_eq!(rest[0].wall, MediaTime::from_millis(2));
+        assert_eq!(rest[2].wall, MediaTime::from_millis(4));
+
+        assert!(diag.take_events_up_to(64).is_empty());
+        assert_eq!(diag.events_dropped(), 0);
     }
 
     /// Accepts every byte and fails only when asked to flush: the shape a
