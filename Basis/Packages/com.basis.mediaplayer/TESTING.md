@@ -325,6 +325,7 @@ name; that is a gap in the mirror, not a failure.
 | Named codes and a timebase | events read as `Code/Stage` with a session-relative timestamp, not `event 15 stage 6` | play any lane and read the Console; a `StateChange/Clock` line lands within the first second of every open |
 | No stack traces | Log-level Console lines carry no call stack, so a drain is readable during a pass | any scene holding a player; the first one to wake applies it |
 | An unknown code degrades to its number | a plugin ahead of the mirror still produces a readable line | temporarily delete `AudioTrim = 15` from `BmEventCode`, replay a lane that trims, confirm the line reads `15/AudioRing`, restore |
+| A burst arrives whole | the drain empties the queue in the frame it ran, rather than leaving a backlog | drop `EventDrainBatch` to 4, open a lane, confirm the open's events still all appear on the same frame; restore |
 
 ## What still needs a person
 

@@ -1161,21 +1161,33 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// number.
     private string _lastErrorDetail;
 
+    /// Events per drain call. A frame that opens a session or loses a
+    /// transport produces a burst, and what the engine holds beyond one
+    /// batch has to be asked for again — so the drain loops rather than
+    /// leaving a backlog to arrive a frame late or not at all.
+    const int EventDrainBatch = 64;
+
     unsafe void DrainEvents()
     {
-        var events = stackalloc BmEvent[8];
-        int count = BasisMediaNative.bm_session_drain_events(_handle, events, 8);
-        for (int i = 0; i < count; i++)
+        var events = stackalloc BmEvent[EventDrainBatch];
+        int count;
+        do
         {
-            string detail = Encoding.UTF8.GetString(events[i].Detail, (int)events[i].DetailLen);
-            if (events[i].Code == (uint)BmEventCode.Error) _lastErrorDetail = detail;
-            // WallUs is the session's own monotonic clock, so a line can be
-            // lined up against either diagnostics CSV without hand-aligning.
-            string at = (events[i].WallUs / 1_000_000.0).ToString("F3", CultureInfo.InvariantCulture);
-            BasisDebug.Log(
-                $"[BasisMedia +{at}s] {(BmEventCode)events[i].Code}/{(BmStage)events[i].Stage}: {detail}",
-                BasisDebug.LogTag.Video);
-        }
+            count = BasisMediaNative.bm_session_drain_events(_handle, events, EventDrainBatch);
+            for (int i = 0; i < count; i++)
+            {
+                string detail = Encoding.UTF8.GetString(events[i].Detail, (int)events[i].DetailLen);
+                if (events[i].Code == (uint)BmEventCode.Error) _lastErrorDetail = detail;
+                // WallUs is the session's own monotonic clock, so a line can be
+                // lined up against either diagnostics CSV without hand-aligning.
+                string at = (events[i].WallUs / 1_000_000.0).ToString("F3", CultureInfo.InvariantCulture);
+                BasisDebug.Log(
+                    $"[BasisMedia +{at}s] {(BmEventCode)events[i].Code}/{(BmStage)events[i].Stage}: {detail}",
+                    BasisDebug.LogTag.Video);
+            }
+            // A short batch is the queue's end. A negative is an error code,
+            // which ends the loop the same way.
+        } while (count == EventDrainBatch);
     }
 
     // Cues arrive ahead of presentation stamped with their due PTS; hold
