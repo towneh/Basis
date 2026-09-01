@@ -1194,9 +1194,17 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// leaving a backlog to arrive a frame late or not at all.
     const int EventDrainBatch = 64;
 
+    /// Ceiling on one tick's drain. The engine's log holds 1024, and every
+    /// record costs a UTF-8 decode and a Console line, so a full queue taken
+    /// in one frame is a visible hitch. Nothing is lost by stopping short —
+    /// the drain leaves what it cannot carry — so the rest arrives over the
+    /// next few ticks instead of all at once.
+    const int EventDrainPerTick = 256;
+
     unsafe void DrainEvents()
     {
         var events = stackalloc BmEvent[EventDrainBatch];
+        int drained = 0;
         int count;
         do
         {
@@ -1212,9 +1220,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
                     $"[BasisMedia +{at}s] {(BmEventCode)events[i].Code}/{(BmStage)events[i].Stage}: {detail}",
                     BasisDebug.LogTag.Video);
             }
+            if (count > 0) drained += count;
             // A short batch is the queue's end. A negative is an error code,
             // which ends the loop the same way.
-        } while (count == EventDrainBatch);
+        } while (count == EventDrainBatch && drained < EventDrainPerTick);
     }
 
     // Cues arrive ahead of presentation stamped with their due PTS; hold
