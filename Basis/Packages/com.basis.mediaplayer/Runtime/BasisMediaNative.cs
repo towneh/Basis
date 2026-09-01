@@ -175,6 +175,48 @@ public enum BmErrorCategory : uint
     Internal = 6,
 }
 
+/// <summary>
+/// Structured diagnostics event codes, mirroring the engine's own set.
+/// Every fallback, refusal, cap hit and correction is one of these.
+/// Discriminants are stable and are never reused: 14 is absent because it
+/// is spent, not because it is free. The engine's set only grows, so a
+/// plugin ahead of this mirror yields a value with no name here, which
+/// prints as its number.
+/// </summary>
+public enum BmEventCode : uint
+{
+    StateChange = 1,
+    Reconnect = 2,
+    DecodeFallbackHwToSw = 3,
+    TransportFallback = 4,
+    CodecRefused = 5,
+    CapHit = 6,
+    UrlBlocked = 7,
+    SlewCorrection = 8,
+    SnapCorrection = 9,
+    Seek = 10,
+    Discontinuity = 11,
+    CapabilityProbe = 12,
+    Error = 13,
+    AudioTrim = 15,
+    SyncSlew = 16,
+    SyncSeek = 17,
+}
+
+/// <summary>Which stage of the pipeline an event came from, mirroring the
+/// engine's own set.</summary>
+public enum BmStage : uint
+{
+    Source = 0,
+    Demux = 1,
+    Bank = 2,
+    Decode = 3,
+    Pool = 4,
+    Present = 5,
+    AudioRing = 6,
+    Clock = 7,
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct BmSnapshot
 {

@@ -305,6 +305,27 @@ locked client should not have handed the URL out in the first place.
 None of these has run yet. They want a server that can set the lock, which the local rig
 cannot do.
 
+## The diagnostics event drain
+
+The engine's structured events reach the Console through `DrainEvents`. Each line
+carries the session's own monotonic clock, so a line can be lined up against
+`BasisMediaFrames.csv` and `BasisMediaEngine.csv` without hand-aligning three
+timebases:
+
+```
+[BasisMedia +12.412s] AudioTrim/AudioRing: serve trimmed 70654 frames
+```
+
+Codes and stages mirror the engine's own sets (`BmEventCode`, `BmStage`). Both only
+ever grow, so a plugin newer than the managed side prints the number rather than a
+name; that is a gap in the mirror, not a failure.
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Named codes and a timebase | events read as `Code/Stage` with a session-relative timestamp, not `event 15 stage 6` | play any lane and read the Console; a `StateChange/Clock` line lands within the first second of every open |
+| No stack traces | Log-level Console lines carry no call stack, so a drain is readable during a pass | any scene holding a player; the first one to wake applies it |
+| An unknown code degrades to its number | a plugin ahead of the mirror still produces a readable line | temporarily delete `AudioTrim = 15` from `BmEventCode`, replay a lane that trims, confirm the line reads `15/AudioRing`, restore |
+
 ## What still needs a person
 
 Picture and sound quality, in a headset, on the live transports. No harness

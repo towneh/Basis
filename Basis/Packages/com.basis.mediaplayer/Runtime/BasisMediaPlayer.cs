@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Globalization;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -517,8 +518,21 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         CaptionChanged?.Invoke(text);
     }
 
+    /// Unity stamps a full call stack onto every Log-level Console line,
+    /// which buries the event drain under a dozen frames of its own
+    /// plumbing. The setting is application-wide — Unity offers no
+    /// narrower one — so it is applied once, and only once a player
+    /// exists to need it.
+    static bool _logStackTracesTrimmed;
+
     void Awake()
     {
+        if (!_logStackTracesTrimmed)
+        {
+            _logStackTracesTrimmed = true;
+            Application.SetStackTraceLogType(LogType.Log, StackTraceLogType.None);
+        }
+
         _frameTick = new BasisMediaDriverTick(Tick);
         // The sink lives beside the player, as it does in the authored
         // prefabs. It is optional: a player with none is a decoder with no
@@ -1141,13 +1155,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     }
 #endif
 
-    /// The engine's `Error` event code. Its detail is the only place the
-    /// reason for a failure is stated in words; the snapshot carries a
-    /// number.
-    private const uint ErrorEventCode = 13;
-
     /// Detail of the most recent failure, held so the error the session
     /// reports can say what went wrong rather than only which code it was.
+    /// The engine's `Error` event carries it; the snapshot carries only a
+    /// number.
     private string _lastErrorDetail;
 
     unsafe void DrainEvents()
@@ -1157,8 +1168,13 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         for (int i = 0; i < count; i++)
         {
             string detail = Encoding.UTF8.GetString(events[i].Detail, (int)events[i].DetailLen);
-            if (events[i].Code == ErrorEventCode) _lastErrorDetail = detail;
-            BasisDebug.Log($"[BasisMedia] event {events[i].Code} stage {events[i].Stage}: {detail}", BasisDebug.LogTag.Video);
+            if (events[i].Code == (uint)BmEventCode.Error) _lastErrorDetail = detail;
+            // WallUs is the session's own monotonic clock, so a line can be
+            // lined up against either diagnostics CSV without hand-aligning.
+            string at = (events[i].WallUs / 1_000_000.0).ToString("F3", CultureInfo.InvariantCulture);
+            BasisDebug.Log(
+                $"[BasisMedia +{at}s] {(BmEventCode)events[i].Code}/{(BmStage)events[i].Stage}: {detail}",
+                BasisDebug.LogTag.Video);
         }
     }
 
