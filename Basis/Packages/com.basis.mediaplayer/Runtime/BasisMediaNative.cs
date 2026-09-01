@@ -290,8 +290,10 @@ public unsafe struct BmEvent
     public uint Stage;
     public uint DetailLen;
     /// <summary>UTF-8, cut to DetailLen bytes and ending in an ellipsis
-    /// when it was cut. The full text reaches the process log, whose cap
-    /// is larger.</summary>
+    /// when it was cut. There is no fuller copy: the session event log and
+    /// the process log are fed separately, so a cut detail is not
+    /// recoverable through <see cref="BasisMediaNative.bm_drain_log"/>.
+    /// </summary>
     public fixed byte Detail[116];
 }
 

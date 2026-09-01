@@ -144,9 +144,11 @@ fn write_detail(text: &str, out: &mut [u8]) -> u32 {
     (len + DETAIL_ELLIPSIS.len()) as u32
 }
 
-/// One diagnostics event. `detail` is UTF-8, truncated to
-/// `detail_len` bytes and ending in `…` when it was (the full text also
-/// reaches the process log, whose cap is larger).
+/// One diagnostics event. `detail` is UTF-8, cut to `detail_len` bytes and
+/// ending in `…` when it was cut. **There is no fuller copy across the
+/// ABI**: the session event log and the process log are fed separately, so
+/// a cut detail is not recoverable through `bm_drain_log`. A site whose
+/// text matters beyond this cap emits a free-text line as well.
 #[repr(C)]
 pub struct BmEvent {
     pub wall_us: i64,
