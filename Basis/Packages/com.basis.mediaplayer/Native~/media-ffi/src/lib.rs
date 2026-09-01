@@ -86,7 +86,14 @@ pub struct BmSnapshot {
     /// resampler — or the slew rung silently does nothing and every
     /// correction waits for the seek rung. 0 = no correction wanted.
     pub sync_rate_ppm: i32,
-    pub reserved2: u32,
+    /// Events the session's log refused because its cap was already full,
+    /// cumulative. Non-zero means the narrative has holes in it and a
+    /// reader must not treat the drained sequence as complete. Saturates
+    /// rather than wrapping: the engine counts in `u64` and this took the
+    /// snapshot's second reserved slot, so the struct is unchanged at 88
+    /// bytes and every other field keeps its place. A stale plugin writes
+    /// 0 here, which reads as "nothing lost".
+    pub events_dropped: u32,
 }
 
 /// A record written with a whole-struct copy hands the caller its padding
@@ -456,6 +463,14 @@ pub unsafe extern "C" fn bm_session_close(handle: u64) -> i32 {
     .unwrap_or(BM_ERR_PANIC)
 }
 
+/// Narrow an engine counter to the `u32` the snapshot carries. A wrap
+/// would report a smaller loss than actually happened, which is worse
+/// than a ceiling: past `u32::MAX` the only honest claim left is "a very
+/// great many".
+fn saturate_u32(value: u64) -> u32 {
+    value.min(u32::MAX as u64) as u32
+}
+
 /// Fill `out` with the session snapshot. One call per frame replaces
 /// per-field polling.
 ///
@@ -488,7 +503,7 @@ pub unsafe extern "C" fn bm_session_poll(handle: u64, out: *mut BmSnapshot) -> i
             audio_channels: shared.audio_channels.load(Ordering::Relaxed),
             av_offset_us: shared.av_offset_us.load(Ordering::Relaxed),
             sync_rate_ppm: entry.pipeline.sync_rate_ppm.load(Ordering::Relaxed) as i32,
-            reserved2: 0,
+            events_dropped: saturate_u32(entry.pipeline.diag.events_dropped()),
         };
         // SAFETY: caller contract — out is valid for writes.
         unsafe { out.write(snapshot) };
@@ -1186,6 +1201,18 @@ pub unsafe extern "C" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refused-event total is the one figure that says the drained
+    /// sequence has holes in it. Wrapping it would report a smaller loss
+    /// than happened, and a small loss is exactly what a reader discounts.
+    #[test]
+    fn a_counter_past_the_snapshot_field_saturates() {
+        assert_eq!(saturate_u32(0), 0);
+        assert_eq!(saturate_u32(7), 7);
+        assert_eq!(saturate_u32(u32::MAX as u64), u32::MAX);
+        assert_eq!(saturate_u32(u32::MAX as u64 + 1), u32::MAX);
+        assert_eq!(saturate_u32(u64::MAX), u32::MAX);
+    }
 
     /// A failed consumer open is retried for the same handle, but not
     /// forever. Caching the first failure outright meant a session whose

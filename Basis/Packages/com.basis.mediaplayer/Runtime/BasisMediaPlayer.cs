@@ -908,6 +908,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         System.Threading.Volatile.Write(ref _engineSampleRate, 0);
         System.Threading.Volatile.Write(ref _syncRatePpm, 0);
         System.Threading.Volatile.Write(ref _avOffsetUs, int.MinValue);
+        _eventsDroppedSeen = 0;
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (_renderHooked)
         {
@@ -1055,6 +1056,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 #endif
 
         DrainEvents();
+        ReportDroppedEvents(snapshot.EventsDropped);
         DrainCaptions(snapshot.PositionUs);
         DrainUserData(snapshot.PositionUs);
         RefreshAudioTracks();
@@ -1160,6 +1162,22 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// The engine's `Error` event carries it; the snapshot carries only a
     /// number.
     private string _lastErrorDetail;
+
+    /// Refused events already accounted for, so a session's running total
+    /// is reported as it grows rather than every frame it stays non-zero.
+    uint _eventsDroppedSeen;
+
+    /// The engine's log has a cap, and what it refuses is a hole in the
+    /// drained sequence. Silence here would leave the log looking whole.
+    void ReportDroppedEvents(uint total)
+    {
+        if (total <= _eventsDroppedSeen) return;
+        uint lost = total - _eventsDroppedSeen;
+        _eventsDroppedSeen = total;
+        BasisDebug.LogWarning(
+            $"[BasisMedia] diagnostics log full: {lost} event(s) refused, {total} this session",
+            BasisDebug.LogTag.Video);
+    }
 
     /// Events per drain call. A frame that opens a session or loses a
     /// transport produces a burst, and what the engine holds beyond one

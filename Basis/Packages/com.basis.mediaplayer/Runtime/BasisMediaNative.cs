@@ -246,7 +246,13 @@ public struct BmSnapshot
     /// while non-zero, or corrections degrade to seeks.
     /// </summary>
     public int SyncRatePpm;
-    public uint Reserved2;
+    /// <summary>
+    /// Events the session's log refused because its cap was already full,
+    /// cumulative and saturating. Non-zero means the drained sequence has
+    /// holes in it. A plugin older than this field writes 0, which reads
+    /// as "nothing lost".
+    /// </summary>
+    public uint EventsDropped;
 }
 
 [StructLayout(LayoutKind.Sequential)]
