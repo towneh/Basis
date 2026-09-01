@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use media_demux::{ByteSource, SourceError};
-use media_diag::diag_log;
+use media_diag::diag_warn;
 
 use crate::RistError;
 use crate::ffi;
@@ -113,7 +113,7 @@ extern "C" fn on_data(arg: *mut c_void, mut block: *mut ffi::RistDataBlock) -> c
         // logged outright — the callback runs once per datagram.
         let panics = PANICS.fetch_add(1, Ordering::Relaxed) + 1;
         if panics == 1 || panics.is_multiple_of(256) {
-            diag_log!("rist: {panics} panic(s) in the data callback, datagram dropped");
+            diag_warn!("rist: {panics} panic(s) in the data callback, datagram dropped");
         }
     }
     // The free dereferences the block without checking it, so the null the

@@ -19,7 +19,7 @@
 use media_decode::{
     ColorInfo, DecodeError, OpaqueFrame, OpaqueImage, SubmitOutcome, VideoFrame, packed_nv12_len,
 };
-use media_diag::diag_log;
+use media_diag::diag_warn;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
@@ -460,7 +460,7 @@ impl HwVideoDecoder {
             if let Err(e) =
                 mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, dxva.manager.as_raw() as usize)
             {
-                diag_log!("{}: SET_D3D_MANAGER refused: {e}", codec.tag());
+                diag_warn!("{}: SET_D3D_MANAGER refused: {e}", codec.tag());
             }
             let input = video_input_type(codec.subtype(), Some((width, height)))?;
             mf(

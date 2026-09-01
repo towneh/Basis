@@ -14,7 +14,7 @@
 //! any check goes out". Inbound traffic is safe to parse from anywhere:
 //! ICE consent requires message integrity with session credentials.
 
-use media_diag::diag_log;
+use media_diag::{diag_log, diag_warn};
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -190,7 +190,7 @@ pub(crate) async fn run_session(
                     } else if let Some(named) =
                         note_blocked_peer(&mut blocked_peers, t.destination.ip())
                     {
-                        diag_log!("whep: blocked candidate address {named} (gate)");
+                        diag_warn!("whep: blocked candidate address {named} (gate)");
                         if blocked_peers.len() == MAX_BLOCKED_PEERS {
                             diag_log!(
                                 "whep: {MAX_BLOCKED_PEERS} blocked candidate addresses named; \

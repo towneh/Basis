@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use media_clock::MediaTime;
-use media_diag::diag_log;
+use media_diag::diag_warn;
 
 /// Ring capacity in frames, sized in seconds of audio.
 const RING_SECONDS: u32 = 2;
@@ -416,7 +416,7 @@ fn audio_pair(format: AudioFormatInfo, shared: Arc<AudioShared>) -> (AudioProduc
     let channels = format.channels.max(1) as usize;
     let cap = match MAX_RING_SAMPLES / channels * channels {
         0 => {
-            diag_log!(
+            diag_warn!(
                 "audio ring: one frame of {channels} channels exceeds the {MAX_RING_SAMPLES}-sample cap, so no audio can be banked"
             );
             MAX_RING_SAMPLES

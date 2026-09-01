@@ -34,7 +34,7 @@ use std::thread::JoinHandle;
 use media_bank::{Bank, BankConfig, BufferDepth, Liveness};
 use media_clock::{ClockConfig, Generation, MediaClock, MediaTime};
 use media_demux::{ByteSource, DemuxError, DemuxLimits, DemuxOptions, SourceError};
-use media_diag::{EventCode, SessionDiag, Stage, diag_log};
+use media_diag::{EventCode, SessionDiag, Stage, diag_log, diag_warn};
 use media_io::{AllowAllGate, FileSource, HttpSource, IoError, IoLimits, PublicAddressGate};
 
 /// Decode-channel depths. The audio side stays shallow (its decoders and
@@ -661,7 +661,7 @@ fn run_diag_sampler(px: Arc<PipelineShared>, path: std::path::PathBuf, append: b
         .open(&path)
         .and_then(|file| recorder.write_csv_rows(std::io::BufWriter::new(file), header));
     if let Err(e) = written {
-        diag_log!("diag csv {}: {e}", path.display());
+        diag_warn!("diag csv {}: {e}", path.display());
     }
 }
 
@@ -936,7 +936,7 @@ fn open_rtsp(
                     Stage::Source,
                     reason.to_string(),
                 );
-                diag_log!("rtsp transport fallback: {reason}");
+                diag_warn!("rtsp transport fallback: {reason}");
             }
             diag_log!("rtsp transport: {}", demuxer.transport());
             Ok(Box::new(demuxer))

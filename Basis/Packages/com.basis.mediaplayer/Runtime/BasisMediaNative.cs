@@ -201,6 +201,20 @@ public enum BmEventCode : uint
     AudioTrim = 15,
     SyncSlew = 16,
     SyncSeek = 17,
+    /// <summary>A free-text engine diagnostic. Detail is the whole line —
+    /// this is the channel that works before a session exists and after it
+    /// closes, so it carries no more structure than the words.</summary>
+    Log = 18,
+}
+
+/// <summary>How much a diagnostic matters, mirroring the engine's own set.
+/// Ordered most severe first, so "at least this severe" is a
+/// comparison.</summary>
+public enum BmLevel : uint
+{
+    Error = 0,
+    Warn = 1,
+    Info = 2,
 }
 
 /// <summary>Which stage of the pipeline an event came from, mirroring the

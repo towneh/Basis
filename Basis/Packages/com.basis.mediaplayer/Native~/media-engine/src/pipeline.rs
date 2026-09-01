@@ -22,7 +22,7 @@ use media_bank::{Bank, PushOutcome};
 use media_clock::{Correction, Generation, Master, MediaClock, MediaTime};
 use media_decode::{AudioDecoder, SubmitOutcome, VideoDecoder, VideoFrame};
 use media_demux::{Au, Demuxer, Format, StreamEvent};
-use media_diag::{EventCode, SessionDiag, Stage, diag_log};
+use media_diag::{EventCode, SessionDiag, Stage, diag_err, diag_log, diag_warn};
 
 use crate::audio::{
     AudioConsumer, AudioFormatInfo, AudioProducer, frames_before_origin, install_audio_generation,
@@ -653,7 +653,7 @@ impl PipelineShared {
             error.stage,
             error.detail.clone(),
         );
-        diag_log!("session error: {}", error.detail);
+        diag_err!("session error: {}", error.detail);
         self.set_state(State::Error);
         self.shared.stop.store(true, Ordering::Relaxed);
         self.bank.changed.notify_all();
@@ -1141,7 +1141,7 @@ fn reconnect(
             Stage::Source,
             format!("attempt {attempt}/{RECONNECT_ATTEMPTS} in {backoff:?} after: {cause}"),
         );
-        diag_log!(
+        diag_warn!(
             "transport lost ({cause}); reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} in {backoff:?}"
         );
 

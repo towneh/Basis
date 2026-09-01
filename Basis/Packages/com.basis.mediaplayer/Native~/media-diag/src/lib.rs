@@ -9,9 +9,11 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use media_clock::MediaTime;
 
@@ -28,11 +30,92 @@ pub fn set_log_sink(sink: fn(&str)) {
     *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
 }
 
+/// How much a diagnostic matters. Ordered most severe first, so "at least
+/// this severe" is a comparison rather than a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Level {
+    Error = 0,
+    Warn = 1,
+    Info = 2,
+}
+
+/// Microseconds since the engine was first asked for a diagnostic in this
+/// process. The process log outlives every session, so it cannot borrow a
+/// session's clock; a reader lining a line up against a session's events
+/// is comparing two different origins and the drain says so.
+fn process_wall_us() -> i64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_micros() as i64
+}
+
+/// One line in the process log: a session's structured event or a free-text
+/// diagnostic, in the one shape. `session` is 0 for a line that belongs to
+/// no session, which is most of them worth having — the failures that cost
+/// the most to diagnose happen before a handle exists or after it closes.
+#[derive(Debug, Clone)]
+pub struct LogRecord {
+    pub wall_us: i64,
+    pub session: u64,
+    pub level: Level,
+    pub code: EventCode,
+    pub stage: Stage,
+    pub detail: String,
+}
+
+/// Lines held for a host that drains on its own tick. A headless run
+/// drains nothing at all, so the ring must stay useful having been full
+/// for the whole session: it drops its **oldest** line, where the session
+/// event log refuses its newest. Refusing here would freeze the process
+/// log at whatever the first half-second happened to contain.
+const LOG_RING_CAP: usize = 512;
+
+static LOG_RING: Mutex<VecDeque<LogRecord>> = Mutex::new(VecDeque::new());
+static LOG_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+fn push_log_record(record: LogRecord) {
+    let mut ring = LOG_RING.lock().unwrap_or_else(|e| e.into_inner());
+    while ring.len() >= LOG_RING_CAP {
+        ring.pop_front();
+        LOG_DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    ring.push_back(record);
+}
+
+/// Drain up to `max` lines from the process log, oldest first, leaving the
+/// rest queued.
+pub fn drain_log(max: usize) -> Vec<LogRecord> {
+    let mut ring = LOG_RING.lock().unwrap_or_else(|e| e.into_inner());
+    let take = max.min(ring.len());
+    ring.drain(..take).collect()
+}
+
+/// Lines the ring dropped to make room, cumulative. Non-zero means the
+/// drained sequence has holes at the *start* of what it covers.
+pub fn log_dropped() -> u64 {
+    LOG_DROPPED.load(Ordering::Relaxed)
+}
+
 /// Emits one diagnostic line. The default stderr sink names the source,
 /// since it shares a console with whatever else the host writes; an
 /// installed sink is not given the prefix, because a platform log that
 /// needs one carries it as a tag instead.
 pub fn log(line: &str) {
+    log_at(Level::Info, line);
+}
+
+/// [`log`] at a stated severity. The line goes to the platform sink as it
+/// always has *and* into the process log, so a host with no console still
+/// has the free text — on a user's machine the sink alone is unreachable.
+pub fn log_at(level: Level, line: &str) {
+    push_log_record(LogRecord {
+        wall_us: process_wall_us(),
+        session: 0,
+        level,
+        code: EventCode::Log,
+        stage: Stage::Source,
+        detail: line.to_string(),
+    });
     // Copied out so the sink runs with the lock released: a sink is
     // host-supplied and may log, and re-entering here would deadlock.
     let sink = *SINK.lock().unwrap_or_else(|e| e.into_inner());
@@ -42,10 +125,23 @@ pub fn log(line: &str) {
     }
 }
 
-/// [`log`] with `format!` arguments.
+/// [`log`] with `format!` arguments, at `Info`.
 #[macro_export]
 macro_rules! diag_log {
     ($($arg:tt)*) => { $crate::log(&format!($($arg)*)) };
+}
+
+/// [`diag_log`] at `Warn`: a fallback, a refusal or a cap the viewer could
+/// notice.
+#[macro_export]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => { $crate::log_at($crate::Level::Warn, &format!($($arg)*)) };
+}
+
+/// [`diag_log`] at `Error`: the session is not going to do what was asked.
+#[macro_export]
+macro_rules! diag_err {
+    ($($arg:tt)*) => { $crate::log_at($crate::Level::Error, &format!($($arg)*)) };
 }
 
 /// Every stage of the one pipeline shape (§6.2).
@@ -169,11 +265,43 @@ pub enum EventCode {
     /// threshold — the last rung, never the first. Detail carries the
     /// error and the landed target.
     SyncSeek = 17,
+    /// A free-text diagnostic ([`log`]). Detail is the whole line: this
+    /// is the channel that works before a session exists and after it
+    /// closes, so it carries no more structure than the words.
+    Log = 18,
+}
+
+impl EventCode {
+    /// How much this code matters. A code's severity is a property of the
+    /// code, so it is stated once here rather than at each of the twenty
+    /// sites that raise one; a free-text line states its own.
+    pub fn level(self) -> Level {
+        match self {
+            EventCode::Error => Level::Error,
+            EventCode::Reconnect
+            | EventCode::DecodeFallbackHwToSw
+            | EventCode::TransportFallback
+            | EventCode::CodecRefused
+            | EventCode::CapHit
+            | EventCode::UrlBlocked
+            | EventCode::Discontinuity
+            | EventCode::SnapCorrection
+            | EventCode::AudioTrim => Level::Warn,
+            EventCode::StateChange
+            | EventCode::SlewCorrection
+            | EventCode::Seek
+            | EventCode::CapabilityProbe
+            | EventCode::SyncSlew
+            | EventCode::SyncSeek
+            | EventCode::Log => Level::Info,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct DiagEvent {
     pub wall: MediaTime,
+    pub level: Level,
     pub code: EventCode,
     pub stage: Stage,
     pub detail: String,
@@ -226,6 +354,7 @@ impl SessionDiag {
         }
         events.push(DiagEvent {
             wall,
+            level: code.level(),
             code,
             stage,
             detail: detail.into(),
@@ -425,6 +554,89 @@ mod tests {
         assert_eq!(last, i32::MIN.to_string(), "default must be the sentinel");
     }
 
+    /// The free-text channel is the one that works with no session open,
+    /// which is where the failures that cost the most to diagnose happen.
+    /// It reaches the process log with a level rather than only reaching a
+    /// platform sink a user's machine has no way to read.
+    #[test]
+    fn a_free_text_line_reaches_the_process_log() {
+        let _globals = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = drain_log(usize::MAX);
+        set_log_sink(swallow);
+
+        log("plain info");
+        crate::diag_warn!("warned {}", 7);
+        crate::diag_err!("failed");
+
+        let lines = drain_log(64);
+        *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines
+                .iter()
+                .all(|r| r.code == EventCode::Log && r.session == 0)
+        );
+        assert_eq!(
+            (lines[0].level, &*lines[0].detail),
+            (Level::Info, "plain info")
+        );
+        assert_eq!(
+            (lines[1].level, &*lines[1].detail),
+            (Level::Warn, "warned 7")
+        );
+        assert_eq!(
+            (lines[2].level, &*lines[2].detail),
+            (Level::Error, "failed")
+        );
+        assert!(drain_log(64).is_empty(), "a drained log is empty");
+    }
+
+    /// A headless run drains nothing, so the ring spends the whole session
+    /// full. Refusing new lines there would freeze the process log at
+    /// whatever the first half-second contained; it drops its oldest
+    /// instead, which is the opposite of the session event log's policy.
+    #[test]
+    fn a_full_process_log_drops_its_oldest_line() {
+        let _globals = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = drain_log(usize::MAX);
+        let dropped_before = log_dropped();
+
+        for i in 0..LOG_RING_CAP + 3 {
+            push_log_record(LogRecord {
+                wall_us: i as i64,
+                session: 0,
+                level: Level::Info,
+                code: EventCode::Log,
+                stage: Stage::Source,
+                detail: format!("line {i}"),
+            });
+        }
+
+        let lines = drain_log(usize::MAX);
+        assert_eq!(lines.len(), LOG_RING_CAP);
+        assert_eq!(lines[0].detail, "line 3");
+        assert_eq!(
+            lines[LOG_RING_CAP - 1].detail,
+            format!("line {}", LOG_RING_CAP + 2)
+        );
+        assert_eq!(log_dropped() - dropped_before, 3);
+    }
+
+    /// Severity belongs to the code rather than to each of the twenty
+    /// sites that raise one, so the mapping is worth pinning: an `Error`
+    /// event that reported as `Info` would be filtered out by exactly the
+    /// setting a user turns on to cut the noise.
+    #[test]
+    fn an_events_level_follows_its_code() {
+        let diag = SessionDiag::default();
+        for code in [EventCode::Error, EventCode::AudioTrim, EventCode::Seek] {
+            diag.event(MediaTime::ZERO, code, Stage::Bank, "detail");
+        }
+        let levels: Vec<Level> = diag.take_events().iter().map(|e| e.level).collect();
+        assert_eq!(levels, [Level::Error, Level::Warn, Level::Info]);
+    }
+
     #[test]
     fn rows_match_header_width() {
         let diag = SessionDiag::default();
@@ -506,6 +718,10 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .push(line.to_string());
     }
+
+    /// For a row that cares about the ring and not the sink: the default
+    /// stderr branch would put its lines in the harness's output.
+    fn swallow(_line: &str) {}
 
     fn capture_marked(line: &str) {
         CAPTURED
