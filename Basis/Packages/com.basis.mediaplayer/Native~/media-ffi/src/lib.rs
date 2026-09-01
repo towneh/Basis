@@ -106,12 +106,47 @@ const _: () = {
     assert!(size_of::<BmUserData>() == 8 + BM_USER_DATA_UUID_LEN + 4 + 4);
     assert!(size_of::<BmAudioTrack>() == 4 * 4 + BM_TRACK_LANG_CAP + 4 + BM_TRACK_LABEL_CAP);
     assert!(size_of::<BmLogRecord>() == 8 + 8 + 4 * 4 + BM_LOG_DETAIL_CAP);
+    // `write_detail` makes room for the mark before stepping back to a
+    // boundary, so a cap at or under its length would truncate into it.
+    assert!(BM_EVENT_DETAIL_CAP > DETAIL_ELLIPSIS.len());
+    assert!(BM_LOG_DETAIL_CAP > DETAIL_ELLIPSIS.len());
 };
 
 pub const BM_EVENT_DETAIL_CAP: usize = 116;
 
+/// What a truncated detail ends with, so a reader can tell a line that was
+/// cut from one that happened to end there. A character rather than a
+/// flag: every record's layout is fixed and padding-free, and an eight-byte
+/// field to say what one character says would move all of them.
+const DETAIL_ELLIPSIS: &[u8] = "…".as_bytes();
+
+/// Copy `text` into a fixed detail buffer, truncating on a UTF-8 boundary
+/// and marking it when it did. Returns the bytes written.
+///
+/// The mark costs three bytes of the cap. That is the right trade: the
+/// caller decodes these bytes as text and shows them to a person, and a
+/// sentence that stops mid-word reads as the engine having nothing more to
+/// say rather than as the record having run out of room.
+fn write_detail(text: &str, out: &mut [u8]) -> u32 {
+    let bytes = text.as_bytes();
+    if bytes.len() <= out.len() {
+        out[..bytes.len()].copy_from_slice(bytes);
+        return bytes.len() as u32;
+    }
+    // Room for the mark first, then back to a boundary — the caller
+    // decodes the whole buffer, so a split character is its problem.
+    let mut len = out.len() - DETAIL_ELLIPSIS.len();
+    while len > 0 && !text.is_char_boundary(len) {
+        len -= 1;
+    }
+    out[..len].copy_from_slice(&bytes[..len]);
+    out[len..len + DETAIL_ELLIPSIS.len()].copy_from_slice(DETAIL_ELLIPSIS);
+    (len + DETAIL_ELLIPSIS.len()) as u32
+}
+
 /// One diagnostics event. `detail` is UTF-8, truncated to
-/// `detail_len` bytes (the full text also reaches the native log).
+/// `detail_len` bytes and ending in `…` when it was (the full text also
+/// reaches the process log, whose cap is larger).
 #[repr(C)]
 pub struct BmEvent {
     pub wall_us: i64,
@@ -676,18 +711,12 @@ pub unsafe extern "C" fn bm_session_drain_events(handle: u64, out: *mut BmEvent,
         let count = events.len();
         for (i, event) in events.into_iter().enumerate() {
             let mut detail = [0u8; BM_EVENT_DETAIL_CAP];
-            let bytes = event.detail.as_bytes();
-            let mut len = bytes.len().min(BM_EVENT_DETAIL_CAP);
-            // Truncate on a UTF-8 boundary.
-            while len > 0 && !event.detail.is_char_boundary(len) {
-                len -= 1;
-            }
-            detail[..len].copy_from_slice(&bytes[..len]);
+            let detail_len = write_detail(&event.detail, &mut detail);
             let record = BmEvent {
                 wall_us: event.wall.as_micros(),
                 code: event.code as u32,
                 stage: event.stage as u32,
-                detail_len: len as u32,
+                detail_len,
                 detail,
             };
             // SAFETY: caller contract — out points to cap writable
@@ -731,20 +760,14 @@ pub unsafe extern "C" fn bm_drain_log(
         let count = lines.len();
         for (i, line) in lines.into_iter().enumerate() {
             let mut detail = [0u8; BM_LOG_DETAIL_CAP];
-            let bytes = line.detail.as_bytes();
-            let mut len = bytes.len().min(BM_LOG_DETAIL_CAP);
-            // Truncate on a UTF-8 boundary.
-            while len > 0 && !line.detail.is_char_boundary(len) {
-                len -= 1;
-            }
-            detail[..len].copy_from_slice(&bytes[..len]);
+            let detail_len = write_detail(&line.detail, &mut detail);
             let record = BmLogRecord {
                 wall_us: line.wall_us,
                 session: line.session,
                 level: line.level as u32,
                 code: line.code as u32,
                 stage: line.stage as u32,
-                detail_len: len as u32,
+                detail_len,
                 detail,
             };
             // SAFETY: caller contract — out points to cap writable
@@ -1287,6 +1310,34 @@ pub unsafe extern "C" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A detail that was cut has to say so. The records are fixed-width
+    /// and most engine detail fits, so a reader who meets a truncated one
+    /// reads a sentence that stops mid-word and takes it for the whole of
+    /// what the engine had to say.
+    #[test]
+    fn a_truncated_detail_says_so() {
+        let mut out = [0u8; 16];
+        let len = write_detail("short", &mut out) as usize;
+        assert_eq!(&out[..len], b"short", "a detail that fits is untouched");
+
+        let mut out = [0u8; 16];
+        let len = write_detail("0123456789abcdefghij", &mut out) as usize;
+        assert!(len <= out.len());
+        assert_eq!(
+            std::str::from_utf8(&out[..len]).expect("valid UTF-8"),
+            "0123456789abc…"
+        );
+
+        // The mark takes its room from the end first, so the step back to
+        // a boundary has to happen after that rather than before it.
+        let source = "0123456789abé cdef";
+        let mut out = [0u8; 16];
+        let len = write_detail(source, &mut out) as usize;
+        let text = std::str::from_utf8(&out[..len]).expect("valid UTF-8");
+        assert!(text.ends_with('…'), "{text:?} does not say it was cut");
+        assert!(source.starts_with(text.trim_end_matches('…')));
+    }
 
     /// The refused-event total is the one figure that says the drained
     /// sequence has holes in it. Wrapping it would report a smaller loss

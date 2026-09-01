@@ -26,10 +26,10 @@ fn a_line_emitted_with_no_session_open_reaches_the_drain() {
         "whatever the process said before is not this row's"
     );
 
-    // A line long enough to prove the cap truncates rather than overruns,
-    // and multi-byte at the boundary so the truncation has to land on a
-    // char boundary rather than mid-sequence.
-    let long = format!("{}é tail", "x".repeat(BM_LOG_DETAIL_CAP - 1));
+    // Long enough to truncate, with a multi-byte character sat exactly
+    // where the mark's room ends, so the step back to a char boundary
+    // has to happen after the mark is accounted for, not before it.
+    let long = format!("{}é tail", "x".repeat(BM_LOG_DETAIL_CAP - 4));
     media_diag::log("rtsp transport: TCP (interleaved)");
     media_diag::log_at(media_diag::Level::Error, &long);
 
@@ -56,7 +56,8 @@ fn a_line_emitted_with_no_session_open_reaches_the_drain() {
     assert!(second.detail_len < BM_LOG_DETAIL_CAP as u32);
     let text = std::str::from_utf8(&second.detail[..second.detail_len as usize])
         .expect("truncation lands on a char boundary");
-    assert!(long.starts_with(text));
+    assert!(text.ends_with('…'), "a cut line says it was cut");
+    assert!(long.starts_with(text.trim_end_matches('…')));
     assert!(text.len() < long.len(), "the long line was truncated");
 
     // SAFETY: out points to 8 writable records.

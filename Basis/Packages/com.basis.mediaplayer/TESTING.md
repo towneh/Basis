@@ -327,6 +327,7 @@ name; that is a gap in the mirror, not a failure.
 | An unknown code degrades to its number | a plugin ahead of the mirror still produces a readable line | temporarily delete `AudioTrim = 15` from `BmEventCode`, replay a lane that trims, confirm the line reads `15/AudioRing`, restore |
 | A burst arrives whole | the drain empties the queue in the frame it ran, rather than leaving a backlog | drop `EventDrainBatch` to 4, open a lane, confirm the open's events still all appear on the same frame; restore |
 | A full log says so | the drained sequence is never quietly incomplete: the engine's log has a cap, and what it refuses is reported once per step rather than every frame it stays non-zero | drop `SessionDiag::default`'s cap from 1024 to 2 in the engine, rebuild the plugin, play a lane; the Console warns `diagnostics log full: N event(s) refused, M this session`. Restore |
+| A cut detail ends in `…` | a Console line that ran past the record's 116 bytes says so, rather than reading as a sentence the engine stopped writing | open a URL long enough to overrun the detail of the refusal it provokes — a bad host with a long path is easiest — and read the `Error/Source` line |
 
 ## What still needs a person
 
