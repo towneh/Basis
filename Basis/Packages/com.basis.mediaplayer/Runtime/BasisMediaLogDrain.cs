@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using UnityEngine;
 
@@ -28,6 +29,12 @@ public static class BasisMediaLogDrain
     /// Records per drain call. The ring holds 512 and drops its oldest, so
     /// what one call cannot carry is asked for again rather than lost.
     const int DrainBatch = 32;
+
+    /// Ceiling on one frame's drain, for the same reason the event drain has
+    /// one: the ring holds 512, and taking all of it at once is a UTF-8
+    /// decode and a Console line 512 times inside one frame. What is left
+    /// stays in the ring and the next frame takes it.
+    const int DrainPerFrame = 128;
 
     /// How much of the tail is kept for a diagnostics view to read. A tail,
     /// not a transcript: the Console and the platform log are where a whole
@@ -61,6 +68,7 @@ public static class BasisMediaLogDrain
         _drainedFrame = Time.frameCount;
 
         var records = stackalloc BmLogRecord[DrainBatch];
+        int drained = 0;
         int count;
         do
         {
@@ -69,9 +77,10 @@ public static class BasisMediaLogDrain
             for (int i = 0; i < count; i++)
                 Emit(&records[i]);
             ReportEvicted(evicted);
+            if (count > 0) drained += count;
             // A short batch is the queue's end. A negative is an error code,
             // which ends the loop the same way.
-        } while (count == DrainBatch);
+        } while (count == DrainBatch && drained < DrainPerFrame);
     }
 
     // Taken by pointer rather than by value or `in`: a fixed buffer can only
@@ -108,7 +117,38 @@ public static class BasisMediaLogDrain
                 break;
         }
 
-        LineReceived?.Invoke(line);
+        Notify(line);
+    }
+
+    /// A subscriber is third-party code on a public event, and one throwing
+    /// from inside the drain would take the rest of the batch with it — the
+    /// Console lines, the tail, and every later subscriber. Those records
+    /// have already left the native ring, so nothing could fetch them
+    /// again. Each handler is invoked on its own and costs only itself.
+    static void Notify(BasisMediaLogLine line)
+    {
+        Action<BasisMediaLogLine> handlers = LineReceived;
+        if (handlers == null) return;
+
+        Delegate[] list = handlers.GetInvocationList();
+        for (int i = 0; i < list.Length; i++)
+        {
+            var handler = (Action<BasisMediaLogLine>)list[i];
+            try
+            {
+                handler(line);
+            }
+            catch (Exception e)
+            {
+                // Keyed on the handler, so a chatty lane reports each broken
+                // subscriber once rather than once per line.
+                MethodInfo method = handler.Method;
+                BasisDebug.LogErrorOnce(
+                    $"BasisMediaLogDrain:{method.DeclaringType?.FullName}.{method.Name}",
+                    $"[BasisMedia] log subscriber {method.DeclaringType?.Name}.{method.Name} threw: {e}",
+                    BasisDebug.LogTag.Video);
+            }
+        }
     }
 
     static void ReportEvicted(ulong total)
