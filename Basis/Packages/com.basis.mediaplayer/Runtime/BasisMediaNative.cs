@@ -55,6 +55,19 @@ public static class BasisMediaNative
     [DllImport(Dll)]
     public static extern unsafe int bm_session_drain_events(ulong handle, BmEvent* events, uint capacity);
 
+    /// <summary>
+    /// Drain the engine's process-wide free-text log, oldest first; returns
+    /// the count written. No handle: it answers before the first session
+    /// opens and after the last one closes, which is where most of what it
+    /// carries is said. Records beyond <paramref name="capacity"/> stay
+    /// queued, so call again until a call comes back short.
+    /// <paramref name="evicted"/> may be null; it receives the running count
+    /// of lines the ring dropped to make room, which describes holes at the
+    /// start of what follows rather than the end.
+    /// </summary>
+    [DllImport(Dll)]
+    public static extern unsafe int bm_drain_log(BmLogRecord* records, uint capacity, ulong* evicted);
+
     [DllImport(Dll)]
     public static extern unsafe int bm_session_drain_captions(ulong handle, BmCaption* captions, uint capacity);
 
@@ -276,7 +289,35 @@ public unsafe struct BmEvent
     public uint Code;
     public uint Stage;
     public uint DetailLen;
+    /// <summary>UTF-8, cut to DetailLen bytes and ending in an ellipsis
+    /// when it was cut. The full text reaches the process log, whose cap
+    /// is larger.</summary>
     public fixed byte Detail[116];
+}
+
+/// <summary>
+/// One line of the engine's process-wide free-text log, in the same shape
+/// an event has. 256 bytes, no padding.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct BmLogRecord
+{
+    /// <summary>Microseconds since the plugin's first diagnostic in this
+    /// process. <b>Not</b> a session clock — <see cref="BmEvent.WallUs"/>
+    /// counts from its own session's start, so the two have different
+    /// origins and must not be subtracted from one another.</summary>
+    public long WallUs;
+
+    /// <summary>0 for a line that belongs to no session, which is every
+    /// line today: the channel exists for what is said with no handle
+    /// open.</summary>
+    public ulong Session;
+
+    public uint Level;
+    public uint Code;
+    public uint Stage;
+    public uint DetailLen;
+    public fixed byte Detail[224];
 }
 
 /// <summary>

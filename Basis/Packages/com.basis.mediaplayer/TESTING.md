@@ -329,6 +329,21 @@ name; that is a gap in the mirror, not a failure.
 | A full log says so | the drained sequence is never quietly incomplete: the engine's log has a cap, and what it refuses is reported once per step rather than every frame it stays non-zero | drop `SessionDiag::default`'s cap from 1024 to 2 in the engine, rebuild the plugin, play a lane; the Console warns `diagnostics log full: N event(s) refused, M this session`. Restore |
 | A cut detail ends in `…` | a Console line that ran past the record's 116 bytes says so, rather than reading as a sentence the engine stopped writing | open a URL long enough to overrun the detail of the refusal it provokes — a bad host with a long path is easiest — and read the `Error/Source` line |
 
+The engine's free-text diagnostics are a second channel, drained by
+`BasisMediaLogDrain` and prefixed `[BasisMedia process +N.NNNs]`. **That clock counts
+from the plugin's first diagnostic, not from a session's start** — the two prefixes
+name different origins on purpose, and commit 8 of the logging spec is what makes them
+comparable. It is pumped from every player's tick and deduplicated on the frame, so it
+needs at least one player alive: a client with no media player in the scene never loads
+the plugin, which is deliberate and is why this is not driven from a startup hook.
+
+| Row | What it proves | How to run |
+| --- | --- | --- |
+| Transport reaches the Console | `rtsp transport: …` — the fact that ruled out packet loss on the 2026-08-25 pass — no longer needs a DBWIN reader attached to see | play `rtsp://mr.town:8090/imax51`; the line appears within the first second |
+| One copy per line | the drain is process-wide, not per-player: the ring is one queue for the whole plugin, so three players must not print everything three times | put three players in a scene, open a stream on one, count the `process` lines |
+| Level picks the Console severity | a refusal reads as a warning and a failure as an error, rather than everything arriving flat | open a bad URL: the `session error:` line is red. Note it uses the **unreported** error path — an engine failure is the stream's or the network's fault, not a client defect, and must not raise a crash report |
+| An overrun ring says so | the tail is bounded at 512 engine-side and drops its oldest, so a stall in the drain loses the *start* of what follows, not the end | leave a session erroring in a tight loop with the editor paused, then resume |
+
 ## What still needs a person
 
 Picture and sound quality, in a headset, on the live transports. No harness

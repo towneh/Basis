@@ -987,6 +987,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// </summary>
     void Tick()
     {
+        // Process-wide and idempotent within a frame: the engine's free-text
+        // log is one queue for the whole plugin, so every player pumps it and
+        // the first through each frame takes the lot.
+        BasisMediaLogDrain.Pump();
         PollSession();
         // Count is re-read rather than cached: a consumer is free to disable
         // itself from inside its own tick, which drops it from this list.
