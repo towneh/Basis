@@ -198,3 +198,59 @@ fn an_auto_live_session_costs_one_connection() {
     );
     session.close();
 }
+
+/// The probe settles Auto as live and hands its body to the live lane —
+/// and the lane has to run the Bank as live, not as the request's
+/// on-demand default. The observable half of that is the engine's own
+/// liveness, which is what refuses a pause. A session that pauses here
+/// was running a live edge in the on-demand posture.
+#[test]
+fn an_auto_inferred_live_session_is_live_to_the_engine() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/h264-aac-320x180-30s.ts"),
+    )
+    .expect("fixture readable");
+    let rate = bytes.len() as u64 / 30;
+    let (url, _connections) = spawn_live_server(bytes, rate, Duration::from_secs(3600));
+
+    let mut request = OpenRequest::new(url);
+    request.allow_local_addresses = true;
+    assert_eq!(request.liveness, SourceLiveness::Auto);
+    request.buffer_depth_ms = Some(1000);
+    let mut session = Session::open(request);
+    let shared = session.shared().clone();
+
+    let start = Instant::now();
+    let mut playing = false;
+    while start.elapsed() < Duration::from_secs(20) {
+        let state = shared.state.load(Ordering::Relaxed);
+        assert_ne!(
+            state,
+            State::Error as u32,
+            "the Auto lane must play, not error (code {})",
+            shared.last_error.load(Ordering::Relaxed)
+        );
+        if state == State::Playing as u32 && shared.frames_decoded.load(Ordering::Relaxed) > 60 {
+            playing = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(playing, "the Auto lane never reached playback");
+    let events = session.diag().take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.code, media_diag::EventCode::CapabilityProbe)),
+        "the session must have inferred Live, or this counted the on-demand lane"
+    );
+
+    session.pause();
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Playing as u32,
+        "an Auto-inferred live session paused: the live lane ran the Bank as on-demand"
+    );
+    session.close();
+}

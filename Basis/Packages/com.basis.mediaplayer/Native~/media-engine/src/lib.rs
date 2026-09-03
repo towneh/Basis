@@ -820,10 +820,18 @@ fn open_http_live_with(
     url: &str,
     source: media_io::HttpLiveSource,
     allow_local: bool,
-    bank_cfg: BankConfig,
+    mut bank_cfg: BankConfig,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
     options: DemuxOptions,
 ) {
+    // This is the live lane whichever way it was reached. A declared-live
+    // request arrives with the Bank already in live mode; an Auto request
+    // that the probe settled as live arrives with the request's default,
+    // which is on-demand, and the Bank would run the whole session in that
+    // posture: read-ahead cap, no priming, no debt bound, sync targets
+    // honoured, pause allowed. The transport lanes set this for themselves
+    // and so does this one.
+    bank_cfg.liveness = Liveness::Live;
     let mut counted = CountedSource {
         inner: source,
         diag: Arc::clone(&px.diag),
