@@ -782,7 +782,7 @@ version = "0.17.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.rtrb]]
-version = "0.3.4"
+version = "0.3.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustc-hash]]
