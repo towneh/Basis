@@ -484,12 +484,20 @@ impl Session {
     /// ignored and said so once on the process log, and the state stays
     /// where it was.
     pub fn pause(&self) {
-        if self.px.live.load(Ordering::Relaxed) {
+        let state = self.px.state();
+        if state != State::Playing as u32 && state != State::Buffering as u32 {
+            return;
+        }
+        // Read after the state, not before: the opener publishes the
+        // liveness flag and then Buffering, and `state()` is an acquire
+        // against that store, so a request that sees Buffering sees the
+        // flag the opener set. Read first, the flag could be the default
+        // from before the open settled and the state the one after.
+        if self.px.live.load(Ordering::Acquire) {
             diag_warn!("pause ignored: a live source is not pausable, reload it instead");
             return;
         }
-        let state = self.px.state();
-        if state == State::Playing as u32 || state == State::Buffering as u32 {
+        {
             let wall = self.px.wall.now();
             self.px
                 .clock
@@ -1582,9 +1590,11 @@ fn finish_open_split(
     }
 
     // The real Bank for this session's config; an unsatisfiable derivation
-    // is a reported error, never a clamp.
+    // is a reported error, never a clamp. The liveness flag is published
+    // before the state leaves Opening, and `set_state` releases it: a
+    // caller that observes Buffering observes this store.
     px.live
-        .store(bank_cfg.liveness == Liveness::Live, Ordering::Relaxed);
+        .store(bank_cfg.liveness == Liveness::Live, Ordering::Release);
     match Bank::new(bank_cfg, Generation(0)) {
         Ok(bank) => *px.bank.bank.lock().expect("bank lock") = bank,
         Err(e) => {

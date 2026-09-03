@@ -626,8 +626,10 @@ impl Default for SplitLegs {
 }
 
 impl PipelineShared {
+    /// Release: everything published before a state change is visible to
+    /// a caller that acquires the new state through [`Self::state`].
     pub fn set_state(&self, state: State) {
-        let previous = self.shared.state.swap(state as u32, Ordering::Relaxed);
+        let previous = self.shared.state.swap(state as u32, Ordering::AcqRel);
         if previous != state as u32 {
             self.diag.event(
                 self.wall.now(),
@@ -639,7 +641,7 @@ impl PipelineShared {
     }
 
     pub fn state(&self) -> u32 {
-        self.shared.state.load(Ordering::Relaxed)
+        self.shared.state.load(Ordering::Acquire)
     }
 
     pub fn fail(&self, error: EngineError) {

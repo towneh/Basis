@@ -314,6 +314,28 @@ fn audio_latency_setter_clamps_to_a_sane_range() {
     session.close();
 }
 
+/// A pause that lands while the open is still settling is not a pause:
+/// nothing is playing yet, so there is nothing to hold, and the request
+/// must not be carried forward into the session that follows. The state
+/// is read before the liveness flag, so a request that sees Opening
+/// returns before either could be misread across the open's publication.
+#[test]
+fn a_pause_during_opening_is_not_carried_into_the_session() {
+    let mut session = Session::open(OpenRequest::new(fixture_path()));
+    let shared = session.shared().clone();
+    // Immediately, before the opener has published Buffering.
+    session.pause();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "a pause during opening held the session (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    session.close();
+}
+
 /// A live source is not pausable: the request is ignored and the state
 /// stays where it was. The fixture is on-demand, so liveness is forced,
 /// which is the same path the RTSP, WHEP and RIST lanes take.
