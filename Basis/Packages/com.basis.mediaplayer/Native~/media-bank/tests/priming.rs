@@ -286,3 +286,112 @@ fn presentation_signal_is_inert_on_the_strict_path() {
     assert_eq!(before.lag, after.lag);
     assert_eq!(before.reanchors, after.reanchors);
 }
+
+/// One AU per 100 ms of wall, exactly 1x. The bank paces on dts, not on
+/// AU count, so a coarser cadence than a frame's is fine here.
+const STEP_US: i64 = 100_000;
+
+/// Drive `secs` of exactly-1x arrivals from `(wall, dts)`, popping
+/// everything due, and return the final wall and dts.
+fn run_1x(bank: &mut Bank, mut wall: MediaTime, mut dts_us: i64, secs: i64) -> (MediaTime, i64) {
+    for _ in 0..(secs * 10) {
+        wall += MediaTime::from_micros(STEP_US);
+        dts_us += STEP_US;
+        push_ok(bank, wall, dts_us);
+        pop_all(bank, wall);
+    }
+    (wall, dts_us)
+}
+
+/// Anchor a target-zero live join, then land a burst behind the anchor,
+/// as the source's opening burst does when the clock starts part-way
+/// through it. Returns the bank, the wall and the dts to continue from.
+fn anchored_with_surplus() -> (Bank, MediaTime, i64) {
+    let mut bank = Bank::new(cfg(500, 2000), Generation(0)).unwrap();
+    let wall = MediaTime::ZERO;
+    push_ok(&mut bank, wall, 0);
+    assert_eq!(pop_all(&mut bank, wall), 1);
+    assert!(bank.awaiting_presentation());
+    bank.presentation_started(wall);
+    let quantum = MediaTime::from_micros(INTERVAL_US);
+    assert!(
+        bank.metrics().lag <= quantum,
+        "lag {} at the anchor",
+        bank.metrics().lag
+    );
+    // 1.5 s lands at once, ahead of the schedule; the schedule's lead is
+    // released straight away, and what is left is the surplus.
+    let mut dts = 0i64;
+    for _ in 0..15 {
+        dts += STEP_US;
+        push_ok(&mut bank, wall, dts);
+    }
+    pop_all(&mut bank, wall);
+    (bank, wall, dts)
+}
+
+/// The anchor is taken part-way through the opening burst, and what lands
+/// after it is surplus the schedule must return. `lag` follows the depth
+/// up beyond the cushion, and decay brings the bank back to within a
+/// cushion of its target rather than holding the surplus for the whole
+/// session with the video leg starved of runway.
+#[test]
+fn surplus_arriving_after_the_anchor_is_tracked_and_decayed() {
+    let (mut bank, wall, dts) = anchored_with_surplus();
+    let m = bank.metrics();
+    // The surplus beyond the cushion is what counts; within it is jitter.
+    assert!(
+        m.lag >= MediaTime::from_millis(800),
+        "lag {} after a 1.5 s surplus: the snapshot was kept",
+        m.lag
+    );
+    assert!(
+        m.banked >= MediaTime::from_millis(1300),
+        "banked {}",
+        m.banked
+    );
+
+    // 20,000 ppm returns a second in 50 s; give it 100.
+    run_1x(&mut bank, wall, dts, 100);
+    let m = bank.metrics();
+    assert!(
+        m.banked <= MediaTime::from_millis(600),
+        "banked {} after 100 s: the surplus was never returned",
+        m.banked
+    );
+    assert!(
+        m.lag <= MediaTime::from_millis(100),
+        "lag {} after decay",
+        m.lag
+    );
+    assert_eq!(m.reanchors, 0, "decay fought the debt bound");
+    assert_eq!(m.stall_total, MediaTime::ZERO);
+}
+
+/// While a downstream channel is full the cursor is held by appetite, not
+/// by the schedule; decay waits rather than pushing the anchor into the
+/// debt bound.
+#[test]
+fn decay_waits_while_downstream_is_parked() {
+    let (mut bank, wall, dts) = anchored_with_surplus();
+    let before = bank.metrics().banked;
+    bank.set_downstream_parked(true);
+    let (wall, dts) = run_1x(&mut bank, wall, dts, 30);
+    let m = bank.metrics();
+    let quantum = MediaTime::from_micros(STEP_US);
+    assert!(
+        m.banked + quantum >= before && m.banked <= before + quantum,
+        "banked moved {} -> {} while parked",
+        before,
+        m.banked
+    );
+    assert_eq!(m.reanchors, 0);
+
+    bank.set_downstream_parked(false);
+    run_1x(&mut bank, wall, dts, 100);
+    assert!(
+        bank.metrics().banked <= MediaTime::from_millis(600),
+        "banked {} after unparking: decay did not resume",
+        bank.metrics().banked
+    );
+}

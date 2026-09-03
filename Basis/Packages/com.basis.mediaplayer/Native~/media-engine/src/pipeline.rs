@@ -1271,6 +1271,7 @@ pub fn run_release(
                 _ => false,
             }
         };
+        bank.set_downstream_parked(!parked_video.msgs.is_empty() || !parked_audio.msgs.is_empty());
         let popped = bank.pop_due_gated(wall, &blocked);
         let metrics = bank.metrics();
         let awaiting_presentation = bank.awaiting_presentation();

@@ -242,9 +242,17 @@ pub struct Bank {
     /// Wall origin of the release schedule: an AU at internal position `rel`
     /// is due at `anchor + rel`.
     anchor: Option<MediaTime>,
+    /// The schedule's offset behind the live edge. Tracks `banked()`
+    /// upwards after the anchor and is what decay returns; see
+    /// [`Bank::set_downstream_parked`] for why decay is not always free
+    /// to run.
     lag: MediaTime,
     hold: Hold,
     last_decay: Option<MediaTime>,
+    /// The release thread's report that a consumer channel is full. While
+    /// it is, the cursor is held by downstream appetite rather than by the
+    /// schedule, and decay waits.
+    downstream_parked: bool,
 
     reanchors: u64,
     reanchor_total: MediaTime,
@@ -303,6 +311,7 @@ impl Bank {
             lag: MediaTime::ZERO,
             hold: Hold::Filling { since: None },
             last_decay: None,
+            downstream_parked: false,
             reanchors: 0,
             reanchor_total: MediaTime::ZERO,
             stall_total: MediaTime::ZERO,
@@ -512,6 +521,23 @@ impl Bank {
                 // whether or not the lag cap let the schedule absorb it.
                 self.stall_total += shift;
             }
+            // Media that arrives ahead of the schedule deepens the bank
+            // without any anchor shift, and the join is where that
+            // happens: the anchor is fixed part-way through the source's
+            // opening burst, and the rest of the burst lands behind it.
+            // `lag` is the schedule's distance from the edge, which is
+            // `banked()` by definition, so it follows the depth upwards —
+            // beyond the cushion, which is the same dead zone the debt
+            // bound keeps in the other direction: within it, a high in
+            // `banked()` is arrival jitter, and tracking that would let
+            // every early burst ratchet the schedule earlier until
+            // arrivals read late. Decay then has the surplus to return,
+            // not the fraction the anchor happened to see. Downwards it is
+            // left alone: a delivery stall drains `banked()` while the
+            // schedule stays where it was, and the estimator needs `lag`
+            // to hold so the stall reads as a delay.
+            let surplus = (self.banked() - self.cfg.decoder_cushion).max(MediaTime::ZERO);
+            self.lag = self.lag.max(surplus).min(self.cfg.lag_cap);
         }
 
         self.queued_bytes += au.data.len();
@@ -748,6 +774,19 @@ impl Bank {
             .min(self.cfg.lag_cap);
     }
 
+    /// The release thread's report of downstream appetite: `true` while a
+    /// consumer channel is full and a released message is parked on it.
+    /// Decay hands media to consumers of finite capacity (the audio ring,
+    /// the decode channel, the frame pool), and while one is full the
+    /// cursor stops for a reason that is not surplus. Left running, decay
+    /// would keep moving the anchor earlier against a consumer that cannot
+    /// take it, until arrivals read as more than a cushion late and the
+    /// debt bound shifts the anchor back, booking a stall that never
+    /// happened. So decay waits for a tick on which nothing is parked.
+    pub fn set_downstream_parked(&mut self, parked: bool) {
+        self.downstream_parked = parked;
+    }
+
     /// True while a priming join waits for the engine's presentation
     /// signal ([`Bank::presentation_started`]).
     pub fn awaiting_presentation(&self) -> bool {
@@ -771,7 +810,7 @@ impl Bank {
     /// would deepen the next stall.
     fn tick(&mut self, wall: MediaTime) {
         let last = self.last_decay.replace(wall);
-        if self.hold != Hold::Released {
+        if self.hold != Hold::Released || self.downstream_parked {
             return;
         }
         let Some(last) = last else { return };
