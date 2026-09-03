@@ -22,7 +22,7 @@ use media_bank::{Bank, PushOutcome};
 use media_clock::{Correction, Generation, Master, MediaClock, MediaTime};
 use media_decode::{AudioDecoder, SubmitOutcome, VideoDecoder, VideoFrame};
 use media_demux::{Au, Demuxer, Format, StreamEvent};
-use media_diag::{EventCode, SessionDiag, Stage, diag_err, diag_log, diag_warn};
+use media_diag::{BankReadings, EventCode, SessionDiag, Stage, diag_err, diag_log, diag_warn};
 
 use crate::audio::{
     AudioConsumer, AudioFormatInfo, AudioProducer, frames_before_origin, install_audio_generation,
@@ -1311,6 +1311,13 @@ pub fn run_release(
         diag_bank
             .occupancy_bytes
             .store(metrics.banked_bytes as u64, Ordering::Relaxed);
+        px.diag.set_bank(BankReadings {
+            lag: metrics.lag,
+            target_lag: metrics.target_lag,
+            reanchors: metrics.reanchors,
+            reanchor_total: metrics.reanchor_total,
+            stall_total: metrics.stall_total,
+        });
 
         match popped {
             Some(event) => {

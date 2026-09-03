@@ -224,6 +224,15 @@ pub fn run(options: &Options) -> ExitCode {
         i32::MIN => println!("a/v:       unknown (no audio playhead or no frame presented)"),
         us => println!("a/v:       {us} us (presented video pts minus audio playhead)"),
     }
+    let bank = diag.bank();
+    println!(
+        "bank:      lag {} ms, target {} ms, {} reanchors deferring {} ms, {} ms stalled",
+        bank.lag.as_millis(),
+        bank.target_lag.as_millis(),
+        bank.reanchors,
+        bank.reanchor_total.as_millis(),
+        bank.stall_total.as_millis(),
+    );
     // The loop leaves on a deadline or a settled state, either of which
     // can land between drains; what arrived since is still owed to the
     // totals. Bounded at the ring's depth in passes: the session is still

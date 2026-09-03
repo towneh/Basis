@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -307,9 +307,30 @@ pub struct DiagEvent {
     pub detail: String,
 }
 
+/// The Bank's schedule readings, as the release thread last saw them.
+/// These are what decide whether the Bank hands its lag back downstream
+/// (decay runs only while `lag` exceeds `target_lag`) and whether the
+/// debt bound has been deferring the schedule; none of them can be
+/// reconstructed from the stage counters, and without them a capture can
+/// show *that* the Bank held a lag for a whole session but not why.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BankReadings {
+    /// Accumulated delivery lag: how far behind the live edge release sits.
+    pub lag: MediaTime,
+    /// The lag the Bank is steering towards (authored, or Auto's estimate).
+    pub target_lag: MediaTime,
+    /// Debt-bound anchor shifts so far this session.
+    pub reanchors: u64,
+    /// Total schedule deferral from those shifts.
+    pub reanchor_total: MediaTime,
+    /// The viewer-visible half of the deferrals: what the decoder cushion
+    /// could not hide.
+    pub stall_total: MediaTime,
+}
+
 /// Per-session diagnostics block: one set of stage counters, the audio
-/// serve trim's running total and the bounded event log. Shared by `Arc`
-/// across the session's threads.
+/// serve trim's running total, the Bank's schedule readings and the
+/// bounded event log. Shared by `Arc` across the session's threads.
 #[derive(Debug)]
 pub struct SessionDiag {
     stages: [StageCounters; STAGE_COUNT],
@@ -328,6 +349,15 @@ pub struct SessionDiag {
     /// Session-level rather than a stage field: it is a relationship between
     /// two stages, not a property of either.
     av_offset_us: AtomicI32,
+    /// [`BankReadings`], one atomic each so the release thread publishes
+    /// them without a lock and the recorder reads them the same way. Not
+    /// torn as a set: each is a monotone or slowly-moving figure, and a
+    /// row mixing two adjacent ticks is still an honest row.
+    bank_lag_us: AtomicI64,
+    bank_target_lag_us: AtomicI64,
+    bank_reanchors: AtomicU64,
+    bank_reanchor_total_us: AtomicI64,
+    bank_stall_total_us: AtomicI64,
 }
 
 impl SessionDiag {
@@ -339,6 +369,11 @@ impl SessionDiag {
             events_dropped: AtomicU64::new(0),
             audio_trimmed_frames: AtomicU64::new(0),
             av_offset_us: AtomicI32::new(i32::MIN),
+            bank_lag_us: AtomicI64::new(0),
+            bank_target_lag_us: AtomicI64::new(0),
+            bank_reanchors: AtomicU64::new(0),
+            bank_reanchor_total_us: AtomicI64::new(0),
+            bank_stall_total_us: AtomicI64::new(0),
         }
     }
 
@@ -402,6 +437,34 @@ impl SessionDiag {
         self.av_offset_us.load(Ordering::Relaxed)
     }
 
+    /// Publish the Bank's schedule readings. The release thread already
+    /// takes the Bank's metrics every iteration for the occupancy column;
+    /// this carries the rest of that same struct across.
+    pub fn set_bank(&self, readings: BankReadings) {
+        self.bank_lag_us
+            .store(readings.lag.as_micros(), Ordering::Relaxed);
+        self.bank_target_lag_us
+            .store(readings.target_lag.as_micros(), Ordering::Relaxed);
+        self.bank_reanchors
+            .store(readings.reanchors, Ordering::Relaxed);
+        self.bank_reanchor_total_us
+            .store(readings.reanchor_total.as_micros(), Ordering::Relaxed);
+        self.bank_stall_total_us
+            .store(readings.stall_total.as_micros(), Ordering::Relaxed);
+    }
+
+    pub fn bank(&self) -> BankReadings {
+        BankReadings {
+            lag: MediaTime::from_micros(self.bank_lag_us.load(Ordering::Relaxed)),
+            target_lag: MediaTime::from_micros(self.bank_target_lag_us.load(Ordering::Relaxed)),
+            reanchors: self.bank_reanchors.load(Ordering::Relaxed),
+            reanchor_total: MediaTime::from_micros(
+                self.bank_reanchor_total_us.load(Ordering::Relaxed),
+            ),
+            stall_total: MediaTime::from_micros(self.bank_stall_total_us.load(Ordering::Relaxed)),
+        }
+    }
+
     pub fn snapshot(&self) -> [StageSnapshot; STAGE_COUNT] {
         STAGES.map(|s| self.stage(s).snapshot())
     }
@@ -412,6 +475,16 @@ impl Default for SessionDiag {
         Self::new(1024)
     }
 }
+
+/// The Bank's schedule block, in column order. Appended after
+/// `av_offset_us`; the column contract is append-only.
+pub const BANK_COLUMNS: [&str; 5] = [
+    "bank_lag_us",
+    "bank_target_lag_us",
+    "bank_reanchors",
+    "bank_reanchor_total_us",
+    "bank_stall_total_us",
+];
 
 /// The capture recorder: the per-session timeline as CSV rows with a stable
 /// column contract, so the analysis tooling keeps working unchanged across
@@ -453,6 +526,14 @@ impl CaptureRecorder {
         // only the ABI snapshot and the managed frame capture, which is how a
         // presentation lag came to be read as a clock error.
         let _ = write!(h, ",av_offset_us");
+        // The Bank's schedule block, appended last. The stage counters say
+        // how much the Bank holds; these say whether it is meant to be
+        // holding it, and whether the schedule has been deferred to get
+        // there. A capture without them can show a lag that never decays
+        // and cannot say which of the decay's own gates was closed.
+        for name in BANK_COLUMNS {
+            let _ = write!(h, ",{name}");
+        }
         h
     }
 
@@ -475,6 +556,16 @@ impl CaptureRecorder {
         }
         let _ = write!(row, ",{}", diag.audio_trimmed());
         let _ = write!(row, ",{}", diag.av_offset());
+        let bank = diag.bank();
+        let _ = write!(
+            row,
+            ",{},{},{},{},{}",
+            bank.lag.as_micros(),
+            bank.target_lag.as_micros(),
+            bank.reanchors,
+            bank.reanchor_total.as_micros(),
+            bank.stall_total.as_micros()
+        );
         self.rows.push(row);
     }
 
@@ -515,11 +606,23 @@ mod tests {
     fn column_contract_is_stable() {
         let header = CaptureRecorder::header();
         assert!(header.starts_with("wall_us,source_in_count,"));
-        // wall_us + the stage block + the two appended session columns.
-        assert_eq!(header.split(',').count(), 1 + STAGE_COUNT * 8 + 2);
+        // wall_us + the stage block + the two appended session columns +
+        // the Bank's schedule block.
+        assert_eq!(
+            header.split(',').count(),
+            1 + STAGE_COUNT * 8 + 2 + BANK_COLUMNS.len()
+        );
         assert!(header.contains(",bank_occupancy_bytes,"));
         assert!(header.contains(",clock_errors,"));
-        assert!(header.ends_with(",audio_trimmed_frames,av_offset_us"));
+        assert!(header.contains(",audio_trimmed_frames,av_offset_us,bank_lag_us,"));
+        assert!(header.ends_with(",bank_reanchor_total_us,bank_stall_total_us"));
+    }
+
+    fn column(header: &str, name: &str) -> usize {
+        header
+            .split(',')
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no column {name}"))
     }
 
     /// Both appended session columns reach the capture, in the order the
@@ -534,12 +637,37 @@ mod tests {
         rec.sample(MediaTime::from_millis(16), &diag);
         let fields: Vec<&str> = rec.rows()[0].split(',').collect();
         let header_line = CaptureRecorder::header();
-        let header: Vec<&str> = header_line.split(',').collect();
-        assert_eq!(fields.len(), header.len());
-        assert_eq!(header[header.len() - 2], "audio_trimmed_frames");
-        assert_eq!(fields[fields.len() - 2], "21535");
-        assert_eq!(header[header.len() - 1], "av_offset_us");
-        assert_eq!(fields[fields.len() - 1], "-27475");
+        assert_eq!(fields.len(), header_line.split(',').count());
+        assert_eq!(
+            fields[column(&header_line, "audio_trimmed_frames")],
+            "21535"
+        );
+        assert_eq!(fields[column(&header_line, "av_offset_us")], "-27475");
+    }
+
+    /// Each Bank reading lands under its own header, with the unit the
+    /// name states. Asserted by name so the row cannot pass with the
+    /// block's fields transposed.
+    #[test]
+    fn the_bank_readings_reach_the_capture_under_their_names() {
+        let diag = SessionDiag::default();
+        diag.set_bank(BankReadings {
+            lag: MediaTime::from_millis(1_470),
+            target_lag: MediaTime::from_millis(1_461),
+            reanchors: 3,
+            reanchor_total: MediaTime::from_millis(910),
+            stall_total: MediaTime::from_millis(640),
+        });
+        assert_eq!(diag.bank().reanchors, 3);
+        let mut rec = CaptureRecorder::default();
+        rec.sample(MediaTime::from_millis(16), &diag);
+        let fields: Vec<&str> = rec.rows()[0].split(',').collect();
+        let header = CaptureRecorder::header();
+        assert_eq!(fields[column(&header, "bank_lag_us")], "1470000");
+        assert_eq!(fields[column(&header, "bank_target_lag_us")], "1461000");
+        assert_eq!(fields[column(&header, "bank_reanchors")], "3");
+        assert_eq!(fields[column(&header, "bank_reanchor_total_us")], "910000");
+        assert_eq!(fields[column(&header, "bank_stall_total_us")], "640000");
     }
 
     /// The unknown sentinel survives the round trip: a capture taken before
@@ -550,8 +678,13 @@ mod tests {
         let diag = SessionDiag::default();
         let mut rec = CaptureRecorder::default();
         rec.sample(MediaTime::from_millis(16), &diag);
-        let last = rec.rows()[0].rsplit(',').next().expect("a last field");
-        assert_eq!(last, i32::MIN.to_string(), "default must be the sentinel");
+        let fields: Vec<&str> = rec.rows()[0].split(',').collect();
+        let header = CaptureRecorder::header();
+        assert_eq!(
+            fields[column(&header, "av_offset_us")],
+            i32::MIN.to_string(),
+            "default must be the sentinel"
+        );
     }
 
     /// The free-text channel is the one that works with no session open,
