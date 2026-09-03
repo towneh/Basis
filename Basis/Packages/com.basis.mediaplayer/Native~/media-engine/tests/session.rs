@@ -314,6 +314,41 @@ fn audio_latency_setter_clamps_to_a_sane_range() {
     session.close();
 }
 
+/// A live source is not pausable: the request is ignored and the state
+/// stays where it was. The fixture is on-demand, so liveness is forced,
+/// which is the same path the RTSP, WHEP and RIST lanes take.
+#[test]
+fn pause_is_ignored_on_a_live_source() {
+    let request = OpenRequest {
+        liveness: media_engine::SourceLiveness::Live,
+        ..OpenRequest::new(fixture_path())
+    };
+    let mut session = Session::open(request);
+    let shared = session.shared().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    let before = shared.position_us.load(Ordering::Relaxed);
+    session.pause();
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Playing as u32,
+        "a live session paused"
+    );
+    assert!(
+        wait_for(Duration::from_secs(2), || {
+            shared.position_us.load(Ordering::Relaxed) > before + 100_000
+        }),
+        "position stopped advancing after a pause request on a live source"
+    );
+    session.close();
+}
+
 #[test]
 fn pause_seek_and_natural_end() {
     let mut session = Session::open(OpenRequest::new(fixture_path()));

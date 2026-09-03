@@ -476,7 +476,18 @@ impl Session {
         }
     }
 
+    /// Pause an on-demand session. A live source is not pausable: the
+    /// wall clock stops but delivery does not, so the bank fills to its
+    /// byte cap, the demuxer blocks on it and a UDP source loses everything
+    /// after that, and on resume the session sits the pause's length
+    /// behind the edge for good. Halt and reload instead. The request is
+    /// ignored and said so once on the process log, and the state stays
+    /// where it was.
     pub fn pause(&self) {
+        if self.px.live.load(Ordering::Relaxed) {
+            diag_warn!("pause ignored: a live source is not pausable, reload it instead");
+            return;
+        }
         let state = self.px.state();
         if state == State::Playing as u32 || state == State::Buffering as u32 {
             let wall = self.px.wall.now();

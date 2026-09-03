@@ -594,6 +594,9 @@ pub extern "C" fn bm_session_play(handle: u64) -> i32 {
     .unwrap_or(BM_ERR_PANIC)
 }
 
+/// Pause an on-demand session. Ignored on a live source, which is not
+/// pausable (the engine says so once on the process log); the call still
+/// returns `BM_OK`, since nothing about the handle is wrong.
 #[unsafe(no_mangle)]
 pub extern "C" fn bm_session_pause(handle: u64) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
