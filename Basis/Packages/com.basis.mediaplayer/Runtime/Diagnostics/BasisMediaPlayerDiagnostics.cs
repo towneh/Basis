@@ -28,7 +28,7 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
     [Tooltip("Begin writing on enable. Turn off to gate logging behind a manual StartLogging() call.")]
     public bool AutoStart = true;
 
-    [Tooltip("Rows are written once per Unity frame. This caps how many are held in memory before a flush.")]
+    [Tooltip("Rows are built once per Unity frame and handed to a writer thread. This is how many queue up before the thread is woken to write and flush them; the frame never touches the file.")]
     [Min(16)] public int FlushEveryNRows = 200;
 
     [Tooltip("Append to the file across sessions instead of truncating it at every StartLogging().")]
@@ -50,6 +50,13 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
     StreamWriter _writer;
     StringBuilder _row;
     int _rowsSinceFlush;
+
+    // Rows are built on the main thread (they read live Unity state) but written and
+    // flushed on this thread, so the frame never pays for a FileStream syscall.
+    readonly System.Collections.Concurrent.ConcurrentQueue<string> _pendingRows = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    System.Threading.Thread _writeThread;
+    System.Threading.AutoResetEvent _writeSignal;
+    volatile bool _writeRunning;
 
     // Previous-frame values, so each row can carry deltas rather than
     // leaving the reader to difference the totals.
@@ -121,6 +128,10 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
         LastError = "";
         RowsWritten = 0;
         _rowsSinceFlush = 0;
+        _writeSignal = new System.Threading.AutoResetEvent(false);
+        _writeRunning = true;
+        _writeThread = new System.Threading.Thread(WriteLoop) { IsBackground = true, Name = "BasisMediaPlayerDiag" };
+        _writeThread.Start();
         _lastPresented = 0;
         _lastDecoded = 0;
         _lastAudioPulled = 0;
@@ -131,19 +142,65 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
 
     public void StopLogging()
     {
-        if (!IsLogging) return;
+        if (!IsLogging && _writeThread == null) return;
         IsLogging = false;
-        Flush();
+        // Stop the writer, then drain whatever it had not reached: the last rows of
+        // a session are the ones a reader wants most.
+        _writeRunning = false;
+        _writeSignal?.Set();
+        try { _writeThread?.Join(1000); } catch { }
+        _writeThread = null;
+        try
+        {
+            while (_pendingRows.TryDequeue(out string row))
+            {
+                _writer?.WriteLine(row);
+                RowsWritten++;
+            }
+            _writer?.Flush();
+        }
+        catch (Exception e) { BasisDebug.LogWarning($"[BasisMedia] diagnostics flush failed: {e.Message}", BasisDebug.LogTag.Video); }
         try { _writer?.Dispose(); }
         catch (Exception e) { BasisDebug.LogWarning($"[BasisMedia] diagnostics close failed: {e.Message}", BasisDebug.LogTag.Video); }
         _writer = null;
+        _writeSignal?.Dispose();
+        _writeSignal = null;
+        _rowsSinceFlush = 0;
     }
 
+    /// <summary>Wake the writer thread so queued rows reach the file now.</summary>
     public void Flush()
     {
-        try { _writer?.Flush(); }
-        catch (Exception e) { BasisDebug.LogWarning($"[BasisMedia] diagnostics flush failed: {e.Message}", BasisDebug.LogTag.Video); }
         _rowsSinceFlush = 0;
+        _writeSignal?.Set();
+    }
+
+    // Drains queued rows and flushes each time it is signalled, so the file stays
+    // current without the main thread ever touching the stream.
+    void WriteLoop()
+    {
+        while (_writeRunning)
+        {
+            _writeSignal.WaitOne();
+            try
+            {
+                bool wroteAny = false;
+                while (_pendingRows.TryDequeue(out string row))
+                {
+                    _writer.WriteLine(row);
+                    RowsWritten++;
+                    wroteAny = true;
+                }
+                if (wroteAny) _writer.Flush();
+            }
+            catch (Exception e)
+            {
+                LastError = e.Message;
+                BasisDebug.LogError($"[BasisMedia] diagnostics write failed: {e.Message}", BasisDebug.LogTag.Video);
+                IsLogging = false;
+                return;
+            }
+        }
     }
 
     // Column contract. Additions go on the end; a reader keyed on position
@@ -233,8 +290,7 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
 
         try
         {
-            _writer.WriteLine(_row.ToString());
-            RowsWritten++;
+            _pendingRows.Enqueue(_row.ToString());
             if (++_rowsSinceFlush >= FlushEveryNRows) Flush();
         }
         catch (Exception e)
