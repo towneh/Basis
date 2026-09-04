@@ -14,12 +14,12 @@ namespace Cilbox
 			"Basis.BasisImageDownloader",
 			"Basis.IBasisImageDownload",
 			"Basis.BasisStringDownloader",
-			// Basis media-player components. BasisMediaPlayer keeps its native API; LoadUrl
-			// enforces URL approval internally, while unsafe lower-level entry points are blocked below.
+			// Basis media-player components. Playback control, status and events are open to a
+			// prop; every route that opens a URL is blocked in CheckMethodAllowed until the player
+			// itself asks the user before opening one.
 			"BasisMediaPlayer",
-			"BasisMediaPlayer+QueueOverflowPolicy",
-			"BasisMediaPlayerStatus",
-			"BasisVideoBufferMode",
+			"BmState",
+			"BmLiveness",
 			"BasisMediaPlayerAudio",
 			"BasisMediaPlayerStreaming",
 			"BasisVideoMaterialOutput",
@@ -135,9 +135,15 @@ namespace Cilbox
 			// Read-only local head scale (Vector3) so cloned mirror heads match the local player.
 			"Basis.Scripts.Drivers.BasisLocalAvatarDriver.HeadScale",
 			"Basis.Scripts.Drivers.BasisLocalCameraDriver.CameraInstance",
-			// Media-player configuration is safe to read/write from a prop. Network/file
-			// entry points are methods and are gated separately in CheckMethodAllowed.
-			"BasisMediaPlayer.*",
+			// Playback tuning is safe to read/write from a prop. The URL fields are withheld
+			// because the session governor and the networking component reopen and share
+			// whatever they hold; allowLocalAddresses, the engine capture fields and the static
+			// engine defaults are withheld because they reach the local network, the disk, or
+			// every player in the scene.
+			"BasisMediaPlayer.playOnStart",
+			"BasisMediaPlayer.liveness",
+			"BasisMediaPlayer.maxDivergenceMs",
+			"BasisMediaPlayer.BufferDepthOverrideMs",
 			"BasisMediaPlayerAudio.*",
 			// Streaming URLs/platform selection are script-configurable, but ConfigureOnStart
 			// is intentionally withheld so Cilbox cannot re-enable content auto-start.
@@ -325,19 +331,27 @@ namespace Cilbox
 		{
 			if (declaringType == typeof(global::BasisMediaPlayer))
 			{
-				// Do not let a prop bypass URL consent through source/file APIs or write
-				// screenshots to disk. Normal playback controls, status, and events remain
-				// available on the real BasisMediaPlayer component.
-				if (name == nameof(global::BasisMediaPlayer.LoadLocalPath) ||
-					name == nameof(global::BasisMediaPlayer.LoadSource) ||
-					name == nameof(global::BasisMediaPlayer.LoadResolvedSource) ||
-					name == nameof(global::BasisMediaPlayer.CaptureScreenshot) ||
-					name == "set_Source" ||
-					name == "set_Renderer")
+				// A prop may not open a URL: the player does not yet ask the user before
+				// opening one, so every open route is withheld, including the resolver's
+				// entry and sidecar subtitles, which are fetched from a URL the caller picks.
+				// Play, pause, seek, close, track selection, status and events stay available.
+				if (name == nameof(global::BasisMediaPlayer.Open) ||
+					name == nameof(global::BasisMediaPlayer.OpenUserUrl) ||
+					name == nameof(global::BasisMediaPlayer.OpenResolved) ||
+					name == nameof(global::BasisMediaPlayer.SetSubtitleTracks))
 				{
 					mi = null;
 					return false;
 				}
+			}
+
+			// Configure resolves the streaming URL a prop can author and opens it on the
+			// player, which is the same bypass by another door.
+			if (declaringType == typeof(global::BasisMediaPlayerStreaming) &&
+				name == nameof(global::BasisMediaPlayerStreaming.Configure))
+			{
+				mi = null;
+				return false;
 			}
 
 			return base.CheckMethodAllowed(out mi, declaringType, name, parametersIn, genericArgumentsIn, fullSignature);
