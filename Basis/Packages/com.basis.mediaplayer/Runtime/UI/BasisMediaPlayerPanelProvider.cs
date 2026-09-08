@@ -40,6 +40,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
 
     private PanelDropdown _selector;
     private PanelElementDescriptor _controlGroup;
+    private RectTransform _resyncEveryoneRow;
     private PanelElementDescriptor _userGroup;
     private PanelElementDescriptor _adminGroup;
     private PanelElementDescriptor _emptyState;
@@ -382,6 +383,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         _debugTabIndex = -1;
         _selector = null;
         _controlGroup = null;
+        _resyncEveryoneRow = null;
         _userGroup = null;
         _adminGroup = null;
         _emptyState = null;
@@ -487,6 +489,18 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             _seekPendingAt = Time.unscaledTime;
         });
         _seekSlider.gameObject.SetActive(false);
+
+        // Resync everyone onto this client's timeline. A control action, so it lives in
+        // the control group, which the Playback tab hides wholesale when this client
+        // cannot control the player — the same gate as the transport buttons and the
+        // seek slider above. Pressing it acquires control first.
+        _resyncEveryoneRow = PanelElementDescriptor.BuildActionRow(content, "MediaPlayerResyncEveryone");
+        PanelButton resyncAllBtn = PanelButton.CreateNew(_resyncEveryoneRow);
+        resyncAllBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.resyncEveryone"));
+        resyncAllBtn.OnClicked += () =>
+        {
+            if (_activeNetworking != null) _ = _activeNetworking.ResyncEveryone();
+        };
     }
 
     /// <summary>Play a player nothing else is driving: resume a paused session,
@@ -586,7 +600,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
 
         RectTransform actions = PanelElementDescriptor.BuildActionRow(content, "MediaPlayerActions");
         PanelButton resyncBtn = PanelButton.CreateNew(actions);
-        resyncBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.resync"));
+        resyncBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.resyncLocal"));
         resyncBtn.OnClicked += () =>
         {
             if (_activePlayer == null) return;
@@ -749,6 +763,18 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         bool canControl = CanControlActivePlayer();
         SetTabVisible(_playbackTabIndex, canControl);
         SetTabVisible(_debugTabIndex, _advancedToggle != null && _advancedToggle.Value);
+
+        // Resync Everyone only does anything through a networking component; a media player
+        // with none (a local-only player) would show a button that no-ops.
+        if (_resyncEveryoneRow != null)
+        {
+            bool showResyncEveryone = _activeNetworking != null;
+            if (_resyncEveryoneRow.gameObject.activeSelf != showResyncEveryone)
+            {
+                _resyncEveryoneRow.gameObject.SetActive(showResyncEveryone);
+                RebuildPage(_controlGroup);
+            }
+        }
 
         bool showAdmin = IsAdmin() && _activeNetworking != null;
         SetTabVisible(_adminTabIndex, showAdmin);

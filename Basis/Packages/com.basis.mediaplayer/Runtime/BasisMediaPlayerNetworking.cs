@@ -89,6 +89,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     // and stop feeding the ladder a target it would drag itself backwards towards.
     private const int PositionPayloadSize = 1 + 8 + 8;
 
+    private const float PendingApplyStaleSeconds = 60f;
+
     // Cached single-byte command payloads; SendCustomNetworkEvent does not retain references.
     private static readonly byte[] PlayBytes = { (byte)MessageId.Play };
     private static readonly byte[] PauseBytes = { (byte)MessageId.Pause };
@@ -139,6 +141,21 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private SyncedPlaybackState pendingRemoteState;
     private long pendingRemotePositionTicks;
     private float pendingRemoteStashedAt;
+
+    // A resync this client asked for on its own behalf (ResyncEveryone). The stash above
+    // is then our own state, so the pending-apply gate has to run even though we are the
+    // driving owner, which it otherwise skips.
+    private bool selfResyncApply;
+
+    // Suppress the one ready-settle broadcast the reopened self-resync load would otherwise
+    // send. ObserveLocalPlayback runs before the stash is applied in the same tick, so that
+    // broadcast would carry a playhead still near zero and drag still-resolving peers back to
+    // the start — the opposite of the resync. The room already has our real state and
+    // position from the broadcast ResyncEveryone sent up front, and the heartbeat keeps it
+    // fresh, so the settle broadcast is pure harm here. Survives the LoadGeneration-change
+    // reset of announcedThisLoad (the page-URL path bumps the generation asynchronously), so
+    // it is a separate flag rather than pre-setting announcedThisLoad.
+    private bool suppressResyncSettleBroadcast;
 
     // Last heartbeat seen from the owner, to spot a stalled playhead.
     private long lastOwnerPositionTicks = -1;
@@ -247,6 +264,11 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     {
         if (PositionHeartbeatSeconds <= 0f) return;
         if (!HasNetworkID || !IsDrivingOwner) return;
+        // A stash waiting to land (a self-resync reload in flight) means the playhead below
+        // is the reopened load's near-zero one, not our real position — the same value the
+        // settle broadcast is suppressed for. Broadcasting it would drag resolving peers to
+        // the start.
+        if (pendingRemoteApply) return;
         if (GetLocalState() != SyncedPlaybackState.Playing) return;
         if (mediaPlayer.DurationSeconds <= 0d) return;
         heartbeatTimer += Time.deltaTime;
@@ -426,6 +448,12 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
         currentSyncedUrl = url;
         loadNonce++;
+        // A new deliberate load has its own settle broadcast to send, and its own timeline;
+        // an in-flight resync of the previous source must not carry over, or this media would
+        // reload onto the old playhead (and the heartbeat would stay suppressed until it did).
+        suppressResyncSettleBroadcast = false;
+        pendingRemoteApply = false;
+        selfResyncApply = false;
         syncedUrlFromSetUrl = true;
 
         // FullState is the only message carrying a URL, so it goes out up front rather than
@@ -438,6 +466,69 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
         ClearSyncTarget();
         mediaPlayer.OpenUserUrl(url);
+    }
+
+    /// <summary>Force every client, this one included, back onto this player's current
+    /// timeline. Same control gate as playback; a no-op when nothing is loaded, since
+    /// announcing an empty URL would stop the room.</summary>
+    public async Task ResyncEveryone()
+    {
+        if (mediaPlayer == null || string.IsNullOrEmpty(GetActiveUrl()))
+        {
+            return;
+        }
+
+        // Nothing playing here is not a timeline to resync the room to: broadcasting our
+        // Stopped state would close every peer while this client reopens and plays alone.
+        if (GetLocalState() == SyncedPlaybackState.Stopped)
+        {
+            return;
+        }
+
+        if (!await AcquireControlAsync())
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(currentSyncedUrl))
+        {
+            currentSyncedUrl = GetActiveUrl();
+        }
+
+        // Bump the load nonce so peers read a fresh load of the URL they already hold and
+        // reload onto our state and position, rather than the announcement collapsing into
+        // a no-op (ApplyRemoteFullState treats an unchanged URL and nonce as nothing to do).
+        loadNonce++;
+        syncedUrlFromSetUrl = true;
+        BroadcastFullState();
+        ReloadSelfInPlace();
+    }
+
+    // Re-open what this client is showing without losing our place, so the initiator's own
+    // screen is fixed by the same press that fixes the room. The stash is applied once the
+    // re-opened session is running (ApplyPendingRemoteStateWhenReady); selfResyncApply lets
+    // that run despite this client being the driving owner.
+    private void ReloadSelfInPlace()
+    {
+        if (mediaPlayer == null || string.IsNullOrEmpty(currentSyncedUrl))
+        {
+            return;
+        }
+
+        // A stash already in flight is the one to keep: mid-reload the playhead reads near
+        // zero, so re-capturing it here would throw away the place we are holding.
+        if (!pendingRemoteApply)
+        {
+            pendingRemoteState = GetLocalState();
+            pendingRemotePositionTicks = PositionTicks();
+            pendingRemoteStashedAt = Time.realtimeSinceStartup;
+            pendingRemoteApply = true;
+        }
+
+        selfResyncApply = true;
+        suppressResyncSettleBroadcast = true;
+        ClearSyncTarget();
+        mediaPlayer.OpenUserUrl(currentSyncedUrl);
     }
 
     public async Task Play()
@@ -802,6 +893,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
         applyingRemoteCommand = true;
         pendingRemoteApply = false; /* superseded by whatever this state says */
+        selfResyncApply = false;
         try
         {
             if (loadChanged)
@@ -869,7 +961,10 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     // owner being fed by custodians.
     private void ApplyPendingRemoteStateWhenReady()
     {
-        if (!pendingRemoteApply || IsDrivingOwner)
+        // A self-initiated resync stashes our own state and then drives the reload, so it
+        // has to pass this gate that an ordinary driving owner (broadcasting, not applying)
+        // does not.
+        if (!pendingRemoteApply || (IsDrivingOwner && !selfResyncApply))
         {
             return;
         }
@@ -877,14 +972,33 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         BmState state = mediaPlayer.State;
         if (state == BmState.Idle || state == BmState.Opening || state == BmState.Buffering)
         {
+            // A load that never reaches playback (a resolve that fails back to Idle without
+            // setting Error) would otherwise hold the stash forever, and with it the
+            // heartbeat gate and the settle-broadcast suppression.
+            if (Time.realtimeSinceStartup - pendingRemoteStashedAt > PendingApplyStaleSeconds)
+            {
+                pendingRemoteApply = false;
+                selfResyncApply = false;
+                suppressResyncSettleBroadcast = false;
+            }
+
             return;
         }
 
         pendingRemoteApply = false;
+        selfResyncApply = false;
+        // The reason to skip one settle broadcast is gone once the reopened load lands (or
+        // fails). Clearing it here also covers ownership moving away mid-reload, where
+        // ObserveLocalPlayback's announce branch never runs to consume it.
+        suppressResyncSettleBroadcast = false;
         if (state == BmState.Error)
         {
             return;
         }
+
+        // The seek below is asynchronous, so the playhead can still read near zero on this
+        // tick; make the next heartbeat wait a full interval rather than broadcast that.
+        heartbeatTimer = 0f;
 
         applyingRemoteCommand = true;
         try
@@ -1050,6 +1164,15 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
             // network ID is superseded: from here the player's own state and position
             // are the truth.
             sendOnNetworkReadyFreshLoad = false;
+            // A self-resync already announced the real state and position up front; its
+            // reopened load reaches here before the stash is applied, so its playhead is
+            // still near zero. Skip this one broadcast; the stash apply plus the heartbeat
+            // carry the real position.
+            if (suppressResyncSettleBroadcast)
+            {
+                suppressResyncSettleBroadcast = false;
+                return;
+            }
             BroadcastFullState();
             return;
         }
@@ -1217,8 +1340,15 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
         // Opening a session starts it playing, so a load we are announcing ahead of
         // time is always announced as playing.
-        fullStateScratch[1] = (byte)(freshLoad ? SyncedPlaybackState.Playing : GetLocalState());
-        WriteLong(fullStateScratch, 2, freshLoad ? 0L : PositionTicks());
+        // A pending stash means the live state and position belong to a session that is
+        // still reopening (a self-resync). Late-join and state-request answers must carry the
+        // stashed snapshot, the same near-zero playhead the settle broadcast and heartbeat are
+        // suppressed for, or a client that joins or asks inside the reload window lands at zero.
+        bool useStash = !freshLoad && pendingRemoteApply;
+        fullStateScratch[1] = (byte)(freshLoad ? SyncedPlaybackState.Playing
+            : useStash ? pendingRemoteState : GetLocalState());
+        WriteLong(fullStateScratch, 2, freshLoad ? 0L
+            : useStash ? pendingRemotePositionTicks : PositionTicks());
         WriteUShort(fullStateScratch, FullStateNonceOffset, loadNonce);
         WriteSettingsBlock(fullStateScratch, FullStateSettingsOffset);
         return fullStateScratch;

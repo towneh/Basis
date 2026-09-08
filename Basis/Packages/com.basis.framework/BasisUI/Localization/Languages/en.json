@@ -11331,8 +11331,12 @@
       "value": "Background Opacity"
     },
     {
-      "key": "mediaPlayer.resync",
-      "value": "Resync"
+      "key": "mediaPlayer.resyncLocal",
+      "value": "Local Resync"
+    },
+    {
+      "key": "mediaPlayer.resyncEveryone",
+      "value": "Resync Everyone"
     },
     {
       "key": "mediaPlayer.advanced",
