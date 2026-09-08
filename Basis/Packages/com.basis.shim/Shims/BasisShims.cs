@@ -269,9 +269,7 @@ namespace Basis
 								BasisTrustedUrls.Add( uri.Scheme + "://" + uri.Host + "/*" );
 								break;
 							case BasisMenuURLPromptPanel.RememberChoiceScope.Domain:
-								string[] parts = uri.Host.Split( '.' );
-								string domain = parts.Length >= 2 ? parts[parts.Length - 2] + "." + parts[parts.Length - 1] : uri.Host;
-								BasisTrustedUrls.Add( uri.Scheme + "://*." + domain + "/*" );
+								BasisTrustedUrls.AddDomain( uri );
 								break;
 						}
 					}
