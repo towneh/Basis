@@ -604,14 +604,16 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         resyncBtn.OnClicked += () =>
         {
             if (_activePlayer == null) return;
-            // Re-open what this client is already showing. A viewer whose stream
-            // has gone bad gets a fresh session without disturbing anyone else,
-            // so this deliberately does not go through the networking component.
-            // Through the router rather than ReopenAtPosition: a stream that has
-            // gone bad may need re-resolving, and starting clean is the point.
-            string url = _activeNetworking != null && !string.IsNullOrEmpty(_activeNetworking.SyncedUrl)
-                ? _activeNetworking.SyncedUrl
-                : _activePlayer.ResolvedUrl;
+            // Re-align this client and nobody else. With networking, ask the room for the
+            // current state and reload onto the answer, falling back to a blind re-open if
+            // nobody answers. Without networking there is nobody to ask, so re-open what we
+            // hold directly; a stream gone bad may need re-resolving, so start clean.
+            if (_activeNetworking != null)
+            {
+                _activeNetworking.ResyncLocal();
+                return;
+            }
+            string url = _activePlayer.ResolvedUrl;
             if (!string.IsNullOrEmpty(url)) _activePlayer.OpenUserUrl(url);
         };
 

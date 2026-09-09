@@ -91,6 +91,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
     private const float PendingApplyStaleSeconds = 60f;
 
+    private const float ResyncAnswerTimeoutSeconds = 3f;
+
     // Cached single-byte command payloads; SendCustomNetworkEvent does not retain references.
     private static readonly byte[] PlayBytes = { (byte)MessageId.Play };
     private static readonly byte[] PauseBytes = { (byte)MessageId.Pause };
@@ -156,6 +158,12 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     // reset of announcedThisLoad (the page-URL path bumps the generation asynchronously), so
     // it is a separate flag rather than pre-setting announcedThisLoad.
     private bool suppressResyncSettleBroadcast;
+
+    // Ask-the-room local resync (ResyncLocal): a RequestState has gone out and we are waiting
+    // for any owner/custodian FullState to answer it. On timeout we reload what we already
+    // hold instead of waiting forever.
+    private bool forcedResyncPending;
+    private float resyncAnswerDeadline = -1f;
 
     // Last heartbeat seen from the owner, to spot a stalled playhead.
     private long lastOwnerPositionTicks = -1;
@@ -251,9 +259,32 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
             return;
         }
 
+        TickForcedResync();
         ObserveLocalPlayback();
         ApplyPendingRemoteStateWhenReady();
         BroadcastHeartbeat();
+    }
+
+    // The ask-the-room resync fell silent: nobody answered within the window, so reload what
+    // we hold. A FullState answer clears forcedResyncPending in ApplyRemoteFullState before
+    // this fires, so the fallback only runs when the room genuinely did not respond.
+    private void TickForcedResync()
+    {
+        if (!forcedResyncPending || resyncAnswerDeadline < 0f
+            || Time.realtimeSinceStartup < resyncAnswerDeadline)
+        {
+            return;
+        }
+
+        forcedResyncPending = false;
+        resyncAnswerDeadline = -1f;
+        if (VerboseLogging)
+        {
+            BasisDebug.LogWarning($"{nameof(BasisMediaPlayerNetworking)} local resync: nobody "
+                + "answered, reloading what we hold.", BasisDebug.LogTag.Video);
+        }
+
+        ReloadSelfInPlace();
     }
 
     // Owner position heartbeat: a small latest-wins ping (Sequenced, like the
@@ -508,9 +539,54 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     // screen is fixed by the same press that fixes the room. The stash is applied once the
     // re-opened session is running (ApplyPendingRemoteStateWhenReady); selfResyncApply lets
     // that run despite this client being the driving owner.
+    /// <summary>Re-align this client and nobody else. Asks the room for the current state and
+    /// reloads onto the answer; if nobody answers within <see cref="ResyncAnswerTimeoutSeconds"/>
+    /// it reloads what it already holds. Takes no ownership and needs no permission, so a
+    /// viewer whose stream went bad can straighten itself out. An owner, or a client with
+    /// nothing playing or no network id, has no one to ask and just reloads in place.</summary>
+    public void ResyncLocal()
+    {
+        if (mediaPlayer == null || forcedResyncPending)
+        {
+            return;
+        }
+
+        // Nobody to ask: we drive the object, or we are not networked. Reload in place, which
+        // adopts our own url if we hold no synced one (a directly-opened player).
+        if (!HasNetworkID || IsDrivingOwner)
+        {
+            ReloadSelfInPlace();
+            return;
+        }
+
+        // Networked and not the owner: ask the room, even with no synced url yet (a late joiner
+        // or a directly-opened player) — that is exactly when the answer is most useful.
+        // currentSyncedUrl is left untouched so this client does not briefly answer a joiner as
+        // a custodian with an adopted local url; a silent room is handled by TickForcedResync.
+
+        forcedResyncPending = true;
+        resyncAnswerDeadline = Time.realtimeSinceStartup + ResyncAnswerTimeoutSeconds;
+        SendCustomNetworkEvent(RequestStateBytes, DeliveryMethod.ReliableOrdered, null);
+        if (VerboseLogging)
+        {
+            BasisDebug.Log($"{nameof(BasisMediaPlayerNetworking)} local resync: asked the room "
+                + "for the current state.", BasisDebug.LogTag.Video);
+        }
+    }
+
     private void ReloadSelfInPlace()
     {
-        if (mediaPlayer == null || string.IsNullOrEmpty(currentSyncedUrl))
+        if (mediaPlayer == null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(currentSyncedUrl))
+        {
+            currentSyncedUrl = GetActiveUrl();
+        }
+
+        if (string.IsNullOrEmpty(currentSyncedUrl))
         {
             return;
         }
@@ -873,11 +949,19 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
     private void ApplyRemoteFullState(string url, SyncedPlaybackState state, long positionTicks, ushort remoteLoadNonce)
     {
-        // Reload when the URL changes OR the owner issued a fresh load of the same URL
-        // (loadNonce bumps per SetUrl). Without the nonce, re-loading the same URL on the
-        // owner would be a no-op here and the two clients would drift apart.
+        // Any full state answers a pending ask-the-room resync. Capture that before clearing
+        // it: a resync's whole job is to reload onto the answer, so it must force the reload
+        // even when the answer carries the same url and nonce, or a stuck stream would be left
+        // as-is (the unchanged-load path only start/resumes, it does not re-open).
+        bool forceReload = forcedResyncPending;
+        forcedResyncPending = false;
+        resyncAnswerDeadline = -1f;
+
+        // Reload when the URL changes, the owner issued a fresh load of the same URL (loadNonce
+        // bumps per SetUrl), or a local resync asked for this answer. Never on an empty url,
+        // which would wipe currentSyncedUrl.
         bool loadChanged = !string.IsNullOrEmpty(url) &&
-            (url != currentSyncedUrl || remoteLoadNonce != lastAppliedLoadNonce);
+            (forceReload || url != currentSyncedUrl || remoteLoadNonce != lastAppliedLoadNonce);
 
         // The same load re-announced while this client is still resolving it (a second
         // custodian answering the same join, or the owner's OnReady settle broadcast):
