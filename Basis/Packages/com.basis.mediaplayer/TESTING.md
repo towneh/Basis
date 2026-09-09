@@ -114,6 +114,24 @@ and both admin rows, are about what the panel shows.
 | Open to everyone | Set `AnyoneCanControl` | The unprivileged client gains the controls **while the panel is open**, without reopening it |
 | Live source | An RTSP or HLS live lane | No position sync at all: both clients sit near the edge independently. This is deliberate |
 | Stalled owner | Let the owner's network stall mid-playback | The follower holds position rather than being dragged backwards towards a frozen playhead |
+| Resync everyone | Drift a follower off, then the owner presses **Resync Everyone** | Every client, the owner included, lands on the owner's current position and stays converged. No approval prompt |
+| Resync keeps the owner's place | Owner presses **Resync Everyone** while playing | The owner keeps playing from where it was, **not** from zero. This is the `selfResyncApply` path and the row most likely to regress; a jump to zero means the initiator's own stash is not being applied |
+| Resync while stopped | Owner presses **Resync Everyone** with nothing playing (session closed, a URL still held) | Nothing happens. It must **not** close the room and reopen playing alone |
+| Resync a page URL | Owner presses **Resync Everyone** on a YouTube/Twitch source | Each client re-resolves the page URL for itself and lands together; the shared URL stays the page URL, never a peer's expiring stream URL |
+| Join mid-resync | A client joins, or asks for state, while a resync reopen is still in flight | It lands at the owner's real position, not near zero. The late-join and state-request answers carry the stashed snapshot while the reopen settles |
+| Local resync | A follower presses **Local Resync** | Only that client re-opens its own stream; the owner and other followers are undisturbed |
+
+**Resync** puts the whole room back on the controller's timeline; **Local Resync**
+re-opens on one client only and is unchanged from before. The rows above need a little
+setup the transport rows do not: *Resync keeps the owner's place* wants the owner a
+visible way into a seekable source so a jump to zero is obvious; *Resync while stopped*
+wants the owner to have played and then stopped so a URL is still held with no live
+playback; *Join mid-resync* wants the second client to arrive during the reopen window,
+which on a page URL is the seconds of resolve, so a page source makes it easy to hit.
+The near-zero playhead of a reopening session must not reach peers through any of the
+four owner outputs — the settle broadcast, the position heartbeat, a late-join answer or
+a state-request answer — so a follower that briefly snaps to the start on any resync is a
+regression even if it recovers.
 
 Two that need the resolver, so they wait until the yt-dlp package is installed:
 a page URL must reach peers **as the page URL** — each client resolves for
