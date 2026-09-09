@@ -974,6 +974,9 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             _bufferDepthSlider.SetValueWithoutNotify(
                 _activePlayer != null ? _activePlayer.EffectiveBufferDepthMs : BasisMediaPlayer.DefaultBufferDepthMs);
             _bufferDepthSlider.gameObject.SetActive(visible);
+            // Reflow the group, or the revealed slider draws over the toggle row above it
+            // instead of below, and hiding it leaves a gap.
+            RebuildPage(_userGroup);
         }
     }
 
