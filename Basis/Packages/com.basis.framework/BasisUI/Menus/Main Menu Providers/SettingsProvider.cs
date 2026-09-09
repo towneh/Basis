@@ -1866,6 +1866,8 @@ namespace Basis.BasisUI
                     new List<string> { "settings.graphics.gi.preset.natural", "settings.graphics.gi.preset.unnatural" });
                 dropdownGiPreset.AssignBinding(BasisSettingsDefaults.GlobalIlluminationPreset);
 
+                bool giCanTrace = BasisGlobalIlluminationRayContext.HardwareSupported;
+
                 PanelDropdown dropdownGiMode = PanelDropdown.CreateNewEntry(giGroup.ContentParent);
                 dropdownGiMode.Descriptor.SetTitle(BasisLocalization.Get("settings.graphics.gi.mode"));
                 dropdownGiMode.Descriptor.SetTooltip(BasisLocalization.Get("settings.graphics.gi.mode.tooltip"));
@@ -2178,9 +2180,9 @@ namespace Basis.BasisUI
 
                 void SetGiRowsActive(bool val)
                 {
-                    bool rayTraced = val && dropdownGiMode.Value == "Ray Traced";
+                    bool rayTraced = val && giCanTrace && dropdownGiMode.Value == "Ray Traced";
                     dropdownGiPreset.Descriptor.SetActive(val);
-                    dropdownGiMode.Descriptor.SetActive(val);
+                    dropdownGiMode.Descriptor.SetActive(val && giCanTrace);
                     // Both of these describe what goes into the acceleration structure, which only the ray
                     // traced path builds. On screen space the trace walks the depth buffer, so neither has
                     // anything to act on and showing them promises a control that does nothing.
@@ -3468,6 +3470,7 @@ namespace Basis.BasisUI
 
             PanelTextField chatTextField = null;
             PanelSlider sliderChatSize = null;
+            PanelSlider sliderChatDuration = null;
             PanelSectionToggleHelpers.CreateCollapsibleBoxedSection(container,
                 BasisLocalization.Get("settings.tab.chat"), () =>
             {
@@ -3493,6 +3496,14 @@ namespace Basis.BasisUI
                     BasisSettingsDefaults.ChatSize);
                 sliderChatSize.Descriptor.SetTooltip(BasisLocalization.Get("settings.chat.textSize.tooltip"));
 
+                sliderChatDuration = PanelSlider.CreateEntryAndBind(
+                    container,
+                    PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.chat.duration"),
+                        BasisSettingsDefaults.CHAT_MESSAGE_DURATION_MIN, BasisSettingsDefaults.CHAT_MESSAGE_DURATION_MAX,
+                        true, 0, ValueDisplayMode.Raw),
+                    BasisSettingsDefaults.ChatMessageDuration);
+                sliderChatDuration.Descriptor.SetTooltip(BasisLocalization.Get("settings.chat.duration.tooltip"));
+
                 // Composer hides when the local player turned chat off OR the server locked it.
                 // Re-evaluated each time the tab is built (the menu is rebuilt on every open), so
                 // a lock flipped mid-session lands on the next open — SendChatMessage refuses in
@@ -3500,6 +3511,7 @@ namespace Basis.BasisUI
                 bool chatEnabled = !BasisSettingsDefaults.ChatDisabled.RawValue && !BasisNetworkHandleChat.LockedByServer;
                 chatTextField.Descriptor.SetActive(chatEnabled);
                 sliderChatSize.Descriptor.SetActive(chatEnabled);
+                sliderChatDuration.Descriptor.SetActive(chatEnabled);
                 toggleChatDisabled.OnValueChanged += (val) =>
                 {
                     bool enabled = !val && !BasisNetworkHandleChat.LockedByServer;
@@ -3509,6 +3521,7 @@ namespace Basis.BasisUI
                         BasisNetworkHandleChatTyping.SendTypingState(false);
                     }
                     sliderChatSize.Descriptor.SetActive(enabled);
+                    sliderChatDuration.Descriptor.SetActive(enabled);
                     descriptor.ForceRebuild();
                 };
             }, false, visible =>
@@ -3519,6 +3532,7 @@ namespace Basis.BasisUI
                     bool chatOn = !BasisSettingsDefaults.ChatDisabled.RawValue && !BasisNetworkHandleChat.LockedByServer;
                     chatTextField.Descriptor.SetActive(chatOn);
                     sliderChatSize.Descriptor.SetActive(chatOn);
+                    sliderChatDuration.Descriptor.SetActive(chatOn);
                 }
                 descriptor.ForceRebuild();
             });
@@ -3704,6 +3718,7 @@ namespace Basis.BasisUI
             BasisSettingsDefaults.LeaveNotifications.ResetToDefault();
             BasisSettingsDefaults.ChatDisabled.ResetToDefault();
             BasisSettingsDefaults.ChatSize.ResetToDefault();
+            BasisSettingsDefaults.ChatMessageDuration.ResetToDefault();
             BasisSettingsDefaults.PhotoMetadataTagging.ResetToDefault();
             BasisSettingsDefaults.PhotoEmbedPersonDetails.ResetToDefault();
             BasisSettingsDefaults.PhotoEmbedCameraSettings.ResetToDefault();

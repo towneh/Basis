@@ -8,6 +8,10 @@ public sealed class BasisGlobalIlluminationHistory
 {
     private static readonly Dictionary<int, BasisGlobalIlluminationHistory> stores = new Dictionary<int, BasisGlobalIlluminationHistory>();
     private static readonly List<int> pruneScratch = new List<int>();
+    private static readonly string[] indirectNames = { "_BasisGIHistoryIndirect0", "_BasisGIHistoryIndirect1" };
+    private static readonly string[] statsNames = { "_BasisGIHistoryStats0", "_BasisGIHistoryStats1" };
+    private static readonly string[] specularNames = { "_BasisGIHistorySpecular0", "_BasisGIHistorySpecular1" };
+    private static readonly string[] specularStatsNames = { "_BasisGIHistorySpecularStats0", "_BasisGIHistorySpecularStats1" };
     public static IReadOnlyDictionary<int, BasisGlobalIlluminationHistory> Stores => stores;
 
     public RTHandle[] Indirect = new RTHandle[2];
@@ -236,8 +240,8 @@ public sealed class BasisGlobalIlluminationHistory
 
         for (int slot = 0; slot < 2; slot++)
         {
-            reallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref Indirect[slot], in indirectDescriptor, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_BasisGIHistoryIndirect" + slot);
-            reallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref Stats[slot], in statsDescriptor, FilterMode.Point, TextureWrapMode.Clamp, name: "_BasisGIHistoryStats" + slot);
+            reallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref Indirect[slot], in indirectDescriptor, FilterMode.Bilinear, TextureWrapMode.Clamp, name: indirectNames[slot]);
+            reallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref Stats[slot], in statsDescriptor, FilterMode.Point, TextureWrapMode.Clamp, name: statsNames[slot]);
         }
 
         if (needsSpecular)
@@ -245,8 +249,8 @@ public sealed class BasisGlobalIlluminationHistory
             bool specularReallocated = !SpecularAllocated;
             for (int slot = 0; slot < 2; slot++)
             {
-                specularReallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref Specular[slot], in indirectDescriptor, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_BasisGIHistorySpecular" + slot);
-                specularReallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref SpecularStats[slot], in statsDescriptor, FilterMode.Point, TextureWrapMode.Clamp, name: "_BasisGIHistorySpecularStats" + slot);
+                specularReallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref Specular[slot], in indirectDescriptor, FilterMode.Bilinear, TextureWrapMode.Clamp, name: specularNames[slot]);
+                specularReallocated |= RenderingUtils.ReAllocateHandleIfNeeded(ref SpecularStats[slot], in statsDescriptor, FilterMode.Point, TextureWrapMode.Clamp, name: specularStatsNames[slot]);
             }
             SpecularAllocated = true;
             // A resize invalidates reflections for the same reason it invalidates the diffuse history, and

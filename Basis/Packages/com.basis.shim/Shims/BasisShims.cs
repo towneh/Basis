@@ -342,34 +342,4 @@ namespace Basis
 	}
 
 
-
-
-#if false
-// If we ever allow raw.
-	public class BasisImageDownloader
-	{
-		public void DownloadImage( BasisUrl stringUrl, Action callback, TextureInfo rgbInfo)
-		{
-			UnityWebRequest www = UnityWebRequest.Get( stringUrl.Get() );
-			UnityWebRequestAsyncOperation req = www.SendWebRequest();
-
-			bool bCompleted = false;
-
-			req.completed += (AsyncOperation obj) => {
-				if( !bCompleted )
-				{
-					bCompleted = true;
-					DownloadHandler dh = www.downloadHandler;
-					callback( www.result == UnityWebRequest.Result.Success, dh.error, dh.GetData() );
-				}
-			};
-
-			if( !bCompleted && req.isDone )
-			{
-				req.completed( null );
-			}
-		}
-	};
-#endif
-
 }

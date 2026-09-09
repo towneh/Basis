@@ -93,12 +93,6 @@ namespace Basis.Scripts.Common
         /// </summary>
         public static bool IsMobileGpu { get { EnsureInitialized(); return mobileGpu; } }
 
-        /// <summary>True for CPU rasterizers (llvmpipe, WARP) and for the -nographics null device.</summary>
-        public static bool IsSoftwareRenderer { get { EnsureInitialized(); return softwareRenderer; } }
-
-        /// <summary>True when the CPU underneath is ARM, x86 emulated onto it by FEX included.</summary>
-        public static bool IsArmHost { get { EnsureInitialized(); return armHost; } }
-
         public static BasisGpuVendor Vendor { get { EnsureInitialized(); return vendor; } }
 
         public static string DeviceName { get { EnsureInitialized(); return deviceName; } }
@@ -106,9 +100,6 @@ namespace Basis.Scripts.Common
         public static string VendorName { get { EnsureInitialized(); return vendorName; } }
 
         public static int VendorId { get { EnsureInitialized(); return vendorId; } }
-
-        /// <summary>True when the class came from a launch flag or environment variable, not the probe.</summary>
-        public static bool WasForced { get { EnsureInitialized(); return forced; } }
 
         /// <summary>One line naming the GPU and what it was classified as, for logs and bug reports.</summary>
         public static string Summary { get { EnsureInitialized(); return summary; } }

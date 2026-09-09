@@ -44,11 +44,6 @@ namespace Basis.Network
             sLastCounterPerPair.Clear();
         }
 
-        public static long TotalFaceReceipts =>
-            Interlocked.Read(ref FaceKeyframesSmall) + Interlocked.Read(ref FaceKeyframesLarge)
-            + Interlocked.Read(ref FaceDeltas)
-            + Interlocked.Read(ref FaceViaBundleKeyframes) + Interlocked.Read(ref FaceViaBundleDeltas);
-
         public static string Summary()
         {
             return "[FaceObserver] face: " +

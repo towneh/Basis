@@ -167,6 +167,10 @@ public partial class BasisHandHeldCameraUI
             videoTimeLimit = true;
             videoContinuousClips = false;
 
+            photogrammetryDistanceMeters = 0.3f;
+            photogrammetryAngleDegrees = 15f;
+            photogrammetryWidth = 1280;
+
             streamTransport = (int)(BasisHandHeldCamera.IsVideoOutputSupported ? BasisVideoTransport.Platform : BasisVideoTransport.Web);
             streamWidth = BasisVideoOutputSettings.DefaultWidth;
             streamHeight = BasisVideoOutputSettings.DefaultHeight;
@@ -441,6 +445,15 @@ public partial class BasisHandHeldCameraUI
         // Capture-mode toggles.
         public bool capture360;
         public bool useAutoLeveling;
+
+        /// <summary>
+        /// Whether the detached camera rolls with the grip flying it. Off is the zero fill and the
+        /// intended default — a shot that stays level however the puck is turned — so a file from
+        /// before this existed loads that way and no version bump is owed, even though the grip
+        /// used to roll the camera freely.
+        /// </summary>
+        public bool cameraRoll;
+
         public bool useVRHandheldSmoothing;
         public float vrStabilizationPositionDamping;
         public float vrStabilizationYawDamping;
@@ -543,6 +556,12 @@ public partial class BasisHandHeldCameraUI
         /// older file loads as the single-clip recording it was written as.
         /// </summary>
         public bool videoContinuousClips;
+
+        // Photogrammetry capture: a still every time the camera moves or turns past these
+        // thresholds, at this width. Defaulted the same way as the GIF/video fields above.
+        public float photogrammetryDistanceMeters;
+        public float photogrammetryAngleDegrees;
+        public int photogrammetryWidth;
 
         public int streamTransport;
         public int streamWidth;

@@ -25,6 +25,12 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.basis.examples",
+            "expression": "",
+            "define": "BASIS_HAS_EXAMPLES"
+        }
+    ],
     "noEngineReferences": false
 }

@@ -195,7 +195,10 @@ namespace BasisPermissions
         private PermissionStore _store = new PermissionStore();
 
         // Cache: uuid -> (version, effective perms)
-        private readonly Dictionary<string, CacheEntry> _cache = new Dictionary<string, CacheEntry>(StringComparer.OrdinalIgnoreCase);
+        // Concurrent so the hit path in GetEffective can read without touching _lock: an
+        // upgradeable read admits exactly one thread, which serialised every permission check
+        // across all receive threads even when the answer was already cached.
+        private readonly ConcurrentDictionary<string, CacheEntry> _cache = new ConcurrentDictionary<string, CacheEntry>(StringComparer.OrdinalIgnoreCase);
         private int _version = 0;
 
         // File path for persistence
@@ -203,7 +206,7 @@ namespace BasisPermissions
 
         // Save debounce to avoid writing on every tiny change
         private readonly object _saveGate = new object();
-        private Timer? _saveTimer;
+        private Timer _saveTimer;
         private volatile bool _dirty = false;
 
         // Tune this
@@ -226,7 +229,7 @@ namespace BasisPermissions
         }
 
         public string GetXmlPath() => _xmlPath;
-        public void LoadFromXml(string? pathOverride = null)
+        public void LoadFromXml(string pathOverride = null)
         {
             string path = pathOverride ?? _xmlPath;
             PermissionStore loaded = PermissionXml.Load(path);
@@ -242,7 +245,7 @@ namespace BasisPermissions
             finally { _lock.ExitWriteLock(); }
         }
 
-        public void SaveToXml(string? pathOverride = null)
+        public void SaveToXml(string pathOverride = null)
         {
             string path = pathOverride ?? _xmlPath;
             PermissionStore snapshot = Snapshot();
@@ -682,7 +685,7 @@ namespace BasisPermissions
         private void TouchUser(string uuid)
         {
             _version++;
-            _cache.Remove(uuid);
+            _cache.TryRemove(uuid, out _);
             _dirty = true;
         }
 
@@ -699,7 +702,7 @@ namespace BasisPermissions
             _lock.EnterWriteLock();
             try
             {
-                _cache.Remove(uuid);
+                _cache.TryRemove(uuid, out _);
             }
             finally
             {
@@ -709,25 +712,23 @@ namespace BasisPermissions
 
         private EffectivePermissions GetEffective(string uuid)
         {
-            _lock.EnterUpgradeableReadLock();
+            // Lock-free on a hit: the entry pairs its Version with the perms it was built
+            // from, so a stale entry fails the version compare and falls through to the
+            // locked rebuild. Only a miss (or an invalidated entry) pays for the write lock.
+            if (_cache.TryGetValue(uuid, out var entry) && entry.Version == Volatile.Read(ref _version))
+                return entry.Perms;
+
+            _lock.EnterWriteLock();
             try
             {
-                if (_cache.TryGetValue(uuid, out var entry) && entry.Version == _version)
+                if (_cache.TryGetValue(uuid, out entry) && entry.Version == _version)
                     return entry.Perms;
 
-                _lock.EnterWriteLock();
-                try
-                {
-                    if (_cache.TryGetValue(uuid, out entry) && entry.Version == _version)
-                        return entry.Perms;
-
-                    var built = BuildEffective_NoLock(uuid);
-                    _cache[uuid] = new CacheEntry { Version = _version, Perms = built };
-                    return built;
-                }
-                finally { _lock.ExitWriteLock(); }
+                var built = BuildEffective_NoLock(uuid);
+                _cache[uuid] = new CacheEntry { Version = _version, Perms = built };
+                return built;
             }
-            finally { _lock.ExitUpgradeableReadLock(); }
+            finally { _lock.ExitWriteLock(); }
         }
 
         public EffectivePermissions BuildEffective_NoLock(string uuid)
@@ -940,7 +941,7 @@ namespace BasisPermissions
 
             /// <summary>
             /// Node names are stored verbatim in permissions.xml, so renaming one orphans every
-            /// grant an operator already wrote. Rewrite retired spellings on the way in — a
+            /// grant an operator already wrote. Rewrite retired spellings on the way in - a
             /// negated node ("-basis.moderation.shout") has to migrate too, or a deny silently
             /// stops denying, which is the dangerous direction.
             /// </summary>
@@ -971,8 +972,8 @@ namespace BasisPermissions
                 using var fs = File.OpenRead(path);
                 using var xr = XmlReader.Create(fs, settings);
 
-                PermissionGroup? currentGroupDef = null;
-                PermissionUser? currentUser = null;
+                PermissionGroup currentGroupDef = null;
+                PermissionUser currentUser = null;
 
                 // Context flags
                 bool inGroups = false;
@@ -1080,7 +1081,7 @@ namespace BasisPermissions
 
             public static void Save(string path, PermissionStore store)
             {
-                string? dir = Path.GetDirectoryName(path);
+                string dir = Path.GetDirectoryName(path);
                 if (!string.IsNullOrEmpty(dir))
                     Directory.CreateDirectory(dir);
 

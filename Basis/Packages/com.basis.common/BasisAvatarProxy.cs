@@ -558,8 +558,6 @@ public static class BasisAvatarProxy
 
     /// <summary>Vertices per ring row. The row loop is inclusive, hence the +1 on both counts.</summary>
     public static int CapsuleStride => CapsuleSides + 1;
-    public static int CapsuleRowCount => (CapsuleRings + 1) * 2 + 1;
-
     public static Mesh SharedCapsule()
     {
         if (sharedCapsule != null) { return sharedCapsule; }

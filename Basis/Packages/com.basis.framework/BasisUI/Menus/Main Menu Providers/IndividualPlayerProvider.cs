@@ -707,6 +707,13 @@ namespace Basis.BasisUI
                         remotePlayer.IsEffectivelyBlocked ? 0f : value);
                 }
 
+                // remotePlayer is the shared "who are we editing" context, not a capture - it can
+                // have gone null (target left) between this panel opening and the slider firing.
+                if (remotePlayer == null)
+                {
+                    BasisDebug.LogWarning("Individual player volume change dropped: remotePlayer is null (target likely left before the slider fired).");
+                    return;
+                }
                 var s = await BasisPlayerSettingsManager.RequestPlayerSettings(remotePlayer.UUID);
                 s.VolumeLevel = value;
                 await BasisPlayerSettingsManager.SetPlayerSettings(s);
@@ -727,6 +734,11 @@ namespace Basis.BasisUI
 
             normalizeToggle.OnValueChanged += async enabled =>
             {
+                if (remotePlayer == null)
+                {
+                    BasisDebug.LogWarning("Individual player normalize-loudness change dropped: remotePlayer is null (target likely left before the toggle fired).");
+                    return;
+                }
                 var s = await BasisPlayerSettingsManager.RequestPlayerSettings(remotePlayer.UUID);
                 s.NormalizeLoudness = enabled;
                 await BasisPlayerSettingsManager.SetPlayerSettings(s);
@@ -1556,6 +1568,13 @@ namespace Basis.BasisUI
                     BasisLocalization.Get("menu.individualPlayer.locomotion.runSpeed"), 0.1f, 20f, false, 2, ValueDisplayMode.Raw));
                 runSlider.SetValueWithoutNotify(4f);
 
+                PanelToggle gravityToggle = PanelToggle.CreateNew(locomotionGroup.ContentParent);
+                gravityToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.admin.locomotion.gravity.override"));
+                PanelSlider gravitySlider = PanelSlider.CreateNew(locomotionGroup.ContentParent);
+                gravitySlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(
+                    BasisLocalization.Get("settings.admin.locomotion.gravity"), 0f, 50f, false, 2, ValueDisplayMode.Raw));
+                gravitySlider.SetValueWithoutNotify(SettingsProviderModeratorTab.DefaultLocomotionGravity);
+
                 List<string> modeEntries = SettingsProviderModeratorTab.BuildLocomotionModeEntries();
                 PanelDropdown modeDropdown = PanelDropdown.CreateNewEntry(locomotionGroup.ContentParent);
                 modeDropdown.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.locomotion.mode"));
@@ -1567,12 +1586,14 @@ namespace Basis.BasisUI
                     jumpSlider.Descriptor.SetActive(jumpToggle.Value);
                     walkSlider.Descriptor.SetActive(walkToggle.Value);
                     runSlider.Descriptor.SetActive(runToggle.Value);
+                    gravitySlider.Descriptor.SetActive(gravityToggle.Value);
                 }
 
                 ApplyLocomotionSliderVisibility();
                 jumpToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
                 walkToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
                 runToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
+                gravityToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
 
                 PanelButton locomotionApplyBtn = PanelButton.CreateNew(locomotionGroup.ContentParent);
                 locomotionApplyBtn.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.locomotion.apply"));
@@ -1584,7 +1605,8 @@ namespace Basis.BasisUI
                         jumpToggle.Value, jumpSlider.Value,
                         walkToggle.Value, walkSlider.Value,
                         runToggle.Value, runSlider.Value,
-                        modeEntries.IndexOf(modeDropdown.Value));
+                        modeEntries.IndexOf(modeDropdown.Value),
+                        gravityToggle.Value, gravitySlider.Value);
 
                     if (values.Fields == BasisLocomotionField.None)
                     {

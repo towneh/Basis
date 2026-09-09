@@ -264,8 +264,6 @@ namespace Basis.Network
                 }
             }
 
-            public static bool InChorus => Volatile.Read(ref _chorusUntilMs) > VoiceClock.Elapsed.TotalMilliseconds;
-
             // 48 kHz mono, 20 ms frames, matching the real client's encoder settings.
             private const int SampleRate = 48000;
             private const int Channels = 1;

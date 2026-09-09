@@ -161,7 +161,7 @@ namespace Basis.Tests.IK
                 spineSquishBoost = 0.5f, spineGazeFollow = 0.25f, neckGazeFollow = 0.3f, neckGazeFollowMaxDeg = 18f,
                 neckExtensionDamp = 0.65f, neckFlexionDamp = 0.5f,
                 spineTautBandFrac = 0.015f, bendTwistCoupling = 0.15f,
-                chestIkWeight = 0.5f, chestIkIterations = 8, chestIkHeadRestoreSweeps = 2, chestPosPullMaxDeg = 20f, chestPullMaxDist = 0.5f,
+                chestIkWeight = 0.5f, chestIkIterations = 8, chestIkHeadRestoreSweeps = 2, chestPosPullMaxDeg = 20f, chestPullMaxDist = 0.5f, chestHeadBudget = BasisEerieMovementSetup.ChestHeadBudgetMeters,
                 hipHingeStartDeg = 40f, hipHingeMaxAddDeg = 52f,
                 moveBodyBackWhenCrouching = 1f, trunkCounterbalance = 0.38f, trunkCounterbalanceMaxSpineFrac = 0.45f,
                 standingHeadHeight = rest.Head.y,
@@ -174,6 +174,10 @@ namespace Basis.Tests.IK
         {
             float neckChest = math.distance(rest.Neck, rest.Chest), chestSpine = math.distance(rest.Chest, rest.Spine);
             float lenTotal = math.max(1e-4f, neckChest + chestSpine + math.distance(rest.Spine, rest.Hips)), restDrop = rest.Neck.y - rest.Hips.y;
+            float3 restChord = rest.Neck - rest.Hips;
+            float restChordLenSq = math.lengthsq(restChord);
+            BasisLocalVirtualSpineDriver.RestOffsetFromChord(rest.Chest, rest.Hips, restChord, restChordLenSq, out float chestAlong, out float3 chestPerp);
+            BasisLocalVirtualSpineDriver.RestOffsetFromChord(rest.Spine, rest.Hips, restChord, restChordLenSq, out float spineAlong, out float3 spinePerp);
             return new BasisVirtualSpineCore.SpineSolveParams
             {
                 Dt = dt, Scale = 1f, TrackingLiftY = 0f, ParentMatrix = float4x4.identity, ParentRotation = quaternion.identity, EyeRot = eyeRot,
@@ -191,6 +195,7 @@ namespace Basis.Tests.IK
                 EyePos = eyePos, HipsAnchorOffsetLocal = new float3(rest.Hips.x - rest.Head.x, 0f, rest.Hips.z - rest.Head.z),
                 HeadRestFromEyeLocal = float3.zero, YawPivotFromEyeLocal = new float3(rest.Neck.x - rest.Head.x, 0f, rest.Neck.z - rest.Head.z),
                 PostureModel = 1, HipsCompressionStrength = 0.85f, HipsMaxDropMeters = 0.3f, HipsRestDropY = authoredDrop ? restDrop : 0f,
+                RestChordDir = math.normalizesafe(rest.Neck - rest.Hips), ChestRestAlong = chestAlong, ChestRestPerp = chestPerp, SpineRestAlong = spineAlong, SpineRestPerp = spinePerp,
             };
         }
         static void RunClip(Rig rig, BasisMotionClip clip, in Law law, List<float> pelvisErrors, List<float> spineErrors)

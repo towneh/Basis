@@ -221,18 +221,6 @@ public abstract partial class BasisHandHeldCameraInteractable
         }
     }
 
-    /// <summary>How far through the track the move has got, in 0..1.</summary>
-    public float DollyProgress
-    {
-        get
-        {
-            if (DollyTrack == null || DollyTrack.Count == 0) return 0f;
-
-            float max = BasisCameraSpline.MaxPosition(DollyTrack.Count, DollyTrack.Looped);
-            return max > 1e-4f ? Mathf.Clamp01(modifierState.DollyPosition / max) : 0f;
-        }
-    }
-
     /// <summary>Fits a whole stack at once, for a preset or a saved mode.</summary>
     public void ApplyModifierStack(BasisCameraModifierStack stack, bool seedFromCamera = true)
     {

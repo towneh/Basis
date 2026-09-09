@@ -19,7 +19,6 @@ namespace Basis.Scripts.Device_Management.Devices.UnityInputSystem
         private static readonly List<float> rates = new List<float>();
         private static bool hooked;
 
-        public static IReadOnlyList<float> SupportedRates => rates;
         public static float ActiveRate { get; private set; }
 
         private static ValveOpenXRRefreshRateFeature Feature =>

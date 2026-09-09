@@ -14,6 +14,7 @@ public static partial class BasisEncryptionWrapper
     private const int SaltSize = 16;
     private const int KeySize = 32;
     private const int IvSize = 16;
+    private const int DecryptChunkSize = 64 * 1024;
     public const int IterationSize = 10000;
     /// <summary>
     /// Largest single-dimension byte[] the runtime will allocate (0x7FFFFFC7), and therefore the
@@ -70,7 +71,7 @@ public static partial class BasisEncryptionWrapper
     }
 
     // Threshold to decide when to offload encryption to a separate thread
-    private const long LargeFileThreshold = 10L * 1024L * 1024L; // 25 MB
+    private const long LargeFileThreshold = 10L * 1024L * 1024L; // 10 MB
 
     public static Task EncryptFileAsync(string UniqueID, BasisPassword password, string inputPath, string outputPath, BasisProgressReport reportProgress)
     {
@@ -369,7 +370,7 @@ public static partial class BasisEncryptionWrapper
         {
             ct.ThrowIfCancellationRequested();
 
-            int bytesRead = await cryptoStream.ReadAsync(plain.AsMemory(totalRead, cipherLength - totalRead), ct);
+            int bytesRead = await cryptoStream.ReadAsync(plain.AsMemory(totalRead, Math.Min(DecryptChunkSize, cipherLength - totalRead)), ct);
             if (bytesRead <= 0) break;
 
             totalRead += bytesRead;
@@ -522,18 +523,5 @@ public static partial class BasisEncryptionWrapper
         reportProgress?.ReportProgress(UniqueID, 100, ProgressEncryptionComplete);
 
         return msOut.ToArray();
-    }
-
-    // Custom MemoryStream that minimizes allocations by exposing the internal buffer directly.
-    // Only use when safe, here for efficiency in DecryptFromBytesInternalAsync.
-    private sealed class PooledMemoryStream : MemoryStream
-    {
-        public PooledMemoryStream() : base() { }
-
-        public override byte[] ToArray()
-        {
-            // Avoids copying if possible (internal buffer might be larger than Length)
-            return base.GetBuffer().AsSpan(0, (int)Length).ToArray();
-        }
     }
 }

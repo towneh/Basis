@@ -46,6 +46,11 @@ public static class BasisContentShareManager
     /// </summary>
     public static string ServerOrb = "Packages/com.basis.sdk/Prefabs/WorldOrb.prefab";
     /// <summary>
+    /// Inline-payload shares reuse the WorldOrb visual for the same reason server shares do.
+    /// The type colour and the label carry which kind it is.
+    /// </summary>
+    public static string PayloadOrb = "Packages/com.basis.sdk/Prefabs/WorldOrb.prefab";
+    /// <summary>
     /// Drops a content share sphere in front of the local player.
     /// </summary>
     public static async void DropContentSphere(string contentURL, string unlockPassword, ContentShareType contentType)
@@ -55,56 +60,7 @@ public static class BasisContentShareManager
             BasisDebug.LogError("Invalid content URL or password for content share.", BasisDebug.LogTag.Networking);
             return;
         }
-        BasisDeviceManagement deviceInstance = BasisDeviceManagement.Instance;
-        if (!deviceInstance.FindDevice(out BasisInput input, BasisDominantHand.DominantRole) &&
-    !deviceInstance.FindDevice(out input, BasisDominantHand.NonDominantRole) &&
-    !deviceInstance.FindDevice(out input, BasisBoneTrackedRole.CenterEye))
-        {
-            BasisDebug.LogError("LoadProp failed: no suitable device found (LeftHand/RightHand/CenterEye).");
-            return;
-        }
-        BasisDebug.Log("Forcefully closing the main menu");
-        BasisMainMenu.Close();
-
-        (Vector3 spawnPos, Quaternion spawnRot, Vector3 spawnScale) placementResult;
-        try
-        {
-            placementResult = await PlacementManager.BeginPlacement(input, new Vector3(0.5f,0.5f,0.5f), new Vector3());
-        }
-        catch (TaskCanceledException)
-        {
-            BasisDebug.Log("Placement was cancelled by the user or UI.");
-            return;
-        }
-        catch (Exception ex)
-        {
-            BasisDebug.LogError(ex);
-            return;
-        }
-       Vector3 finalPos = placementResult.spawnPos;
-
-        ContentShareMessage msg = new ContentShareMessage
-        {
-            SphereNetID = BasisGenerateUniqueID.GenerateUniqueID(),
-            ContentURL = contentURL,
-            UnlockPassword = unlockPassword,
-            ContentType = contentType,
-            PositionX = finalPos.x,
-            PositionY = finalPos.y,
-            PositionZ = finalPos.z
-        };
-
-        NetDataWriter writer = new NetDataWriter();
-        writer.Put(BasisNetworkCommons.ContentShareSub_Drop);
-        msg.Serialize(writer);
-
-        BasisDebug.Log($"Dropping content sphere: {msg.SphereNetID} type={contentType}", BasisDebug.LogTag.Networking);
-
-        BasisNetworkConnection.LocalPlayerPeer?.Send(
-            writer,
-            BasisNetworkCommons.ContentShareChannel,
-            DeliveryMethod.ReliableOrdered
-        );
+        await PlaceAndDrop(contentURL, unlockPassword, contentType);
     }
 
     /// <summary>
@@ -133,12 +89,47 @@ public static class BasisContentShareManager
             BasisDebug.LogError("Cannot share an empty server connection string.", BasisDebug.LogTag.Networking);
             return;
         }
+        await PlaceAndDrop(connectionString, string.Empty, ContentShareType.Server);
+    }
+
+    /// <summary>
+    /// Drops a share whose payload travels inside the message rather than being fetched: the
+    /// caller hands over the content itself, already serialised. Refused when no package in this
+    /// build owns the type, so a share cannot be dropped that nobody here could have made.
+    /// </summary>
+    public static async void ShareInlinePayload(string payload, ContentShareType contentType)
+    {
+        if (!ContentSharePayload.IsPayloadType(contentType))
+        {
+            BasisDebug.LogError($"Content share type {contentType} does not carry an inline payload.", BasisDebug.LogTag.Networking);
+            return;
+        }
+        if (!BasisContentSharePayloadRegistry.IsHandled(contentType))
+        {
+            BasisDebug.LogError($"No handler is registered for content share type {contentType}.", BasisDebug.LogTag.Networking);
+            return;
+        }
+        if (string.IsNullOrEmpty(payload) || payload.Length > ContentSharePayload.MaxLength)
+        {
+            BasisDebug.LogError($"Content share payload is {payload?.Length ?? -1} characters; the ceiling is {ContentSharePayload.MaxLength}.", BasisDebug.LogTag.Networking);
+            return;
+        }
+
+        await PlaceAndDrop(payload, string.Empty, contentType);
+    }
+
+    /// <summary>
+    /// The half every share has in common: let the player put the orb somewhere, then tell the
+    /// server about it. A cancelled placement drops nothing.
+    /// </summary>
+    private static async Task PlaceAndDrop(string contentURL, string unlockPassword, ContentShareType contentType)
+    {
         BasisDeviceManagement deviceInstance = BasisDeviceManagement.Instance;
         if (!deviceInstance.FindDevice(out BasisInput input, BasisDominantHand.DominantRole) &&
             !deviceInstance.FindDevice(out input, BasisDominantHand.NonDominantRole) &&
             !deviceInstance.FindDevice(out input, BasisBoneTrackedRole.CenterEye))
         {
-            BasisDebug.LogError("ShareServerConnection failed: no suitable device found (LeftHand/RightHand/CenterEye).");
+            BasisDebug.LogError($"Content share ({contentType}) failed: no suitable device found (LeftHand/RightHand/CenterEye).");
             return;
         }
         BasisMainMenu.Close();
@@ -150,7 +141,7 @@ public static class BasisContentShareManager
         }
         catch (TaskCanceledException)
         {
-            BasisDebug.Log("Server-share placement was cancelled.");
+            BasisDebug.Log("Placement was cancelled by the user or UI.");
             return;
         }
         catch (Exception ex)
@@ -163,9 +154,9 @@ public static class BasisContentShareManager
         ContentShareMessage msg = new ContentShareMessage
         {
             SphereNetID = BasisGenerateUniqueID.GenerateUniqueID(),
-            ContentURL = connectionString,
-            UnlockPassword = string.Empty, // unused for ContentShareType.Server
-            ContentType = ContentShareType.Server,
+            ContentURL = contentURL,
+            UnlockPassword = unlockPassword,
+            ContentType = contentType,
             PositionX = finalPos.x,
             PositionY = finalPos.y,
             PositionZ = finalPos.z,
@@ -175,7 +166,7 @@ public static class BasisContentShareManager
         writer.Put(BasisNetworkCommons.ContentShareSub_Drop);
         msg.Serialize(writer);
 
-        BasisDebug.Log($"Sharing server entry sphere: {connectionString}", BasisDebug.LogTag.Networking);
+        BasisDebug.Log($"Dropping content sphere: {msg.SphereNetID} type={contentType}", BasisDebug.LogTag.Networking);
 
         BasisNetworkConnection.LocalPlayerPeer?.Send(
             writer,
@@ -204,7 +195,13 @@ public static class BasisContentShareManager
         writer.Put(BasisNetworkCommons.ContentShareSub_Cleanup);
         msg.Serialize(writer);
 
-        BasisNetworkConnection.LocalPlayerPeer?.Send(
+        if (BasisNetworkConnection.LocalPlayerPeer == null)
+        {
+            BasisDebug.LogWarning($"Content sphere removal requested while disconnected: {sphereNetID}", BasisDebug.LogTag.Networking);
+            return;
+        }
+        BasisDebug.Log($"Requesting content sphere removal: {sphereNetID}", BasisDebug.LogTag.Networking);
+        BasisNetworkConnection.LocalPlayerPeer.Send(
             writer,
             BasisNetworkCommons.ContentShareChannel,
             DeliveryMethod.ReliableOrdered
@@ -265,6 +262,12 @@ public static class BasisContentShareManager
             case ContentShareType.Server:
                 orbKey = ServerOrb;
                 break;
+            default:
+                if (ContentSharePayload.IsPayloadType(serverMsg.contentShareMessage.ContentType))
+                {
+                    orbKey = PayloadOrb;
+                }
+                break;
         }
         if (string.IsNullOrEmpty(orbKey))
         {
@@ -274,7 +277,7 @@ public static class BasisContentShareManager
         GameObject InSceneOrb;
         try
         {
-            InSceneOrb = await Addressables.InstantiateAsync(orbKey, BasisDeviceManagement.Instance.transform, false).Task;
+            InSceneOrb = await Addressables.InstantiateAsync(orbKey, position, Quaternion.identity, BasisDeviceManagement.Instance.transform).Task;
         }
         catch (System.Exception ex)
         {
@@ -319,6 +322,10 @@ public static class BasisContentShareManager
                     int passwordSeparator = msg.ContentURL.IndexOf('#');
                     shareDetail = passwordSeparator >= 0 ? msg.ContentURL.Substring(0, passwordSeparator) : msg.ContentURL;
                 }
+                else if (ContentSharePayload.IsPayloadType(msg.ContentType))
+                {
+                    shareDetail = BasisContentSharePayloadRegistry.Describe(msg.ContentType, msg.ContentURL) ?? string.Empty;
+                }
                 BasisShareableRegistry.Register(new BasisShareableEntry
                 {
                     Id = sphereId,
@@ -344,15 +351,28 @@ public static class BasisContentShareManager
     private static void RemoveSphere(string sphereNetID)
     {
         PendingSpheres.Remove(sphereNetID);
-        if (ActiveSpheres.TryRemove(sphereNetID, out BasisContentSphere sphere))
+        if (!ActiveSpheres.TryRemove(sphereNetID, out BasisContentSphere sphere))
         {
-            if (sphere != null && sphere.gameObject != null)
-            {
-                Addressables.ReleaseInstance(sphere.gameObject);
-            }
-            BasisDebug.Log($"Content sphere removed: {sphereNetID}", BasisDebug.LogTag.Networking);
-            OnSphereRemoved?.Invoke(sphereNetID);
-            BasisShareableRegistry.Unregister(sphereNetID);
+            BasisDebug.Log($"Content sphere cleanup for a sphere not present locally: {sphereNetID}", BasisDebug.LogTag.Networking);
+            return;
+        }
+        ReleaseOrb(sphere);
+        BasisDebug.Log($"Content sphere removed: {sphereNetID}", BasisDebug.LogTag.Networking);
+        OnSphereRemoved?.Invoke(sphereNetID);
+        BasisShareableRegistry.Unregister(sphereNetID);
+    }
+
+    private static void ReleaseOrb(BasisContentSphere sphere)
+    {
+        if (sphere == null || sphere.gameObject == null)
+        {
+            return;
+        }
+        GameObject orb = sphere.gameObject;
+        if (!Addressables.ReleaseInstance(orb))
+        {
+            BasisDebug.LogWarning($"Content sphere {sphere.SphereNetID} was not an addressable instance; destroying it directly.", BasisDebug.LogTag.Networking);
+            GameObject.Destroy(orb);
         }
     }
 
@@ -363,10 +383,7 @@ public static class BasisContentShareManager
     {
         foreach (var kvp in ActiveSpheres)
         {
-            if (kvp.Value != null && kvp.Value.gameObject != null)
-            {
-                Addressables.ReleaseInstance(kvp.Value.gameObject);
-            }
+            ReleaseOrb(kvp.Value);
             BasisShareableRegistry.Unregister(kvp.Key);
         }
         ActiveSpheres.Clear();
@@ -381,7 +398,10 @@ public static class BasisContentShareManager
             case ContentShareType.Prop: return BasisShareableKind.Prop;
             case ContentShareType.World: return BasisShareableKind.World;
             case ContentShareType.Server: return BasisShareableKind.Server;
-            default: return BasisShareableKind.Other;
+            default:
+                return BasisContentSharePayloadRegistry.TryGet(type, out BasisContentSharePayloadKind kind)
+                    ? kind.ShareableKind
+                    : BasisShareableKind.Other;
         }
     }
 }

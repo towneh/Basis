@@ -201,7 +201,6 @@ public sealed partial class BasisGlobalIlluminationPass : ScriptableRenderPass
     public static float GpuMsRayTrace => samplerRayTrace.gpuElapsedTime;
     public static float GpuMsRayResolve => samplerRayResolve.gpuElapsedTime;
     public static float GpuMsCopyColor => samplerCopy.gpuElapsedTime;
-    public static float GpuMsLightmapMask => samplerLightmapMask.gpuElapsedTime;
     public static float GpuMsCoarseDepth => samplerCoarse.gpuElapsedTime;
     public static float GpuMsTrace => samplerTrace.gpuElapsedTime;
     public static float GpuMsTemporal => samplerTemporal.gpuElapsedTime;

@@ -309,16 +309,4 @@ public partial class BasisHandHeldCamera
         lookAtReticleCreated = false;
     }
 
-#if UNITY_INCLUDE_TESTS
-    /// <summary>
-    /// One frame of pointing with the ray supplied, so the pick and what it does to the stack can
-    /// be asserted without a hand, a headset or a click.
-    /// </summary>
-    public bool PointLookAtForTest(Ray ray)
-    {
-        if (!TryResolveLookAtPoint(ray, out Vector3 point)) return false;
-        SetFixedPointTo(point);
-        return true;
-    }
-#endif
 }

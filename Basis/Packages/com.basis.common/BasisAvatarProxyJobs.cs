@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
@@ -42,6 +43,7 @@ public static class BasisAvatarProxyJobs
     private static bool scheduled;
     private static bool hooked;
 
+    [BurstCompile]
     private struct GatherJob : IJobParallelForTransform
     {
         public NativeArray<Vector3> Positions;
@@ -53,6 +55,7 @@ public static class BasisAvatarProxyJobs
         }
     }
 
+    [BurstCompile]
     private struct BuildJob : IJobParallelFor
     {
         [ReadOnly] public NativeArray<Vector3> Positions;
@@ -65,9 +68,6 @@ public static class BasisAvatarProxyJobs
             Matrices[index] = Build(Positions[index * 2], Positions[index * 2 + 1], s.x, s.y);
         }
     }
-
-    /// <summary>How many limbs the shared arrays currently hold. For tests and diagnostics.</summary>
-    public static int LimbCount => limbCount;
 
     public static bool IsAllocated => matrices != null && limbCount > 0;
 
@@ -191,7 +191,12 @@ public static class BasisAvatarProxyJobs
         {
             // A collapsed joint still has a body part sitting on it, so it stays a ball rather than
             // vanishing - which is what stops a degenerate rig punching holes in the occlusion.
-            return Matrix4x4.TRS(start, Quaternion.identity, new Vector3(radius, radius, radius));
+            Matrix4x4 ball = new Matrix4x4();
+            ball.SetColumn(0, new Vector4(radius, 0f, 0f, 0f));
+            ball.SetColumn(1, new Vector4(0f, radius, 0f, 0f));
+            ball.SetColumn(2, new Vector4(0f, 0f, radius, 0f));
+            ball.SetColumn(3, new Vector4(start.x, start.y, start.z, 1f));
+            return ball;
         }
 
         Vector3 direction = axis / length;

@@ -58,8 +58,6 @@ public sealed class BasisGlobalIlluminationRayLights : IDisposable
 
     public GraphicsBuffer Buffer => buffer;
     public int Count => count;
-    public int ScannedCount => scanned.Count;
-
     /// <summary>The entry the trace kernel would read at this slot. For tests and the debug window.</summary>
     public BasisGlobalIlluminationRayLight At(int slot)
     {

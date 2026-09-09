@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using UnityEngine;
@@ -222,7 +223,6 @@ namespace Basis.Rendering.RTAO
         /// </summary>
         public const int MaxProxyInstances = 8192;
 
-        public int ProxyCount => proxies.Count;
         private readonly List<EntityId> pendingRemoval = new List<EntityId>();
         private IRayTracingAccelStruct accelStruct;
         private float nextScanTime;
@@ -270,6 +270,7 @@ namespace Basis.Rendering.RTAO
         // never be SCHEDULED from inside the render pipeline (see the ZBinning note on
         // BasisAvatarProxyJobs). UpdateTransforms only joins and compares; the dead
         // sweep it also does stays a main-thread walk.
+        [BurstCompile]
         private struct GatherWorldMatricesJob : IJobParallelForTransform
         {
             public NativeArray<Matrix4x4> Matrices;

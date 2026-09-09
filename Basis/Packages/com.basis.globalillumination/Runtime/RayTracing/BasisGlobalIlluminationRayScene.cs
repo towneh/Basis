@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using UnityEngine;
@@ -191,7 +192,6 @@ public sealed class BasisGlobalIlluminationRayScene : IDisposable
 
     private readonly Dictionary<EntityId, ProxyEntry> proxies = new Dictionary<EntityId, ProxyEntry>();
     private readonly List<EntityId> proxyRemoval = new List<EntityId>();
-    public int ProxyCount => proxies.Count;
     private readonly List<EntityId> pendingRemoval = new List<EntityId>();
     private readonly List<int> freeInstanceIds = new List<int>();
     private readonly List<Vector3> normalScratch = new List<Vector3>();
@@ -329,6 +329,7 @@ public sealed class BasisGlobalIlluminationRayScene : IDisposable
     // recording. Scheduling has to happen at onBeforeRender — see the ZBinning
     // note on BasisAvatarProxyJobs for why a job must never be SCHEDULED from
     // inside the render pipeline. UpdateTransforms only joins and compares.
+    [BurstCompile]
     private struct GatherWorldMatricesJob : IJobParallelForTransform
     {
         public NativeArray<Matrix4x4> Matrices;

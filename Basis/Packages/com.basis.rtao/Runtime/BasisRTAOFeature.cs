@@ -119,8 +119,6 @@ namespace Basis.Rendering.RTAO
         }
 
         public static bool IsSupported => BasisRTAOContext.HardwareSupported;
-        public static bool IsRayTracingSupported => BasisRTAOContext.HardwareSupported;
-
         public BasisRTAOQuality EffectiveQuality => HasQualityOverride ? QualityOverride : quality;
 
         public BasisRTAOSettings ResolveSettings()

@@ -55,7 +55,6 @@ public static class BasisGraphicsStatePrewarm
     public static bool Active => _initialized && _supported;
     public static int SeedVariantCount { get; private set; }
     public static int UserVariantCount { get; private set; }
-    public static int TracedVariantCount => _trace != null ? _trace.variantCount : 0;
     public static int PrunedVariantCount { get; private set; }
 
     // Warming creates GPU pipeline objects; cap per call so a large collection can't schedule an

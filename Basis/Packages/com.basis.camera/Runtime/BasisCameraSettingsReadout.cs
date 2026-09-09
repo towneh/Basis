@@ -248,6 +248,11 @@ public static class BasisCameraSettingsReadout
         Row("camera.video.size", settings.videoWidth + " px");
         Row("camera.video.quality", settings.videoQuality.ToString());
 
+        Section("camera.photogrammetry");
+        Row("camera.photogrammetry.distance", Number(settings.photogrammetryDistanceMeters) + " m");
+        Row("camera.photogrammetry.angle", Number(settings.photogrammetryAngleDegrees) + " °");
+        Row("camera.photogrammetry.resolution", settings.photogrammetryWidth + " px");
+
         Basis.Cinematics.BasisCameraModifierStack stack =
             settings.modifiers ?? new Basis.Cinematics.BasisCameraModifierStack();
 
@@ -276,6 +281,7 @@ public static class BasisCameraSettingsReadout
         Row("camera.detachedMarker", DetachedMarkerLabel(settings.detachedMarker));
         Row("camera.detachedMarker.size", Number(settings.detachedMarkerScale * 100f) + "%");
         Row("camera.puckPreview", OnOff(settings.puckLookAtPreview));
+        Row("camera.rollControl", OnOff(settings.cameraRoll));
 
         Section("camera.background");
         Row("camera.backgroundMode", BackgroundModeLabel(settings.backgroundMode));

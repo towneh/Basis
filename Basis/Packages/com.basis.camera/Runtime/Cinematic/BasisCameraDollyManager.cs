@@ -568,6 +568,5 @@ namespace Basis.Cinematics
         /// <summary>Whether a track authored by somebody else is currently being shown.</summary>
         public static bool HasMirror(ushort playerId) => _mirrors.ContainsKey(playerId);
 
-        public static int MirrorCount => _mirrors.Count;
     }
 }

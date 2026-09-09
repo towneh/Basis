@@ -70,7 +70,6 @@ public sealed class BasisGlobalIlluminationRayTextureAverage : IDisposable
 
     /// <summary>Bumped whenever an average lands, so the scene knows to re-read its materials.</summary>
     public int Version => version;
-    public int ResolvedCount => resolved.Count;
     public int PendingCount => pending.Count;
     public int QueuedCount => queued.Count;
 

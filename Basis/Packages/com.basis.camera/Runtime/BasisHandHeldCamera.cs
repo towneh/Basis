@@ -158,13 +158,6 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
     /// <summary>Folder where screenshots are written (platform-dependent).</summary>
     private string picturesFolder;
 
-    /// <summary>
-    /// Whether the UI (nameplate) layer is in the capture. Derived from the capture camera's own
-    /// culling mask so it is the single source of truth — the Render Layers "Nameplates" toggle
-    /// and this can never disagree.
-    /// </summary>
-    public bool ShowUIInCapture => captureCamera != null && uiLayerMask != 0 && (WorldCullingMask & uiLayerMask) != 0;
-
     /// <summary>Last visibility state reported by the mesh renderer check.</summary>
     public bool LastVisibilityState = false;
 
@@ -396,6 +389,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
         StopVideoOutput();
         ShutdownGifRecorder();
         ShutdownVideoRecorder();
+        ShutdownPhotogrammetry();
         SetAudioListener(false);
         DespawnFollowPip();
         DestroyDetachedGizmo();
@@ -1232,6 +1226,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
         SetResolution(captureWidth, captureHeight, AntialiasingQuality.High, Format);
         yield return new WaitForEndOfFrame();
 
+        bool headWasNormal = BasisLocalAvatarDriver.IsNormalHead;
         BasisLocalAvatarDriver.ScaleHeadToNormal();
         ToggleToneMapping(CaptureTonemapping);
 
@@ -1253,6 +1248,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
 #if BASIS_HAS_RTAO && !UNITY_ANDROID
             BasisRTAOIntegration.EndCapture();
 #endif
+            if (!headWasNormal) BasisLocalAvatarDriver.ScaleHeadToZero();
         }
 
         BasisHandHeldCameraPhotoMetadata.PhotoMetadata photoMetadata = BasisHandHeldCameraPhotoMetadata.CollectMetadata(captureCamera, transform);
@@ -1576,6 +1572,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
         TickVideoOutput();
         TickGifRecorder();
         TickVideoRecorder();
+        TickPhotogrammetry();
         UpdateOnPropUIVisibility();
         TickFocusRack();
         UpdateAutoFocus();
@@ -1767,13 +1764,12 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
     }
 
     /// <summary>
-    /// Restores tonemapping, hides local head mesh, and returns preview RT settings after capture.
+    /// Restores tonemapping and returns preview RT settings after capture.
     /// </summary>
     public void SetNormalAfterCapture()
     {
         captureInFlight = false;
         ToggleToneMapping(PreviewTonemapping);
-        BasisLocalAvatarDriver.ScaleHeadToZero();
         ApplyPreviewResolution();
     }
 
@@ -1979,7 +1975,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
     /// freezes on whatever frame the prop was last on screen for.
     /// </summary>
     private bool HasOffPropFeedConsumer =>
-        IsAnyVideoOutputActive || IsGifRecording || IsVideoRecording || panelPreviewActive
+        IsAnyVideoOutputActive || IsGifRecording || IsVideoRecording || IsPhotogrammetryActive || panelPreviewActive
         || IsPuckPreviewVisible || IsDirectToScreenPresenting;
 
     /// <summary>
