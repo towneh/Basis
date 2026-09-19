@@ -347,6 +347,141 @@ fn a_quiet_link_surfaces_as_a_read_error() {
     );
 }
 
+/// A ranged chunk is read at the pace its consumer plays it, and a paused
+/// session stops reading altogether, so nothing may bound how long one
+/// chunk's exchange runs end to end. The consumer here idles for longer
+/// than the request timeout in the middle of a reopened chunk, on a link
+/// that never went quiet, and the body has to carry on from where it was.
+#[test]
+fn an_idle_consumer_does_not_time_a_chunk_out() {
+    const CHUNK: usize = 1024 * 1024;
+    const TIMEOUT: Duration = Duration::from_millis(500);
+    let body: Vec<u8> = (0..3 * CHUNK).map(|i| (i % 251) as u8).collect();
+    let base = spawn_server(body.clone(), Mode::Ranges);
+    let mut source = HttpSource::open(
+        &format!("{base}/media"),
+        IoLimits {
+            request_timeout: TIMEOUT,
+            chunk_bytes: CHUNK as u64,
+            ..IoLimits::default()
+        },
+        Arc::new(AllowAllGate),
+        CancelToken::new(),
+    )
+    .expect("open");
+
+    // Start inside the second chunk, which is the first one a positioned
+    // reopen fetches. A short read leaves most of it unread on the wire.
+    let mut buf = [0u8; 16];
+    let mut pos = CHUNK;
+    let n = source.read_at(pos as u64, &mut buf).expect("first read");
+    assert!(n > 0, "the second chunk has bytes in it");
+    assert_eq!(&buf[..n], &body[pos..pos + n]);
+    pos += n;
+
+    thread::sleep(TIMEOUT * 3);
+
+    let mut rest = vec![0u8; 64 * 1024];
+    while pos < 2 * CHUNK {
+        let n = source
+            .read_at(pos as u64, &mut rest)
+            .expect("the chunk outlives the idle consumer");
+        assert!(n > 0, "the chunk ended early at {pos}");
+        assert_eq!(&rest[..n], &body[pos..pos + n], "bytes continue at {pos}");
+        pos += n;
+    }
+}
+
+/// With no total on the exchange, the wait for a reopened chunk's response
+/// head still has to end on its own. The server here serves the opening
+/// chunk and then takes every later request without answering it.
+#[test]
+fn a_chunk_request_nobody_answers_surfaces_as_a_read_error() {
+    const CHUNK: usize = 64 * 1024;
+    let body: Vec<u8> = (0..2 * CHUNK).map(|i| (i % 251) as u8).collect();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let served = Arc::new(Mutex::new(0usize));
+    let first = body[..CHUNK].to_vec();
+    let total = body.len();
+    thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            held.push(stream.try_clone().expect("clone"));
+            let served = Arc::clone(&served);
+            let first = first.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line.trim_end().is_empty() {
+                            break;
+                        }
+                    }
+                    let mut served = served.lock().expect("served lock");
+                    *served += 1;
+                    if *served > 1 {
+                        continue;
+                    }
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{total}\r\n\
+                         Content-Length: {}\r\n\r\n",
+                        first.len() - 1,
+                        first.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&first);
+                    let _ = stream.flush();
+                }
+            });
+        }
+    });
+
+    let mut source = HttpSource::open(
+        &format!("http://127.0.0.1:{port}/media"),
+        IoLimits {
+            request_timeout: Duration::from_millis(500),
+            chunk_bytes: CHUNK as u64,
+            ..IoLimits::default()
+        },
+        Arc::new(AllowAllGate),
+        CancelToken::new(),
+    )
+    .expect("the opening chunk is served");
+
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut pos = 0usize;
+    while pos < CHUNK {
+        let n = source.read_at(pos as u64, &mut buf).expect("opening chunk");
+        assert!(n > 0, "the opening chunk ended early at {pos}");
+        assert_eq!(&buf[..n], &body[pos..pos + n]);
+        pos += n;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let outcome = source
+            .read_at(pos as u64, &mut buf)
+            .map_err(|e| e.to_string());
+        let _ = tx.send(outcome);
+    });
+    let err = rx
+        .recv_timeout(CANCEL_WINDOW)
+        .expect("the read comes back on the timeout, not on the socket")
+        .expect_err("the unanswered request is given up on");
+    assert!(
+        err.starts_with("Read:"),
+        "an unanswered chunk request is a read error: {err}"
+    );
+}
+
 #[test]
 fn redirects_are_followed_and_capped() {
     let base = spawn_server(fixture("h264-aac-640x360-30fps.mp4"), Mode::Ranges);

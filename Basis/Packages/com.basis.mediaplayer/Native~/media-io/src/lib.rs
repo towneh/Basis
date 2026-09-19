@@ -35,14 +35,16 @@ use std::time::Duration;
 pub struct IoLimits {
     pub max_redirects: u32,
     pub connect_timeout: Duration,
-    /// Ceiling on one ranged request, connect to last body byte. Ranged
-    /// reads are chunked (`chunk_bytes`) so this doubles as the stall
-    /// detector. It bounds a request rather than aborting one, so it is
-    /// not what makes a teardown prompt — every request and read races
-    /// the session's [`CancelToken`] for that.
+    /// Ceiling on one wait for bytes from a media source: the response
+    /// head, then each read of the body. It is the stall detector, and it
+    /// measures the link rather than the exchange, because a body is read
+    /// at playback pace and not at all while paused. A signalling request,
+    /// whose body is small and read at once, takes it as a total instead.
+    /// Either way it is not what makes a teardown prompt — every request
+    /// and read races the session's [`CancelToken`] for that.
     pub request_timeout: Duration,
-    /// Size of one ranged request. Bounds both the per-request timeout's
-    /// meaning and the bytes wasted by a discarded stream.
+    /// Size of one ranged request. Bounds the bytes wasted by a discarded
+    /// stream.
     pub chunk_bytes: u64,
     /// Per-read stall detector on sequential live sources: this long with
     /// no bytes at all is a dead link, surfaced as a typed error for the

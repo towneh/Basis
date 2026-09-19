@@ -22,7 +22,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use media_demux::{ByteSource, SourceError};
@@ -363,7 +362,6 @@ impl HttpSource {
                     &self.client,
                     &self.url,
                     Some((offset, last)),
-                    Some(self.limits.request_timeout),
                     IoErrorKind::Read,
                 ),
             )?;
@@ -385,7 +383,7 @@ impl HttpSource {
             &self.cancel,
             IoErrorKind::Read,
             "read cancelled",
-            send_get(&self.client, &self.url, None, None, IoErrorKind::Read),
+            send_get(&self.client, &self.url, None, IoErrorKind::Read),
         )?;
         if !response.status().is_success() {
             return Err(IoError {
@@ -499,29 +497,25 @@ async fn pinned_get(
     kind: IoErrorKind,
 ) -> Result<(reqwest::Client, reqwest::Response), IoError> {
     let client = build_pinned_client(url, limits, gate).await?;
-    // Untimed: the opening probe's response becomes the body on a server
-    // that answers 200, and a total timeout would cut that body off.
-    let response = send_get(&client, url, range, None, kind).await?;
+    let response = send_get(&client, url, range, kind).await?;
     Ok((client, response))
 }
 
-/// One GET, with `timeout` bounding the whole exchange — headers and
-/// body both. Only a request whose body is bounded in advance can carry
-/// one; an open-ended body is held to the client's read timeout and the
-/// session's cancel token instead.
+/// One GET. No request carries a total timeout: a body is read at the
+/// pace its consumer plays it, and not at all while the session is
+/// paused, so the length of an exchange says nothing about the link. The
+/// client's read timeout bounds each wait for bytes instead, the wait for
+/// the response head included, and the session's cancel token ends any
+/// of it early.
 async fn send_get(
     client: &reqwest::Client,
     url: &Url,
     range: Option<(u64, u64)>,
-    timeout: Option<Duration>,
     kind: IoErrorKind,
 ) -> Result<reqwest::Response, IoError> {
     let mut request = client.get(url.clone());
     if let Some((first, last)) = range {
         request = request.header("Range", format!("bytes={first}-{last}"));
-    }
-    if let Some(timeout) = timeout {
-        request = request.timeout(timeout);
     }
     request
         .send()
@@ -537,9 +531,9 @@ async fn build_pinned_client(
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(limits.connect_timeout)
-        // Per read rather than per request, so a link that has gone quiet
-        // still surfaces as a typed error on the one client that has to
-        // carry an unbounded sequential body as well as bounded chunks.
+        // Per read rather than per request: it measures a wait for bytes,
+        // so a link that has gone quiet surfaces as a typed error while a
+        // consumer that has stopped reading costs nothing.
         .read_timeout(limits.request_timeout)
         .no_proxy()
         .user_agent("basis-media/0.1");

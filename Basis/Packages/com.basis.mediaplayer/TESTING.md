@@ -154,6 +154,7 @@ anything.
 | Visibility | A scene with no players, then one | The menu entry is absent, then appears |
 | Selection | Switch between players | Status, URL and the transport controls follow the selection |
 | Scrubber | Drag the timeline handle | It stays where you put it while dragging, issues one seek once the handle comes to rest, and does not bounce back to the old position on a short seek. Dragged while paused, the picture changes to the new position and playback stays paused |
+| Long pause | Pause a VOD for a minute, then press Play. Run it on a video and on an audio-only file | It resumes from where it stopped, with no error. A ranged source is read at playback pace and not at all while paused, so nothing in the player may treat a slow or idle read as a dead link |
 | Timeline-less media | A live lane | The scrubber hides rather than showing a meaningless bar |
 | Caption rows | Toggle captions, then switch player | The setting is the viewer's: it applies to every player, and switching selection does not move the rows |
 | Subtitles | A source offering sidecar tracks | The language row appears only while captions are on, and reverting to the first row restores the in-band feed |
