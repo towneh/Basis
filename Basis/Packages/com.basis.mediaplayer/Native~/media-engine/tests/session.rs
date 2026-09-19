@@ -433,6 +433,166 @@ fn pause_seek_and_natural_end() {
     session.close();
 }
 
+fn open_playing() -> Session {
+    let session = Session::open(OpenRequest::new(fixture_path()));
+    let shared = session.shared().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > 200_000
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    session
+}
+
+/// Asserts the session settles Paused on a newly presented frame at the
+/// seek target and stays there, then that `play` carries on from it.
+fn assert_lands_paused_then_resumes(session: &Session, presented_before: u64) {
+    let shared = session.shared().clone();
+    let diag = session.diag().clone();
+    let presented = || {
+        diag.stage(media_diag::Stage::Present)
+            .out_count
+            .load(Ordering::Relaxed)
+    };
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.state.load(Ordering::Relaxed) == State::Paused as u32
+        }),
+        "the seek did not settle paused (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    let landed = shared.position_us.load(Ordering::Relaxed);
+    assert!(
+        (3_000_000..=4_100_000).contains(&landed),
+        "paused away from the seek target: {landed}"
+    );
+    assert!(
+        presented() > presented_before,
+        "paused without presenting the landed frame"
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Paused as u32,
+        "the pause did not hold"
+    );
+    let held = shared.position_us.load(Ordering::Relaxed);
+    assert!(
+        (held - landed).abs() < 40_000,
+        "position moved while paused: {landed} -> {held}"
+    );
+
+    session.play();
+    assert!(
+        wait_for(Duration::from_secs(2), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > held + 100_000
+        }),
+        "play did not resume from the landed position (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+}
+
+/// A pause on the heels of a seek waits for the seek: the session lands
+/// the target, presents it and holds there. Freezing the wall under the
+/// seek instead leaves a session that reports Playing on a stopped clock
+/// and that `play` cannot restart.
+#[test]
+fn a_pause_straight_after_a_seek_lands_the_seek_first() {
+    let mut session = open_playing();
+    let presented_before = session
+        .diag()
+        .stage(media_diag::Stage::Present)
+        .out_count
+        .load(Ordering::Relaxed);
+    session.seek(MediaTime::from_millis(4000));
+    session.pause();
+    assert_lands_paused_then_resumes(&session, presented_before);
+    session.close();
+}
+
+/// A seek on a paused session shows the new position and stays paused.
+#[test]
+fn a_seek_while_paused_stays_paused() {
+    let mut session = open_playing();
+    session.pause();
+    assert_eq!(
+        session.shared().state.load(Ordering::Relaxed),
+        State::Paused as u32
+    );
+    let presented_before = session
+        .diag()
+        .stage(media_diag::Stage::Present)
+        .out_count
+        .load(Ordering::Relaxed);
+    session.seek(MediaTime::from_millis(4000));
+    assert_lands_paused_then_resumes(&session, presented_before);
+    session.close();
+}
+
+/// The same on an audio-only session, where nothing presents: the ring
+/// standing ready at the landed position is what completes the pause.
+#[test]
+fn a_seek_while_paused_stays_paused_on_audio_only() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/aac-48k-stereo.m4a")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    session.pause();
+    assert_eq!(shared.state.load(Ordering::Relaxed), State::Paused as u32);
+
+    session.seek(MediaTime::from_millis(1500));
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.state.load(Ordering::Relaxed) == State::Paused as u32
+                && shared.position_us.load(Ordering::Relaxed) > 1_000_000
+        }),
+        "the seek did not settle paused (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    let landed = shared.position_us.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Paused as u32,
+        "the pause did not hold"
+    );
+    let held = shared.position_us.load(Ordering::Relaxed);
+    assert!(
+        (held - landed).abs() < 40_000,
+        "position moved while paused: {landed} -> {held}"
+    );
+
+    session.play();
+    assert!(
+        wait_for(Duration::from_secs(2), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > held + 100_000
+        }),
+        "play did not resume from the landed position (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    session.close();
+}
+
 /// A seek after Ended revives the pipeline — the generation advance
 /// rebuilds decode state and presentation resumes on the new timeline.
 /// Runs on the progressive MP4 lane and the HLS-TS VOD lane (whose

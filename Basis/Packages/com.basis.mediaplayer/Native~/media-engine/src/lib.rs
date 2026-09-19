@@ -404,6 +404,10 @@ impl Session {
             clock_playing: AtomicBool::new(false),
             decode_preference: request.decode_preference,
             presented_generation: AtomicU64::new(pipeline::NO_GENERATION),
+            shown_generation: AtomicU64::new(pipeline::NO_GENERATION),
+            transport: Mutex::new(()),
+            pause_wanted: AtomicBool::new(false),
+            seeks_pending: AtomicU32::new(0),
             captions: Mutex::new(std::collections::VecDeque::new()),
             user_data: Mutex::new(pipeline::UserDataRing::default()),
             audio_tracks: Mutex::new(Vec::new()),
@@ -461,7 +465,10 @@ impl Session {
 
     pub fn play(&self) {
         // Buffering auto-plays when the first frame is ready; play only
-        // reverses an explicit pause.
+        // reverses an explicit pause, including one still waiting on a
+        // seek to land.
+        let _transport = self.px.transport.lock().expect("transport lock");
+        self.px.pause_wanted.store(false, Ordering::Relaxed);
         if self.px.state() == State::Paused as u32 {
             self.px.wall.resume();
             let wall = self.px.wall.now();
@@ -483,7 +490,11 @@ impl Session {
     /// behind the edge for good. Halt and reload instead. The request is
     /// ignored and said so once on the process log, and the state stays
     /// where it was.
+    ///
+    /// A pause holds across a seek: the session lands the new position,
+    /// shows it, and stays paused there until `play`.
     pub fn pause(&self) {
+        let _transport = self.px.transport.lock().expect("transport lock");
         let state = self.px.state();
         if state != State::Playing as u32 && state != State::Buffering as u32 {
             return;
@@ -497,17 +508,13 @@ impl Session {
             diag_warn!("pause ignored: a live source is not pausable, reload it instead");
             return;
         }
-        {
-            let wall = self.px.wall.now();
-            self.px
-                .clock
-                .lock()
-                .expect("clock lock")
-                .set_playing(wall, false);
-            self.px.clock_playing.store(false, Ordering::Relaxed);
-            self.px.present.mirror_clock(wall, MediaTime::ZERO, false);
-            self.px.wall.pause();
-            self.px.set_state(State::Paused);
+        // A buffering session, or one with a seek still queued, pauses once
+        // its position is showing: freezing the wall now would stop the
+        // release schedule that has to deliver that picture. The decode
+        // threads complete it.
+        self.px.pause_wanted.store(true, Ordering::Relaxed);
+        if state == State::Playing as u32 && self.px.seeks_pending.load(Ordering::Acquire) == 0 {
+            self.px.park_paused();
         }
     }
 
@@ -647,8 +654,11 @@ impl Drop for Session {
 /// Seek, from a session handle or the sync ladder's last rung: resume a
 /// paused/ended session into the new position's buffering; the demux
 /// thread parks the clock and the video thread restarts it at the first
-/// post-seek frame.
+/// post-seek frame. A paused session is resumed only to land the seek,
+/// and pauses again once the new position is showing.
 pub(crate) fn seek_px(px: &PipelineShared, to: MediaTime) {
+    let _transport = px.transport.lock().expect("transport lock");
+    px.seeks_pending.fetch_add(1, Ordering::Relaxed);
     px.wall.resume();
     px.set_state(State::Buffering);
     px.commands

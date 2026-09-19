@@ -216,6 +216,21 @@ pub struct PipelineShared {
     /// timestamp, so a write from a retired timeline cannot be mistaken for
     /// the current one's.
     pub presented_generation: std::sync::atomic::AtomicU64,
+    /// The generation whose frame last reached the output, or
+    /// [`NO_GENERATION`]. Unlike `presented_generation` it is never armed
+    /// by a clock start, so it answers "is the landed picture on screen".
+    pub shown_generation: std::sync::atomic::AtomicU64,
+    /// Serialises the transport requests (play, pause, seek) against the
+    /// decode threads completing a pause. Never taken on the render thread.
+    pub transport: Mutex<()>,
+    /// A pause is asked for and `play` has not withdrawn it. It outlives a
+    /// seek: the seek runs unpaused so the pipeline can land it, and the
+    /// pause completes once the landed position is showing.
+    pub pause_wanted: std::sync::atomic::AtomicBool,
+    /// Seeks requested and not yet executed by the demux thread. A pause
+    /// completes only at zero: freezing the wall under a seek in flight
+    /// would land it against a stopped release schedule.
+    pub seeks_pending: std::sync::atomic::AtomicU32,
     /// Caption cues scanned from the video AUs' SEI on the demux thread,
     /// surfaced on arrival with their due PTS (§6.2/§6.12 — captions
     /// bypass the Bank's release schedule so the consumer gets the full
@@ -644,6 +659,61 @@ impl PipelineShared {
         self.shared.state.load(Ordering::Acquire)
     }
 
+    /// Buffering → Playing at a presentation, unless a pause is waiting on
+    /// it: then the state stays Buffering for [`Self::settle_pause`].
+    pub(crate) fn leave_buffering(&self) {
+        if self.state() == State::Buffering as u32 && !self.pause_wanted.load(Ordering::Relaxed) {
+            self.set_state(State::Playing);
+        }
+    }
+
+    /// Park the clock, freeze the wall and publish Paused. The caller
+    /// holds `transport`.
+    pub(crate) fn park_paused(&self) {
+        let wall = self.wall.now();
+        self.clock
+            .lock()
+            .expect("clock lock")
+            .set_playing(wall, false);
+        self.clock_playing.store(false, Ordering::Relaxed);
+        self.present.mirror_clock(wall, MediaTime::ZERO, false);
+        self.wall.pause();
+        self.set_state(State::Paused);
+    }
+
+    /// Complete a wanted pause from a decode thread. A buffering session
+    /// has landed once its generation's picture is on the output, or, from
+    /// the audio thread on a lane where nothing presents, once the ring
+    /// stands ready: `ring` is then the generation that ring belongs to. A
+    /// Playing session is parked too: the render thread reads the flag
+    /// without the lock, so its Buffering → Playing can slip past a pause
+    /// request by a tick.
+    pub(crate) fn settle_pause(&self, ring: Option<Generation>) {
+        let _transport = self.transport.lock().expect("transport lock");
+        // The counter first, and as an acquire against the demux thread's
+        // release: reading zero then guarantees the generation read below
+        // is the one the last seek advanced to. Compared the other way
+        // round, a seek completing in between would leave the old
+        // timeline's picture passing for the landing.
+        if !self.pause_wanted.load(Ordering::Relaxed)
+            || self.seeks_pending.load(Ordering::Acquire) != 0
+        {
+            return;
+        }
+        let current = self.shared.generation.load(Ordering::Relaxed);
+        let landed = match ring {
+            Some(generation) => generation.0 == current,
+            None => self.shown_generation.load(Ordering::Relaxed) == current,
+        };
+        // Playing needs the landing as much as Buffering does: a render
+        // event that read the flag before the request can publish Playing
+        // after the seek, with the old timeline's picture still showing.
+        let state = self.state();
+        if landed && (state == State::Playing as u32 || state == State::Buffering as u32) {
+            self.park_paused();
+        }
+    }
+
     pub fn fail(&self, error: EngineError) {
         self.shared.last_error.store(error.code, Ordering::Relaxed);
         self.shared
@@ -883,6 +953,11 @@ pub fn run_demux_leg(
                 }
                 Err(e) => px.fail(EngineError::demux(e)),
             }
+            // After the generation advance, and a release, so a pause
+            // waiting on this seek that reads zero also reads the new
+            // generation and cannot take the old timeline's picture for
+            // its own.
+            px.seeks_pending.fetch_sub(1, Ordering::Release);
             continue;
         }
 
@@ -1595,9 +1670,9 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                             .position_us
                             .store(lease.pts.as_micros(), Ordering::Relaxed);
                         note_presented(px, lease.generation);
-                        if px.state() == State::Buffering as u32 {
-                            px.set_state(State::Playing);
-                        }
+                        px.shown_generation
+                            .store(lease.generation, Ordering::Relaxed);
+                        px.leave_buffering();
                     }
                     Err(e) => {
                         px.fail(EngineError::present(e));
@@ -1606,6 +1681,9 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 }
             }
             px.pool.release(lease);
+        }
+        if px.pause_wanted.load(Ordering::Relaxed) {
+            px.settle_pause(None);
         }
         px.diag
             .stage(Stage::Pool)
@@ -1973,21 +2051,31 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 // the old ring (and its base pts) is stale until this
                 // thread processes the Flush — a parked clock of another
                 // generation stays parked, and the state stays Buffering.
-                if !clock.is_playing() && clock.generation() == generation {
+                let start = !clock.is_playing() && clock.generation() == generation;
+                let hold = px.pause_wanted.load(Ordering::Relaxed);
+                if start {
                     let base = px.audio_shared.base_pts_us.load(Ordering::Relaxed);
                     // Latency-back anchor as in run_video's restart.
                     let latency = MediaTime::from_micros(
                         px.audio_shared.output_latency_us.load(Ordering::Relaxed),
                     );
                     clock.discontinuity(wall, MediaTime::from_micros(base) - latency);
-                    clock.set_playing(wall, true);
-                    px.clock_playing.store(true, Ordering::Relaxed);
-                    px.present.mirror_clock(wall, clock.now(wall), true);
+                    if !hold {
+                        clock.set_playing(wall, true);
+                        px.clock_playing.store(true, Ordering::Relaxed);
+                        px.present.mirror_clock(wall, clock.now(wall), true);
+                    }
                 }
                 let playing = clock.is_playing();
                 drop(clock);
-                if playing {
-                    px.set_state(State::Playing);
+                if hold {
+                    // Nothing presents on this lane, so the ring standing
+                    // ready at the landed position is the landing. Not
+                    // only on the tick that anchors the clock: a pause
+                    // arriving after `hold` was read finds it running.
+                    px.settle_pause(Some(generation));
+                } else if playing {
+                    px.leave_buffering();
                 }
             } else if state == State::Playing as u32
                 && (!px.video_active.load(Ordering::Relaxed)
@@ -1998,6 +2086,14 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         .load(Ordering::Relaxed)
                         == 0)
             {
+                // This thread's own Buffering → Playing can slip past a
+                // pause request, and with no picture to land on, only the
+                // ring can vouch for the generation.
+                if !px.video_active.load(Ordering::Relaxed)
+                    && px.pause_wanted.load(Ordering::Relaxed)
+                {
+                    px.settle_pause(Some(generation));
+                }
                 // Once video presents, the presented pts owns position.
                 let wall = px.wall.now();
                 let now = px.clock.lock().expect("clock lock").now(wall);
