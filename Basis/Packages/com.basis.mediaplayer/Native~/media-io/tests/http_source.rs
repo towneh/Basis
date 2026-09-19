@@ -128,9 +128,11 @@ fn serve_connection(stream: TcpStream, body: &[u8], mode: Mode) {
     }
 }
 
-/// A server that answers a ranged GET with `serve` bytes of a body it
-/// never finishes, or with `serve` as `None` never answers at all. Both
-/// leave the client waiting on a socket nothing will write to again,
+/// A server that answers its first ranged GET with `serve` bytes of a body
+/// it never finishes, or with `serve` as `None` never answers at all.
+/// Every later request is taken and never answered, which is what a link
+/// that has gone quiet looks like to a client that asks again. All of it
+/// leaves the client waiting on a socket nothing will write to again,
 /// which only the read timeout and the cancel token end.
 fn start_stalling_server(total: u64, serve: Option<usize>) -> (String, mpsc::Receiver<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -140,6 +142,7 @@ fn start_stalling_server(total: u64, serve: Option<usize>) -> (String, mpsc::Rec
         // Held so the connections stay open rather than being closed by
         // the drop, which the client would read as a finished body.
         let mut held = Vec::new();
+        let mut serve = serve;
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
@@ -152,7 +155,7 @@ fn start_stalling_server(total: u64, serve: Option<usize>) -> (String, mpsc::Rec
                     break;
                 }
             }
-            if let Some(n) = serve {
+            if let Some(n) = serve.take() {
                 let head = format!(
                     "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{total}\r\n\
                      Content-Length: {total}\r\n\r\n",
@@ -390,6 +393,108 @@ fn an_idle_consumer_does_not_time_a_chunk_out() {
         assert_eq!(&rest[..n], &body[pos..pos + n], "bytes continue at {pos}");
         pos += n;
     }
+}
+
+/// A connection that dies part-way through a chunk is replaced, not
+/// reported: the server serves ranges, so the source asks again from the
+/// byte it had reached. The server here promises the whole opening chunk,
+/// sends half of it and closes, which is what a server does to a reader
+/// that stopped for a long pause. Everything after that it serves properly.
+#[test]
+fn a_dropped_connection_is_reopened_at_the_same_byte() {
+    const CHUNK: usize = 64 * 1024;
+    const SENT: usize = CHUNK / 2;
+    let body: Vec<u8> = (0..2 * CHUNK).map(|i| (i % 251) as u8).collect();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let starts = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let seen = Arc::clone(&starts);
+    let served = body.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let seen = Arc::clone(&seen);
+            let body = served.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(spec) = line.to_ascii_lowercase().strip_prefix("range: bytes=")
+                        {
+                            let mut parts = spec.split('-');
+                            let start: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            let end: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            range = start.zip(end);
+                        }
+                    }
+                    let Some((start, end)) = range else { return };
+                    let first = {
+                        let mut seen = seen.lock().expect("starts lock");
+                        seen.push(start);
+                        seen.len() == 1
+                    };
+                    let stop = (end + 1).min(body.len());
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{}\r\n\
+                         Content-Length: {}\r\n\r\n",
+                        stop - 1,
+                        body.len(),
+                        stop - start
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    if first {
+                        let _ = stream.write_all(&body[start..start + SENT]);
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    if stream.write_all(&body[start..stop]).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let mut source = HttpSource::open(
+        &format!("http://127.0.0.1:{port}/media"),
+        IoLimits {
+            chunk_bytes: CHUNK as u64,
+            ..IoLimits::default()
+        },
+        Arc::new(AllowAllGate),
+        CancelToken::new(),
+    )
+    .expect("open");
+
+    let mut buf = vec![0u8; 4 * 1024];
+    let mut pos = 0usize;
+    while pos < body.len() {
+        let n = source
+            .read_at(pos as u64, &mut buf)
+            .expect("the drop is answered with a fresh request");
+        assert!(n > 0, "the body ended early at {pos}");
+        assert_eq!(&buf[..n], &body[pos..pos + n], "bytes continue at {pos}");
+        pos += n;
+    }
+
+    let starts = starts.lock().expect("starts lock").clone();
+    assert_eq!(
+        starts,
+        vec![0, SENT, SENT + CHUNK],
+        "one request for the open, one from the byte the drop left off at, one for the chunk after"
+    );
 }
 
 /// With no total on the exchange, the wait for a reopened chunk's response

@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use media_demux::{ByteSource, SourceError};
+use media_diag::diag_log;
 use url::Url;
 
 use crate::cancel::CancelToken;
@@ -418,9 +419,11 @@ impl ByteSource for HttpSource {
             return Ok(0);
         }
         let cancel = self.cancel.clone();
-        // Two passes at most: a positioned stream that has reached its chunk
-        // boundary reopens once and reads again.
-        for _ in 0..2 {
+        // Three passes at most: a positioned stream that has reached its
+        // chunk boundary reopens once and reads again, and a read that
+        // fails on a ranged source is answered once with a fresh request.
+        let mut reopened_after_failure = false;
+        for _ in 0..3 {
             let usable = match &self.stream {
                 Some(s) if s.pos == offset => s.end.is_none_or(|end| offset < end),
                 Some(s) => !self.ranges && offset >= s.pos,
@@ -444,11 +447,22 @@ impl ByteSource for HttpSource {
             // the session's cancel token latches, so every later call
             // resolves the cancel branch first — which makes this path
             // safe by the token's behaviour rather than by its own state.
-            // One reconnect on a transient error is what that costs.
             let n = match stream.read(&cancel, buf) {
                 Ok(n) => n,
                 Err(e) => {
                     self.stream = None;
+                    // A connection is expendable where the server serves
+                    // ranges: one that died under a paused session, or was
+                    // closed by a server tired of a reader that had stopped,
+                    // is replaced by a request for the same byte. A failed
+                    // read copied nothing out, so `offset` is still where
+                    // the caller is. Once per call, so a dead link costs
+                    // one more connect and read timeout and then surfaces.
+                    if self.ranges && !reopened_after_failure && !cancel.is_cancelled() {
+                        reopened_after_failure = true;
+                        diag_log!("read failed at byte {offset} ({e}); reopening there");
+                        continue;
+                    }
                     return Err(e.into());
                 }
             };
