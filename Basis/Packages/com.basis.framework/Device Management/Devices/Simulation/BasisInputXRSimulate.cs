@@ -98,9 +98,10 @@ namespace Basis.Scripts.Device_Management.Devices.Simulation
                 ScaledDeviceCoord.position *= BasisHeightDriver.AvatarToPlayerRatioScaled;
             }
 
-            if (hasRoleAssigned && Control.HasTracked != BasisHasTracked.HasNoTracker)
+            if (hasRoleAssigned && !IgnoresPose && Control.HasTracked != BasisHasTracked.HasNoTracker)
             {
-                Control.SetIncoming(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation);
+                GetFinalScaledPose(out Vector3 finalPosition, out Quaternion finalRotation);
+                Control.SetIncoming(finalPosition, finalRotation);
                 if (namedRole != Control.Role)
                 {
                     namedRole = Control.Role;
@@ -111,7 +112,7 @@ namespace Basis.Scripts.Device_Management.Devices.Simulation
             }
 
             ComputeRaycastDirection(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation, Quaternion.identity);
-            UpdateInputEvents();
+            UpdateInputEvents(HasPlayerControlSupport: false);
         }
 
         /// <summary>

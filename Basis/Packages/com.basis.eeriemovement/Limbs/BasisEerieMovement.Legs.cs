@@ -111,9 +111,10 @@ namespace Basis.IK
 
             if (posWeight < 1f)
             {
-                poseStream.SetRotation(root, Quaternion.Slerp(origRootRot, poseStream.GetRotation(root), posWeight));
-                poseStream.SetRotation(mid, Quaternion.Slerp(origMidRot, poseStream.GetRotation(mid), posWeight));
-                poseStream.SetRotation(tip, Quaternion.Slerp(origTipRot, poseStream.GetRotation(tip), posWeight));
+                Quaternion solvedRootRot = poseStream.GetRotation(root), solvedMidRot = poseStream.GetRotation(mid), solvedTipRot = poseStream.GetRotation(tip);
+                poseStream.SetRotation(root, Quaternion.Slerp(origRootRot, solvedRootRot, posWeight));
+                poseStream.SetRotation(mid, Quaternion.Slerp(origMidRot, solvedMidRot, posWeight));
+                poseStream.SetRotation(tip, Quaternion.Slerp(origTipRot, solvedTipRot, posWeight));
             }
             if (preserveTip)
             {
@@ -148,7 +149,7 @@ namespace Basis.IK
                 return;
             }
 
-            Quaternion hipsRot = poseStream.GetRotation(handleHips), hipsInv = Quaternion.Inverse(hipsRot);
+            Quaternion hipsRot = poseStream.GetRotation(handleHips) * Quaternion.Inverse(offsetRotationHips), hipsInv = Quaternion.Inverse(hipsRot);
             Vector3 femurLocal = (hipsInv * femur).normalized;
 
             ref BasisLegDiagnostics d = ref Ref(legDiagnostics, slot);
@@ -163,7 +164,7 @@ namespace Basis.IK
             input.Root = poseStream.GetPosition(root);
             input.Mid = poseStream.GetPosition(mid);
             input.Tip = poseStream.GetPosition(tip);
-            input.BodyRotation = poseStream.GetRotation(handleHips);
+            input.BodyRotation = poseStream.GetRotation(handleHips) * Quaternion.Inverse(offsetRotationHips);
             input.ReferenceLocal = Vector3.forward;
             input.FallbackLocal = Vector3.right;
             input.TransportHomeLocal = Vector3.down;

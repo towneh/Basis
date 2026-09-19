@@ -1200,6 +1200,7 @@ namespace Basis.BasisUI
                     {
                         if (remotePlayer == null) return;
                         remotePlayer.BypassPerformanceLimits = on;
+                        Basis.Scripts.Avatar.BasisAvatarFactory.ClearDownloadLimitFailure(remotePlayer);
                         // Full reload: turning on restores destroyed components
                         // (no in-place path exists for restore), turning off re-runs
                         // Evaluate and TrimExcessComponents with the real limits.
@@ -1282,7 +1283,7 @@ namespace Basis.BasisUI
                 if (remotePlayer != null)
                 {
                     remotePlayer.AlwaysShowAvatar = on;
-                    if (remotePlayer.IsConsideredFallBackAvatar == on)
+                    if (Basis.Scripts.Avatar.BasisAvatarFactory.ClearDownloadLimitFailure(remotePlayer) || remotePlayer.IsConsideredFallBackAvatar == on)
                     {
                         remotePlayer.ReloadAvatar();
                     }
@@ -1468,18 +1469,55 @@ namespace Basis.BasisUI
                         BasisNetworkModeration.EnableShoutMode(announcePlayerId);
                 };
 
-                // Server-enforced mutes. The admin client doesn't track the target's current
-                // state, so like the full-quality toggle these start off and send the explicit
-                // state on change — the server's reply popup reports the authoritative result.
-                PanelToggle voiceMuteToggle = PanelToggle.CreateNewEntry(adminGroup.ContentParent);
-                voiceMuteToggle.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.muteVoice"));
-                voiceMuteToggle.Descriptor.SetTooltip(BasisLocalization.Get("menu.individualPlayer.muteVoice.tooltip"));
-                voiceMuteToggle.OnValueChanged += muted => BasisNetworkModeration.SetVoiceMute(targetUUID, muted);
+                // Server-enforced mutes, painted from the state the server reports: asked for on
+                // open and echoed back after every change, so a refused change snaps the toggle back.
+                if (BasisNetworkModeration.LocalPlayerHasNode(PermNodes.ModerationMute))
+                {
+                    PanelToggle voiceMuteToggle = PanelToggle.CreateNewEntry(adminGroup.ContentParent);
+                    voiceMuteToggle.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.muteVoice"));
+                    voiceMuteToggle.Descriptor.SetTooltip(BasisLocalization.Get("menu.individualPlayer.muteVoice.tooltip"));
+                    voiceMuteToggle.OnValueChanged += muted => BasisNetworkModeration.SetVoiceMute(targetUUID, muted);
 
-                PanelToggle textMuteToggle = PanelToggle.CreateNewEntry(adminGroup.ContentParent);
-                textMuteToggle.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.muteText"));
-                textMuteToggle.Descriptor.SetTooltip(BasisLocalization.Get("menu.individualPlayer.muteText.tooltip"));
-                textMuteToggle.OnValueChanged += muted => BasisNetworkModeration.SetTextMute(targetUUID, muted);
+                    PanelToggle textMuteToggle = PanelToggle.CreateNewEntry(adminGroup.ContentParent);
+                    textMuteToggle.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.muteText"));
+                    textMuteToggle.Descriptor.SetTooltip(BasisLocalization.Get("menu.individualPlayer.muteText.tooltip"));
+                    textMuteToggle.OnValueChanged += muted => BasisNetworkModeration.SetTextMute(targetUUID, muted);
+
+                    Action<BasisNetworkModeration.MuteStateResult> muteStateHandler = null;
+                    muteStateHandler = result =>
+                    {
+                        if (!string.Equals(result.Uuid, targetUUID, StringComparison.Ordinal)) return;
+                        if (panel == null || panel.Descriptor == null || voiceMuteToggle == null || textMuteToggle == null)
+                        {
+                            BasisNetworkModeration.OnMuteStateResult -= muteStateHandler;
+                            return;
+                        }
+                        voiceMuteToggle.SetValueWithoutNotify(result.VoiceMuted);
+                        textMuteToggle.SetValueWithoutNotify(result.TextMuted);
+                    };
+                    BasisNetworkModeration.OnMuteStateResult += muteStateHandler;
+                    BasisNetworkModeration.QueryMuteState(targetUUID);
+                }
+
+                PanelTextField renameField = PanelTextField.CreateNewEntry(adminGroup.ContentParent);
+                renameField.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.rename"));
+                renameField.Descriptor.SetDescription(BasisLocalization.Get("menu.individualPlayer.rename.description"));
+                renameField.SetValueWithoutNotify(remotePlayer.DisplayName);
+
+                PanelButton renameBtn = PanelButton.CreateNew(adminGroup.ContentParent);
+                renameBtn.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.applyRename"));
+                renameBtn.Descriptor.SetDescription(BasisLocalization.Get("menu.individualPlayer.applyRename.description"));
+                renameBtn.OnClicked += () =>
+                {
+                    string newName = renameField.Value;
+                    if (string.IsNullOrWhiteSpace(newName))
+                    {
+                        BasisDebug.LogError("Name is empty.");
+                        return;
+                    }
+                    if (BasisNetworkPlayers.PlayerToNetworkedPlayer(remotePlayer, out BasisNetworkPlayer np))
+                        BasisNetworkModeration.RenamePlayer(np.playerId, newName);
+                };
 
                 PanelTextField msgField = PanelTextField.CreateNewEntry(adminGroup.ContentParent);
                 msgField.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.message"));
@@ -1590,10 +1628,10 @@ namespace Basis.BasisUI
                 }
 
                 ApplyLocomotionSliderVisibility();
-                jumpToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
-                walkToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
-                runToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
-                gravityToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); locomotionGroup.ForceRebuild(); };
+                jumpToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); RebuildSection(locomotionGroup, adminPage); };
+                walkToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); RebuildSection(locomotionGroup, adminPage); };
+                runToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); RebuildSection(locomotionGroup, adminPage); };
+                gravityToggle.OnValueChanged += _ => { ApplyLocomotionSliderVisibility(); RebuildSection(locomotionGroup, adminPage); };
 
                 PanelButton locomotionApplyBtn = PanelButton.CreateNew(locomotionGroup.ContentParent);
                 locomotionApplyBtn.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.locomotion.apply"));
@@ -1631,7 +1669,7 @@ namespace Basis.BasisUI
                     visible =>
                     {
                         if (visible) ApplyLocomotionSliderVisibility();
-                        locomotionGroup.ForceRebuild();
+                        RebuildSection(locomotionGroup, adminPage);
                     });
 
                 // ---- Per-user permissions ----

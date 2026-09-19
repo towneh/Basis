@@ -40,8 +40,7 @@ namespace Basis.IK
             p.hasLeftToe = job.handleLeftToe.IsBound;
             p.hasRightToe = job.handleRightToe.IsBound;
             p.hasChestSpring = job.chestSpring.IsCreated && job.chestSpring.Length >= 1;
-            p.hasSwingState = job.swingContinuity.IsCreated && job.swingContinuity.Length >= BasisEerieMovement.swingCount;
-            p.hasArmState = job.armState.IsCreated && job.armState.Length >= BasisEerieMovement.swingCount;
+            p.hasArmState = job.armState.IsCreated && job.armState.Length >= BasisEerieMovement.armCount;
             p.hasLegState = job.legState.IsCreated && job.legState.Length >= 2;
             p.hasLegDiagnostics = job.legDiagnostics.IsCreated && job.legDiagnostics.Length >= 2;
             p.boundSlots = 0;
@@ -89,11 +88,12 @@ namespace Basis.IK
             p.lordosis = job.anatCervicalLordosis && p.hasNeck;
             p.spineRom = job.spineAnatomicalRom && p.hasSpineRestFrames;
             p.chestTarget = job.chestIkTarget && p.hasChestJoint && facts.chestTracked;
-            p.shoulderSlide = job.anatShoulderSlide && p.hasHips && p.hasChest;
             p.leftShoulderTracked = facts.leftShoulderTracked;
             p.rightShoulderTracked = facts.rightShoulderTracked;
-            p.leftShoulder = Shoulder(p.hasLeftShoulder, job.shoulderSolveEnabled, facts.leftShoulderTracked);
-            p.rightShoulder = Shoulder(p.hasRightShoulder, job.shoulderSolveEnabled, facts.rightShoulderTracked);
+            p.leftShoulderWeight = facts.leftShoulderTracked ? Mathf.Clamp01(facts.leftShoulderWeight) : 0f;
+            p.rightShoulderWeight = facts.rightShoulderTracked ? Mathf.Clamp01(facts.rightShoulderWeight) : 0f;
+            p.leftShoulder = Shoulder(p.hasLeftShoulder, job.shoulderSolveEnabled, p.leftShoulderWeight > 0f);
+            p.rightShoulder = Shoulder(p.hasRightShoulder, job.shoulderSolveEnabled, p.rightShoulderWeight > 0f);
             p.leftToeTracked = facts.leftToeTracked;
             p.rightToeTracked = facts.rightToeTracked;
             Arm(ref p.leftArm, ref job, facts.leftHandWeight, facts.leftElbowTracked, facts.leftElbowRoll);
@@ -119,7 +119,7 @@ namespace Basis.IK
             job.offsetRotationRightHand = Unit(job.offsetRotationRightHand);
         }
         public static bool KneeAssistWanted(in BasisEerieFrameFacts facts, bool isLeft) => isLeft ? facts.leftFootTracked && !facts.leftKneeTracked : facts.rightFootTracked && !facts.rightKneeTracked;
-        static BasisEerieShoulderMode Shoulder(bool has, bool solve, bool tracked) => !has ? BasisEerieShoulderMode.None : solve ? BasisEerieShoulderMode.Solve : tracked ? BasisEerieShoulderMode.Tracker : BasisEerieShoulderMode.None;
+        static BasisEerieShoulderMode Shoulder(bool has, bool solve, bool tracked) => !has ? BasisEerieShoulderMode.None : tracked ? BasisEerieShoulderMode.Tracker : solve ? BasisEerieShoulderMode.Solve : BasisEerieShoulderMode.None;
         static void Arm(ref BasisEerieArmPlan arm, ref BasisEerieMovement job, float weight, bool elbowTracked, bool roll)
         {
             arm.weight = weight;
@@ -129,8 +129,6 @@ namespace Basis.IK
             arm.upperTwist = arm.hasUpperTwist && job.upperArmTwistFraction > 0f;
             arm.lowerTwist = arm.hasLowerTwist && job.lowerArmTwistFraction > 0f;
             arm.elbowProtect = job.collisionsEnabled && job.protectElbow && job.plan.hasChest && job.plan.hasNeck && (!elbowTracked || job.collideTrackedElbow);
-            arm.elbowDrag = job.elbowDragEnabled;
-            arm.poleAnchor = elbowTracked && job.plan.hasArmState;
         }
         static void Leg(ref BasisEerieLegPlan leg, ref BasisEerieMovement job, in BasisEerieFrameFacts facts, bool isLeft)
         {

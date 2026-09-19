@@ -108,6 +108,7 @@ and both admin rows, are about what the panel shows.
 | Seek | Owner scrubs the timeline | The follower lands near the same place, then settles |
 | Convergence | Watch the follower for the half minute after a seek | It **slews** onto the owner's position rather than jumping. Repeated visible jumps mean the target is being fed but not converged, which is the engine ladder failing, not the protocol |
 | Late join | Second client arrives while the first is playing | It loads, and lands at the owner's position rather than at zero |
+| Late join, owner paused | Owner pauses mid-video, then a second client leaves and rejoins. Run it with a direct `.mp4` and with a page URL, and once more with the owner pausing while the rejoining client is still loading | It lands paused on the owner's frame and seek bar position, not playing and not on the opening frame |
 | Ownership | Second client takes control, then drives | The first becomes a follower and stops beating its position. Neither fights the other |
 | Owner leaves | Owner disconnects mid-playback | The follower keeps playing free-running rather than freezing on the last target |
 | Admin only | Set `AdminOnly` with the second client holding no permission | It cannot take control, and the panel gives it no playback tab |

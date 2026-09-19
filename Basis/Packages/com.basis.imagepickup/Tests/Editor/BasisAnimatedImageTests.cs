@@ -1984,6 +1984,656 @@ namespace Basis.ImagePickup.Tests
             Assert.That(data.CopyFramePixelsToManaged(0)[0], Is.EqualTo(Red));
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void CpuComposeFastPathsMatchTheReferenceBlendMath(bool linear)
+        {
+            Color32[] sources =
+            {
+                new Color32(10, 200, 30, 255),
+                new Color32(0, 0, 0, 0),
+                new Color32(100, 50, 25, 128),
+                new Color32(255, 255, 255, 255),
+                new Color32(7, 9, 11, 1),
+            };
+            Color32[] destinations =
+            {
+                new Color32(40, 60, 80, 255),
+                new Color32(90, 20, 10, 200),
+                new Color32(5, 5, 5, 255),
+                new Color32(0, 0, 0, 0),
+                new Color32(128, 64, 32, 64),
+            };
+            foreach (BasisAnimationBlend blend in new[] { BasisAnimationBlend.Source, BasisAnimationBlend.Over })
+            {
+                using var frames = new NativeArray<BasisAnimatedImageFrame>(
+                    new[]
+                    {
+                        new BasisAnimatedImageFrame
+                        {
+                            Width = sources.Length,
+                            Height = 1,
+                            PixelCount = sources.Length,
+                            Blend = blend,
+                            Disposal = BasisAnimationDisposal.None,
+                        },
+                    },
+                    Allocator.TempJob
+                );
+                using var framePixels = new NativeArray<Color32>(sources, Allocator.TempJob);
+                using var canvas = new NativeArray<Color32>(destinations, Allocator.TempJob);
+                using var previous = new NativeArray<Color32>(1, Allocator.TempJob);
+
+                new BasisAnimatedImageCpuComposeJob
+                {
+                    CanvasWidth = sources.Length,
+                    StartFrame = -1,
+                    TargetFrame = 0,
+                    Linear = linear ? (byte)1 : (byte)0,
+                    Frames = frames,
+                    FramePixels = framePixels,
+                    Canvas = canvas,
+                    Previous = previous,
+                }.Execute();
+
+                for (int i = 0; i < sources.Length; i++)
+                {
+                    Assert.That(
+                        canvas[i],
+                        Is.EqualTo(ReferenceCompose(sources[i], destinations[i], blend, linear)),
+                        $"{blend} pixel {i}"
+                    );
+                }
+            }
+        }
+
+        [Test]
+        public void KeyframesLetCompositionSkipStraightToTheTargetFrame()
+        {
+            using BasisAnimatedImageData data = Create(
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Red, Green }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 1, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.Background,
+                    new[] { White }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Blue, Blue }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(1, 0, 1, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Red }
+                )
+            );
+            Assert.That(BasisAnimatedImageWorkEstimator.IsKeyframe(data, data.GetFrame(0)), Is.True);
+            Assert.That(BasisAnimatedImageWorkEstimator.IsKeyframe(data, data.GetFrame(1)), Is.False);
+            Assert.That(BasisAnimatedImageWorkEstimator.IsKeyframe(data, data.GetFrame(2)), Is.True);
+
+            BasisAnimatedImageWorkEstimator.Estimate(data, false, -1, -1, 0, 3, out int transitions, out long pixels);
+            Assert.That(transitions, Is.EqualTo(2));
+            Assert.That(pixels, Is.EqualTo(3));
+
+            using var canvas = new BasisAnimatedImageCpuCanvas(data);
+            Assert.That(canvas.UpdateToState(0, 3, 16, long.MaxValue, out _), Is.EqualTo(2));
+            Color32[] composed = ((Texture2D)canvas.OutputTexture).GetPixels32();
+            Assert.That(composed[0], Is.EqualTo(Blue));
+            Assert.That(composed[1], Is.EqualTo(Red));
+        }
+
+        [Test]
+        public void AFullCanvasFrameThatRestoresPreviousIsNotAKeyframe()
+        {
+            using BasisAnimatedImageData data = Create(
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Red, Green }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.Previous,
+                    new[] { Blue, Blue }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(1, 0, 1, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { White }
+                )
+            );
+            Assert.That(BasisAnimatedImageWorkEstimator.IsKeyframe(data, data.GetFrame(1)), Is.False);
+
+            using var canvas = new BasisAnimatedImageCpuCanvas(data);
+            canvas.UpdateToState(0, 2);
+            Color32[] composed = ((Texture2D)canvas.OutputTexture).GetPixels32();
+            Assert.That(composed[0], Is.EqualTo(Red));
+            Assert.That(composed[1], Is.EqualTo(White));
+        }
+
+        [Test]
+        public void ReleasingPixelsKeepsFrameTimingAndReturnsTheirResidentBytes()
+        {
+            long before = BasisAnimatedImageData.TotalResidentNativeBytes;
+            BasisAnimatedImageData data = Create(
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Red, Green }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 1, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Blue }
+                )
+            );
+            try
+            {
+                long withPixels = BasisAnimatedImageData.TotalResidentNativeBytes;
+                data.ReleasePixels();
+                Assert.That(data.HasPixels, Is.False);
+                Assert.That(data.IsCreated, Is.False);
+                Assert.That(
+                    BasisAnimatedImageData.TotalResidentNativeBytes,
+                    Is.EqualTo(withPixels - data.DecodedFramePixels * 4L)
+                );
+                Assert.That(data.FrameCount, Is.EqualTo(2));
+                data.GetPlaybackState(60000, out _, out int frame, out _);
+                Assert.That(frame, Is.EqualTo(1));
+                Assert.DoesNotThrow(data.ReleasePixels);
+            }
+            finally
+            {
+                data.Dispose();
+            }
+            Assert.That(BasisAnimatedImageData.TotalResidentNativeBytes, Is.EqualTo(before));
+        }
+
+        [Test]
+        public void GifLockSuspendsPlaybackAndReleasesReloadableFrames()
+        {
+            var host = new GameObject("BasisAnimatedImageGifLockTest");
+            var pickup = host.AddComponent<BasisImagePickupObject>();
+            var player = host.AddComponent<BasisAnimatedImagePlayer>();
+            BasisAnimatedImageData data = Create(
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Red, Green }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 1, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Blue }
+                )
+            );
+            BasisNativeAnimationPayload payload = null;
+            var commands = new CommandBuffer();
+            bool initialized = false;
+            try
+            {
+                using BasisBurstAnimationEncodeRequest encode = new BasisBurstAnimationEncodeRequest(data);
+                BasisBurstAnimationEncodeResult encoded = encode.Complete();
+                Assert.That(encoded.Ok, Is.True, encoded.Error);
+                payload = encoded.TakePayload();
+
+                initialized = player.Initialize(data, pickup, 1, true, payload);
+                Assert.That(initialized, Is.True);
+                SchedulePlayerOnce(player, commands);
+                player.FlushPendingJobs();
+                Assert.That(player.HasAllocatedCompositor, Is.True);
+
+                player.SuspendForAdminLock();
+                Assert.That(player.HasAllocatedCompositor, Is.False);
+                Assert.That(player.Data, Is.Null);
+                Assert.That(payload.IsCreated, Is.True);
+
+                for (int attempt = 0; attempt < 10000 && !player.HasAllocatedCompositor; attempt++)
+                {
+                    SchedulePlayerOnce(player, commands);
+                    JobHandle.ScheduleBatchedJobs();
+                    Thread.Yield();
+                }
+                Assert.That(player.HasAllocatedCompositor, Is.True);
+                Assert.That(player.Data, Is.Not.Null);
+            }
+            finally
+            {
+                commands.Release();
+                player.ClearReloadPayload();
+                Object.DestroyImmediate(host);
+                payload?.Dispose();
+                if (!initialized)
+                    data.Dispose();
+                BasisImagePickupManager.Shutdown();
+            }
+        }
+
+        [Test]
+        public void GpuPlaybackReleasesDecodedFramesOnceTheAtlasIsUploaded()
+        {
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null)
+                Assert.Ignore("The GPU compositor needs a graphics device.");
+
+            var host = new GameObject("BasisAnimatedImageGpuReleaseTest");
+            var pickup = host.AddComponent<BasisImagePickupObject>();
+            var player = host.AddComponent<BasisAnimatedImagePlayer>();
+            BasisAnimatedImageData data = Create(
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Over,
+                    BasisAnimationDisposal.None,
+                    new[] { Red, Green }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Over,
+                    BasisAnimationDisposal.None,
+                    new[] { Blue, White }
+                )
+            );
+            BasisNativeAnimationPayload payload = null;
+            var commands = new CommandBuffer();
+            bool initialized = false;
+            try
+            {
+                using BasisBurstAnimationEncodeRequest encode = new BasisBurstAnimationEncodeRequest(data);
+                BasisBurstAnimationEncodeResult encoded = encode.Complete();
+                Assert.That(encoded.Ok, Is.True, encoded.Error);
+                payload = encoded.TakePayload();
+
+                long residentWithPixels = BasisAnimatedImageData.TotalResidentNativeBytes;
+                initialized = player.Initialize(data, pickup, 1, false, payload);
+                Assert.That(initialized, Is.True);
+                if (!BasisImagePickupManager.HasGpuCompositor)
+                    Assert.Ignore("The GPU compositor shader is unavailable on this device.");
+
+                Color32[] first = ComposeOnGpu(player, commands, 1);
+                Assert.That(player.OutputTexture, Is.InstanceOf<RenderTexture>());
+                Assert.That(player.Data, Is.Not.Null);
+                Assert.That(player.Data.HasPixels, Is.False);
+                Assert.That(BasisAnimatedImageData.TotalResidentNativeBytes, Is.LessThan(residentWithPixels));
+                AssertColorNear(first[0], Red);
+                AssertColorNear(first[1], Green);
+
+                Color32[] second = ComposeOnGpu(player, commands, 500001);
+                AssertColorNear(second[0], Blue);
+                AssertColorNear(second[1], White);
+            }
+            finally
+            {
+                commands.Release();
+                player.ClearReloadPayload();
+                Object.DestroyImmediate(host);
+                payload?.Dispose();
+                if (!initialized)
+                    data.Dispose();
+                BasisImagePickupManager.Shutdown();
+            }
+        }
+
+        [Test]
+        public void SelfContainedFramesShowStraightFromTheAtlasAndMatchTheComposedCanvas()
+        {
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null)
+                Assert.Ignore("The GPU compositor needs a graphics device.");
+            Shader shader = Shader.Find("Hidden/Basis/ImageAnimationComposite");
+            if (shader == null || !BasisImagePickupRuntimeUtility.CanUseAnimationCompositorShader(shader))
+                Assert.Ignore("The GPU compositor shader is unavailable on this device.");
+
+            Assert.That(
+                BasisAnimatedImageData.TryCreate(
+                    2,
+                    2,
+                    0,
+                    new Color32(0, 0, 0, 0),
+                    new[]
+                    {
+                        new BasisAnimatedImageFrameSource(
+                            new RectInt(0, 0, 2, 2),
+                            50000,
+                            BasisAnimationBlend.Source,
+                            BasisAnimationDisposal.None,
+                            new[] { Red, Green, new Color32(10, 20, 30, 0), White }
+                        ),
+                        new BasisAnimatedImageFrameSource(
+                            new RectInt(1, 1, 1, 1),
+                            50000,
+                            BasisAnimationBlend.Over,
+                            BasisAnimationDisposal.None,
+                            new[] { Blue }
+                        ),
+                    },
+                    out BasisAnimatedImageData data,
+                    out string error
+                ),
+                Is.True,
+                error
+            );
+            var material = new Material(shader);
+            var commands = new CommandBuffer();
+            RenderTexture direct = null;
+            RenderTexture directMagnified = null;
+            RenderTexture composedMagnified = null;
+            try
+            {
+                using var canvas = new BasisAnimatedImageGpuCanvas(data, material);
+                long budget = long.MaxValue;
+                while (!canvas.TryPrepareFrameAtlas(ref budget))
+                {
+                    canvas.FlushPendingAtlasPage();
+                    budget = long.MaxValue;
+                }
+
+                Assert.That(canvas.TryGetDirectFrame(0, out Texture2D page, out Vector4 scaleOffset), Is.True);
+                Assert.That(canvas.TryGetDirectFrame(1, out _, out _), Is.False);
+
+                canvas.AppendToState(commands, 0, 0, int.MaxValue, long.MaxValue, out _);
+                Graphics.ExecuteCommandBuffer(commands);
+                var composed = (RenderTexture)canvas.OutputTexture;
+                var scale = new Vector2(scaleOffset.x, scaleOffset.y);
+                var offset = new Vector2(scaleOffset.z, scaleOffset.w);
+
+                direct = CreateReadbackTarget(2, 2);
+                Graphics.Blit(page, direct, scale, offset);
+                AssertPixelsNear(ReadBack(direct), ReadBack(composed));
+
+                directMagnified = CreateReadbackTarget(7, 5);
+                composedMagnified = CreateReadbackTarget(7, 5);
+                Graphics.Blit(page, directMagnified, scale, offset);
+                Graphics.Blit(composed, composedMagnified);
+                AssertPixelsNear(ReadBack(directMagnified), ReadBack(composedMagnified));
+            }
+            finally
+            {
+                commands.Release();
+                ReleaseReadbackTarget(direct);
+                ReleaseReadbackTarget(directMagnified);
+                ReleaseReadbackTarget(composedMagnified);
+                data.Dispose();
+                Object.DestroyImmediate(material);
+            }
+        }
+
+        [Test]
+        public void PartialAlphaFramesAreNeverShownStraightFromTheAtlas()
+        {
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null)
+                Assert.Ignore("The GPU compositor needs a graphics device.");
+            Shader shader = Shader.Find("Hidden/Basis/ImageAnimationComposite");
+            if (shader == null || !BasisImagePickupRuntimeUtility.CanUseAnimationCompositorShader(shader))
+                Assert.Ignore("The GPU compositor shader is unavailable on this device.");
+
+            BasisAnimatedImageData data = Create(
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Red, new Color32(0, 255, 0, 128) }
+                )
+            );
+            var material = new Material(shader);
+            try
+            {
+                using var canvas = new BasisAnimatedImageGpuCanvas(data, material);
+                long budget = long.MaxValue;
+                while (!canvas.TryPrepareFrameAtlas(ref budget))
+                {
+                    canvas.FlushPendingAtlasPage();
+                    budget = long.MaxValue;
+                }
+                Assert.That(canvas.TryGetDirectFrame(0, out _, out _), Is.False);
+            }
+            finally
+            {
+                data.Dispose();
+                Object.DestroyImmediate(material);
+            }
+        }
+
+        [Test]
+        public void PlayerShowsSelfContainedFramesFromTheAtlasAndComposesTheRest()
+        {
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null)
+                Assert.Ignore("The GPU compositor needs a graphics device.");
+
+            var host = new GameObject("BasisAnimatedImageDirectFrameTest");
+            var pickup = host.AddComponent<BasisImagePickupObject>();
+            var player = host.AddComponent<BasisAnimatedImagePlayer>();
+            BasisAnimatedImageData data = Create(
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Source,
+                    BasisAnimationDisposal.None,
+                    new[] { Red, Green }
+                ),
+                new BasisAnimatedImageFrameSource(
+                    new RectInt(0, 0, 2, 1),
+                    50000,
+                    BasisAnimationBlend.Over,
+                    BasisAnimationDisposal.None,
+                    new[] { Blue, White }
+                )
+            );
+            System.Reflection.FieldInfo directPage = typeof(BasisAnimatedImagePlayer).GetField(
+                "_directPage",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+            );
+            var commands = new CommandBuffer();
+            bool initialized = false;
+            try
+            {
+                initialized = player.Initialize(data, pickup, 1, false, null);
+                Assert.That(initialized, Is.True);
+                if (!BasisImagePickupManager.HasGpuCompositor)
+                    Assert.Ignore("The GPU compositor shader is unavailable on this device.");
+
+                bool commandsAdded = false;
+                for (int attempt = 0; attempt < 8; attempt++)
+                {
+                    commands.Clear();
+                    int transitionsRemaining = 16;
+                    long pixelsRemaining = 1L << 20;
+                    player.Schedule(commands, 1, ref transitionsRemaining, ref pixelsRemaining, ref commandsAdded);
+                    player.FlushPendingJobs();
+                }
+                Assert.That(commandsAdded, Is.False);
+                Assert.That(directPage.GetValue(player), Is.Not.Null);
+
+                Color32[] second = ComposeOnGpu(player, commands, 500001);
+                Assert.That(directPage.GetValue(player), Is.Null);
+                AssertColorNear(second[0], Blue);
+                AssertColorNear(second[1], White);
+            }
+            finally
+            {
+                commands.Release();
+                Object.DestroyImmediate(host);
+                if (!initialized)
+                    data.Dispose();
+                BasisImagePickupManager.Shutdown();
+            }
+        }
+
+        [Test]
+        public void ChunkPacketsParseWithoutAStreamAndMatchTheBinaryReaderLayout()
+        {
+            System.Guid id = System.Guid.NewGuid();
+            byte[] source = new byte[64];
+            for (int i = 0; i < source.Length; i++)
+                source[i] = (byte)(i * 7);
+            byte[] packet = new byte[25 + 40];
+            BasisImagePickupManager.EncodeChunkInto(packet, id, 3, source, 10, 40);
+
+            Assert.That(
+                BasisImagePickupManager.TryReadChunkHeader(packet, out System.Guid parsedId, out int chunkIndex, out int length),
+                Is.True
+            );
+            Assert.That(parsedId, Is.EqualTo(id));
+            Assert.That(chunkIndex, Is.EqualTo(3));
+            Assert.That(length, Is.EqualTo(40));
+
+            using var stream = new MemoryStream(packet, false);
+            using var reader = new BinaryReader(stream, Encoding.UTF8);
+            Assert.That(reader.ReadByte(), Is.EqualTo(2));
+            Assert.That(new System.Guid(reader.ReadBytes(16)), Is.EqualTo(id));
+            Assert.That(reader.ReadInt32(), Is.EqualTo(3));
+            Assert.That(reader.ReadInt32(), Is.EqualTo(40));
+            Assert.That(reader.ReadBytes(40), Is.EqualTo(new System.ArraySegment<byte>(source, 10, 40).ToArray()));
+
+            Assert.That(BasisImagePickupManager.TryReadChunkHeader(new byte[24], out _, out _, out _), Is.False);
+        }
+
+        private static Color32[] ComposeOnGpu(BasisAnimatedImagePlayer player, CommandBuffer commands, long synchronizedTicks)
+        {
+            for (int attempt = 0; attempt < 64; attempt++)
+            {
+                commands.Clear();
+                int transitionsRemaining = 16;
+                long pixelsRemaining = 1L << 20;
+                bool gpuCommandsAdded = false;
+                player.Schedule(commands, synchronizedTicks, ref transitionsRemaining, ref pixelsRemaining, ref gpuCommandsAdded);
+                player.FlushPendingJobs();
+                if (gpuCommandsAdded)
+                {
+                    Graphics.ExecuteCommandBuffer(commands);
+                    break;
+                }
+            }
+
+            return ReadBack((RenderTexture)player.OutputTexture);
+        }
+
+        private static Color32[] ReadBack(RenderTexture target)
+        {
+            RenderTexture previous = RenderTexture.active;
+            var readback = new Texture2D(target.width, target.height, TextureFormat.RGBA32, false, false);
+            try
+            {
+                RenderTexture.active = target;
+                readback.ReadPixels(new Rect(0, 0, target.width, target.height), 0, 0);
+                readback.Apply(false, false);
+                return readback.GetPixels32();
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                Object.DestroyImmediate(readback);
+            }
+        }
+
+        private static RenderTexture CreateReadbackTarget(int width, int height)
+        {
+            var target = new RenderTexture(
+                new RenderTextureDescriptor(width, height, RenderTextureFormat.ARGB32, 0)
+                {
+                    msaaSamples = 1,
+                    useMipMap = false,
+                    sRGB = QualitySettings.activeColorSpace == ColorSpace.Linear,
+                }
+            )
+            {
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp,
+            };
+            target.Create();
+            return target;
+        }
+
+        private static void ReleaseReadbackTarget(RenderTexture target)
+        {
+            if (target == null)
+                return;
+            target.Release();
+            Object.DestroyImmediate(target);
+        }
+
+        private static void AssertPixelsNear(Color32[] actual, Color32[] expected)
+        {
+            Assert.That(actual.Length, Is.EqualTo(expected.Length));
+            for (int i = 0; i < expected.Length; i++)
+                AssertColorNear(actual[i], expected[i]);
+        }
+
+        private static void AssertColorNear(Color32 actual, Color32 expected)
+        {
+            Assert.That(Mathf.Abs(actual.r - expected.r), Is.LessThanOrEqualTo(1), $"{actual} vs {expected}");
+            Assert.That(Mathf.Abs(actual.g - expected.g), Is.LessThanOrEqualTo(1), $"{actual} vs {expected}");
+            Assert.That(Mathf.Abs(actual.b - expected.b), Is.LessThanOrEqualTo(1), $"{actual} vs {expected}");
+            Assert.That(Mathf.Abs(actual.a - expected.a), Is.LessThanOrEqualTo(1), $"{actual} vs {expected}");
+        }
+
+        private static Color32 ReferenceCompose(Color32 source, Color32 destination, BasisAnimationBlend blend, bool linear)
+        {
+            float sourceAlpha = source.a / 255f;
+            float destinationAlpha = destination.a / 255f;
+            float[] sourceColor = { DecodeReference(source.r, linear), DecodeReference(source.g, linear), DecodeReference(source.b, linear) };
+            float[] destinationColor = { DecodeReference(destination.r, linear), DecodeReference(destination.g, linear), DecodeReference(destination.b, linear) };
+            var output = new byte[3];
+            float alpha;
+            if (blend == BasisAnimationBlend.Source)
+            {
+                for (int channel = 0; channel < 3; channel++)
+                    output[channel] = EncodeReference(sourceColor[channel] * sourceAlpha, linear);
+                alpha = sourceAlpha;
+            }
+            else
+            {
+                float inverse = 1f - sourceAlpha;
+                for (int channel = 0; channel < 3; channel++)
+                    output[channel] = EncodeReference(sourceColor[channel] * sourceAlpha + destinationColor[channel] * inverse, linear);
+                alpha = sourceAlpha + destinationAlpha * inverse;
+            }
+            return new Color32(output[0], output[1], output[2], (byte)Mathf.Round(Mathf.Clamp01(Mathf.Clamp01(alpha)) * 255f));
+        }
+
+        private static float DecodeReference(byte channel, bool linear)
+        {
+            float value = channel / 255f;
+            if (!linear)
+                return value;
+            return value > 0.04045f ? Mathf.Pow((value + 0.055f) / 1.055f, 2.4f) : value / 12.92f;
+        }
+
+        private static byte EncodeReference(float value, bool linear)
+        {
+            value = Mathf.Clamp01(value);
+            if (linear)
+                value = value > 0.0031308f ? 1.055f * Mathf.Pow(value, 1f / 2.4f) - 0.055f : value * 12.92f;
+            return (byte)Mathf.Round(Mathf.Clamp01(value) * 255f);
+        }
+
         private static void SchedulePlayerOnce(BasisAnimatedImagePlayer player, CommandBuffer commands)
         {
             int transitionsRemaining = 16;

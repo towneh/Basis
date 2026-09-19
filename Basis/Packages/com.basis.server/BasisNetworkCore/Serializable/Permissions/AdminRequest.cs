@@ -307,6 +307,10 @@ namespace BasisNetworkCore.Serializable
             // server→client: the current instance-wide locomotion policy, same field order as
             // SetGlobalLocomotionPolicy. Sent on join and on every admin change.
             GlobalGetLocomotionPolicy,
+            GlobalToggleGifs,
+            RenamePlayer,
+            GetMuteState,    // moderator: one player's current moderation mute flags. Payload: [string uuid]
+            MuteStateResult, // server→moderator: answer to GetMuteState, also echoed after SetVoiceMute/SetTextMute. Payload: [string uuid][bool voiceMuted][bool textMuted]
         }
 
         /// <summary>

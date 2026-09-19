@@ -50,15 +50,17 @@ namespace Basis.Tests.IK
             foreach (BasisMotionClip clip in clips)
             {
                 string csv = Path.Combine(Application.persistentDataPath, "DynamicCorpus", $"{clip.Name}_Lookup.csv");
-                BasisMocapAccuracySummary s = BasisMocapAccuracy.Run(clip, BasisMocapHintSource.Lookup, csv);
+                BasisMocapAccuracySummary s = BasisMocapAccuracy.Run(clip, BasisMocapHintSource.Model, csv);
                 Assert.That(s.Ok, Is.True, $"{clip.Name}: {s.Error}");   // Ok = false includes a NaN/parse blow-up
 
                 log.AppendLine($"  {clip.Name,-10}  {s.Frames,6}   {s.ElbowMeanM * 100f,5:F1}/{s.ElbowP95M * 100f,4:F1}/{s.ElbowMaxM * 100f,4:F1}      " + $"{s.KneeMeanM * 100f,5:F1}      {s.HandMaxM * 1000f,6:F2}mm {s.FootMaxM * 1000f,6:F2}mm {s.RigidityMaxM * 1000f,5:F2}mm  {s.ElbowPops}/{s.KneePops}");
 
                 // HARD invariants (must hold on any motion). Bounds match BasisMocapAccuracy.Gate, loosened a
                 // hair for the extra excursion of dance/throws so they fail ONLY on a real regression.
-                if (s.HandMaxM > 0.01f)
-                    failures.Add($"{clip.Name}: the arm missed the hand it was handed by {s.HandMaxM * 100f:F1} cm -- reach not preserved on dynamic motion");
+                if (s.HandInReachMaxM > 0.002f)
+                    failures.Add($"{clip.Name}: the arm missed the hand it was handed by {s.HandInReachMaxM * 1000f:F1} mm inside reach -- reach not preserved on dynamic motion");
+                if (s.HandMaxM > 0.05f)
+                    failures.Add($"{clip.Name}: the arm fell {s.HandMaxM * 100f:F1} cm short of the hand near full extension");
                 if (s.RigidityMaxM > 0.003f)
                     failures.Add($"{clip.Name}: the solved rotations rebuild the joint {s.RigidityMaxM * 1000f:F1} mm off its solved position");
 

@@ -93,6 +93,11 @@ namespace Basis.Scripts.Device_Management
         /// Fired when the boot mode changes after a successful <see cref="SwitchSetMode(string)"/> or default mode selection.
         /// </summary>
         public static event Action<string> OnBootModeChanged;
+        public static event Action OnXRSessionResumed;
+        public static void RaiseXRSessionResumed()
+        {
+            OnXRSessionResumed?.Invoke();
+        }
 
         /// <summary>
         /// Delegate signature for <see cref="OnInitializationCompleted"/>.
@@ -226,8 +231,15 @@ namespace Basis.Scripts.Device_Management
 
         #region Unity Lifecycle
 
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void UseInvariantCulture()
+        {
+            CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+        }
+
         /// <summary>
-        /// Unity start hook. Ensures singleton, sets culture to invariant, and kicks off <see cref="Initialize"/>.
+        /// Unity start hook. Ensures singleton and kicks off <see cref="Initialize"/>.
         /// </summary>
         private async void Start()
         {
@@ -241,7 +253,6 @@ namespace Basis.Scripts.Device_Management
             BasisGpuDetection.Initialize();
 
             StaticCurrentMode = BasisConstants.None;
-            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
             try
             {
                 BasisSettingsSystem.Initialize();
@@ -426,6 +437,12 @@ namespace Basis.Scripts.Device_Management
                 return;
             }
 
+            if (BasisXRManagement.IsLoading)
+            {
+                BasisDebug.LogWarning($"XR load in progress, ignoring switch to '{newMode}'.", BasisDebug.LogTag.Device);
+                return;
+            }
+
             // Refuse before anything is torn down, so a blocked switch leaves the session exactly
             // as it was instead of shutting VR down and landing in Desktop with no explanation.
             if (!CanEnterMode(newMode, out string blockedReason))
@@ -512,6 +529,7 @@ namespace Basis.Scripts.Device_Management
 #endif
             await BasisActionDriver.LoadBindings();
             BasisDebug.Log($"Loading mode: {mode}", BasisDebug.LogTag.Device);
+            Basis.Scripts.Rendering.BasisDX12Notice.ShowOnce();
         }
 
         /// <summary>
@@ -628,7 +646,17 @@ namespace Basis.Scripts.Device_Management
 
             AllInputDevices.Add(input);
             BasisSettingsSystem.ReapplySettings();
+            TryRestoreCachedRole(input);
 
+            return true;
+        }
+
+        public void TryRestoreCachedRole(BasisInput input)
+        {
+            if (input == null || input.IgnoresDevice || PreviouslyConnectedDevices == null || PreviouslyConnectedDevices.Count == 0)
+            {
+                return;
+            }
             if (RestoreDevice(input.SubSystemIdentifier, input.UniqueDeviceIdentifier, out var prev))
             {
                 if (CheckBeforeOverride(prev))
@@ -641,8 +669,6 @@ namespace Basis.Scripts.Device_Management
                     BasisDebug.LogError("Existing Device Exist with this role!", BasisDebug.LogTag.Device);
                 }
             }
-
-            return true;
         }
 
         /// <summary>
@@ -657,8 +683,14 @@ namespace Basis.Scripts.Device_Management
 
             if (input != null)
             {
+                if (input.IgnoresDevice)
+                {
+                    BasisDebug.Log($"Device restore skipped, {input.UniqueDeviceIdentifier} is ignored", BasisDebug.LogTag.Device);
+                    yield break;
+                }
+                bool restoreRole = prev.hasRoleAssigned && !(BasisInput.RoleCanHaveMultiple(prev.trackedRole) && input.IsHandDevice);
                 BasisDebug.Log($"Device restored: {prev.trackedRole}", BasisDebug.LogTag.Device);
-                if (prev.hasRoleAssigned)
+                if (restoreRole)
                 {
                     if (CheckBeforeOverride(prev))
                     {
@@ -669,7 +701,7 @@ namespace Basis.Scripts.Device_Management
                         BasisDebug.Log($"Device unable to take role: {prev.trackedRole} already had existing role", BasisDebug.LogTag.Device);
                     }
                 }
-                if (prev.hasRoleAssigned)
+                if (restoreRole)
                 {
                     if (input.HasControl)
                     {
@@ -812,18 +844,23 @@ namespace Basis.Scripts.Device_Management
         /// <returns><c>true</c> when a device with the role exists; otherwise <c>false</c>.</returns>
         public bool FindDevice(out BasisInput found, BasisBoneTrackedRole FindRole)
         {
+            BasisInput fallback = null;
             for (int i = 0; i < AllInputDevices.Count; i++)
             {
                 var device = AllInputDevices[i];
                 if (device?.Control != null && device.TryGetRole(out var role) && role == FindRole)
                 {
-                    found = device;
-                    return true;
+                    if (!device.IgnoresPose)
+                    {
+                        found = device;
+                        return true;
+                    }
+                    fallback ??= device;
                 }
             }
 
-            found = null;
-            return false;
+            found = fallback;
+            return fallback != null;
         }
 
         /// <summary>
@@ -1021,6 +1058,7 @@ namespace Basis.Scripts.Device_Management
         /// Indicates whether the current runtime is a mobile platform (Android).
         /// </summary>
         public static bool IsMobileHardware() => Application.isMobilePlatform;
+        public static bool IsStandaloneDevice => Application.isMobilePlatform || BasisGpuDetection.IsMobileGpu;
 
         /// <summary>
         /// Returns <c>true</c> when the current static mode equals <see cref="BasisConstants.Desktop"/>.
@@ -1056,6 +1094,16 @@ namespace Basis.Scripts.Device_Management
         {
             blockedReason = null;
 
+            if (string.Equals(mode, BasisConstants.Desktop, StringComparison.Ordinal))
+            {
+                if (IsStandaloneDevice && IsCurrentModeVR())
+                {
+                    blockedReason = BasisLocalization.Get("settings.platform.standaloneNoDesktop");
+                    return false;
+                }
+                return true;
+            }
+
             if (!IsVRMode(mode)) return true;
 
             BasisDeviceManagement inst = Instance;
@@ -1087,6 +1135,12 @@ namespace Basis.Scripts.Device_Management
             if (IsUserInDesktop())
             {
                 BasisDebug.LogError("Already in Desktop — cannot soft-switch.", BasisDebug.LogTag.Device);
+                return;
+            }
+
+            if (BasisXRManagement.IsLoading)
+            {
+                BasisDebug.LogWarning("XR load in progress, cannot soft-switch to Desktop yet.", BasisDebug.LogTag.Device);
                 return;
             }
 
@@ -1189,8 +1243,12 @@ namespace Basis.Scripts.Device_Management
         /// listener attached and never raises another. Without this the session stays in VR with
         /// nothing to swap it back.
         /// </summary>
-        private void ReconcileAutoSwapWithPresence()
+        public void ReconcileAutoSwapWithPresence()
         {
+            if (!BasisHMDPresence.IsSettled)
+            {
+                return;
+            }
             OnHMDPresenceChanged(BasisHMDPresence.IsPresent);
         }
 
@@ -1218,11 +1276,21 @@ namespace Basis.Scripts.Device_Management
                 return;
             }
 
+            if (IsStandaloneDevice) return;
+
             if (!string.Equals(BasisSettingsDefaults.SwapMode.RawValue, BasisSettingsDefaults.SwapMode_AutoSwap, StringComparison.OrdinalIgnoreCase)) return;
 
             // Gated here rather than at the hub so the sensor keeps being read and reported while
             // this is off — the presence state stays diagnosable, it just stops changing modes.
             if (!BasisSettingsDefaults.UsePresenceSensor.RawValue) return;
+
+            if (!BasisHMDPresence.IsSettled) return;
+
+            if (BasisXRManagement.IsLoading)
+            {
+                BasisDebug.Log("AutoSwap: XR load in progress, presence will be reconciled once it finishes", BasisDebug.LogTag.Device);
+                return;
+            }
 
             bool shouldSwitchToDesktop = !isPresent && IsCurrentModeVR();
             bool shouldSwitchToVR = isPresent && IsSoftSwapped;

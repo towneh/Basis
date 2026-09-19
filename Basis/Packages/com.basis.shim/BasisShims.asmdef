@@ -12,6 +12,7 @@
         "BasisSDK",
         "Basis Framework",
         "BasisCommon",
+        "BasisSettings",
         "BasisMediaPlayer",
         "BasisSDKEditor",
         "BasisEditor",

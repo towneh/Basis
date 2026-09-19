@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -109,6 +110,7 @@ namespace Basis.ImagePickup
             public BasisNativeAnimationPayload AnimationPayload;
             public long PlaybackEpochUtcTicks;
             public readonly HashSet<ushort> SentRecipients = new();
+            public readonly HashSet<ushort> AnimationRecipients = new();
         }
 
         /// <summary>
@@ -332,6 +334,8 @@ namespace Basis.ImagePickup
         private static readonly HashSet<Guid> _animationAttempted = new();
         private static long _reservedInboundTransferBytes;
         private static bool _gifDecodePausedForMemory;
+        private static bool _gifLockNoticeShown;
+        private static bool _gifsBlocked;
         private static bool _backPanelsVisible;
         private static bool _backPanelSyncPending;
         private static bool _destroying;
@@ -393,6 +397,7 @@ namespace Basis.ImagePickup
         private static readonly List<Vector3> _visibilityCameraPositions = new(8);
         private static readonly List<Vector3> _visibilityCameraForwards = new(8);
         private static readonly List<bool> _visibilityCameraOrthographic = new(8);
+        private static readonly List<int> _visibilityCameraCullingMasks = new(8);
         private static readonly List<Camera> _registeredCameraScratch = new(8);
         private static readonly List<Plane[]> _visibilityFrustums = new(8);
         private static readonly RaycastHit[] _raycastHits = new RaycastHit[RaycastHitBufferSize];
@@ -525,6 +530,8 @@ namespace Basis.ImagePickup
             _spawnRateBySender.Clear();
             _reservedInboundTransferBytes = 0;
             _gifDecodePausedForMemory = false;
+            _gifLockNoticeShown = false;
+            _gifsBlocked = false;
             _nextRecipientRangeRefreshTime = 0f;
             BasisImagePickupLinkProbe.Reset();
             BasisImagePickupBandwidth.Reset();
@@ -1024,6 +1031,12 @@ namespace Basis.ImagePickup
                 BasisImagePickupRejectionPopup.Show(queued.Label, headerError);
                 BasisDebug.LogWarning($"Image pickup rejected: {headerError}", LogTag);
                 return false;
+            }
+
+            if (BasisNetworkModeration.GifsBlockedLocally && !_gifLockNoticeShown)
+            {
+                _gifLockNoticeShown = true;
+                BasisImagePickupRejectionPopup.ShowGifsLocked();
             }
 
             Guid id = Guid.NewGuid();
@@ -1640,6 +1653,16 @@ namespace Basis.ImagePickup
         private static void SimulateUpdateBody()
         {
             RefreshServerRelayBudget();
+            bool gifsBlocked = BasisNetworkModeration.GifsBlockedLocally;
+            if (gifsBlocked != _gifsBlocked)
+            {
+                _gifsBlocked = gifsBlocked;
+                if (!gifsBlocked)
+                {
+                    _gifLockNoticeShown = false;
+                    _nextRecipientRangeRefreshTime = 0f;
+                }
+            }
             BasisImagePickupLinkProbe.Tick(Time.unscaledTime);
             BasisImagePickupBandwidth.Refill(Time.unscaledDeltaTime);
 
@@ -2119,9 +2142,36 @@ namespace Basis.ImagePickup
                 return false;
 
             MarkRecipientsSent(owned.SentRecipients, recipients);
-            if (owned.AnimationPayload != null && owned.PlaybackEpochUtcTicks > 0)
+            if (owned.AnimationPayload != null && owned.PlaybackEpochUtcTicks > 0 && !BasisNetworkModeration.GifsBlockedLocally)
+            {
                 SendAnimation(id, owned, recipients);
+                MarkRecipientsSent(owned.AnimationRecipients, recipients);
+            }
             return true;
+        }
+
+        private static void ResumeOwnedAnimations()
+        {
+            if (BasisNetworkModeration.GifsBlockedLocally)
+                return;
+            foreach (KeyValuePair<Guid, OwnedImage> entry in _owned)
+            {
+                OwnedImage owned = entry.Value;
+                if (owned?.Object == null || owned.AnimationPayload == null || owned.PlaybackEpochUtcTicks <= 0)
+                    continue;
+                _scratchRecipientIds.Clear();
+                foreach (ushort recipient in owned.SentRecipients)
+                {
+                    if (!owned.AnimationRecipients.Contains(recipient))
+                        _scratchRecipientIds.Add(recipient);
+                }
+                if (_scratchRecipientIds.Count == 0)
+                    continue;
+                _scratchRecipientIds.Sort();
+                ushort[] recipients = _scratchRecipientIds.ToArray();
+                SendAnimation(entry.Key, owned, recipients);
+                MarkRecipientsSent(owned.AnimationRecipients, recipients);
+            }
         }
 
         private static void RefreshRangeRecipients(float now)
@@ -2137,6 +2187,7 @@ namespace Basis.ImagePickup
             if (ownerId == UnownedPlayerId)
                 return;
 
+            ResumeOwnedAnimations();
             GatherReplicationCandidates(ownerId);
             if (_scratchCandidates.Count == 0)
                 return;
@@ -2251,7 +2302,12 @@ namespace Basis.ImagePickup
             }
 
             foreach (OwnedImage owned in _owned.Values)
-                owned?.SentRecipients.Remove(left);
+            {
+                if (owned == null)
+                    continue;
+                owned.SentRecipients.Remove(left);
+                owned.AnimationRecipients.Remove(left);
+            }
 
             RemoveOutboundImageTransfersForRecipient(left);
             RemoveOutboundAnimationTransfersForRecipient(left);
@@ -2263,18 +2319,32 @@ namespace Basis.ImagePickup
             if (buffer == null || buffer.Length < 1)
                 return;
 
+            byte opcode = buffer[0];
+            if (opcode == OpChunk || opcode == OpAnimationChunk)
+            {
+                try
+                {
+                    if (opcode == OpChunk)
+                        HandleChunk(senderId, buffer);
+                    else
+                        HandleAnimationChunk(senderId, buffer);
+                }
+                catch (Exception e)
+                {
+                    BasisDebug.LogWarning($"Image pickup: malformed message from {senderId} ({e.Message}).", LogTag);
+                }
+                return;
+            }
+
             using var stream = new MemoryStream(buffer, false);
             using var reader = new BinaryReader(stream, Encoding.UTF8);
-            byte opcode = reader.ReadByte();
+            reader.ReadByte();
             try
             {
                 switch (opcode)
                 {
                     case OpSpawn:
                         HandleSpawn(senderId, reader);
-                        break;
-                    case OpChunk:
-                        HandleChunk(senderId, reader);
                         break;
                     case OpTransform:
                         HandleTransform(senderId, reader);
@@ -2287,9 +2357,6 @@ namespace Basis.ImagePickup
                         break;
                     case OpAnimationSpawn:
                         HandleAnimationSpawn(senderId, reader);
-                        break;
-                    case OpAnimationChunk:
-                        HandleAnimationChunk(senderId, reader);
                         break;
                     case OpServerCacheState:
                         HandleServerCacheState(senderId, reader);
@@ -2383,11 +2450,25 @@ namespace Basis.ImagePickup
             }
         }
 
-        private static void HandleChunk(ushort senderId, BinaryReader reader)
+        internal static bool TryReadChunkHeader(byte[] buffer, out Guid id, out int chunkIndex, out int length)
         {
-            Guid id = new Guid(reader.ReadBytes(16));
-            int chunkIndex = reader.ReadInt32();
-            int length = reader.ReadInt32();
+            if (buffer == null || buffer.Length < ImageChunkHeaderBytes)
+            {
+                id = default;
+                chunkIndex = 0;
+                length = 0;
+                return false;
+            }
+            id = new Guid(new ReadOnlySpan<byte>(buffer, 1, BasisGuid128.SerializedSize));
+            chunkIndex = BinaryPrimitives.ReadInt32LittleEndian(new ReadOnlySpan<byte>(buffer, 1 + BasisGuid128.SerializedSize, sizeof(int)));
+            length = BinaryPrimitives.ReadInt32LittleEndian(new ReadOnlySpan<byte>(buffer, 1 + BasisGuid128.SerializedSize + sizeof(int), sizeof(int)));
+            return true;
+        }
+
+        private static void HandleChunk(ushort senderId, byte[] buffer)
+        {
+            if (!TryReadChunkHeader(buffer, out Guid id, out int chunkIndex, out int length))
+                throw new EndOfStreamException("Image chunk header is truncated.");
 
             if (!_inbound.TryGetValue(id, out InboundTransfer transfer))
             {
@@ -2443,7 +2524,7 @@ namespace Basis.ImagePickup
                 return;
             }
 
-            long remainingBytes = reader.BaseStream.Length - reader.BaseStream.Position;
+            long remainingBytes = buffer.Length - ImageChunkHeaderBytes;
             if (remainingBytes < length)
             {
                 LogChunkRejected(
@@ -2454,24 +2535,13 @@ namespace Basis.ImagePickup
                 return;
             }
 
-            byte[] data = reader.ReadBytes(length);
-            if (data.Length != length)
-            {
-                LogChunkRejected(
-                    transfer,
-                    chunkIndex,
-                    $"only {data.Length} of {length} bytes could be read"
-                );
-                return;
-            }
-
             if (!transfer.Received[chunkIndex])
             {
                 transfer.Deadline =
                     Time.unscaledTime
                     + BasisImagePickupSettings.InboundTransferTimeoutSeconds;
                 transfer.LastProgressTime = Time.unscaledTime;
-                Buffer.BlockCopy(data, 0, transfer.Buffer, offset, length);
+                Buffer.BlockCopy(buffer, ImageChunkHeaderBytes, transfer.Buffer, offset, length);
                 transfer.Received[chunkIndex] = true;
                 transfer.ReceivedCount++;
                 transfer.Rate.MovedBytes += length;
@@ -2630,11 +2700,10 @@ namespace Basis.ImagePickup
             }
         }
 
-        private static void HandleAnimationChunk(ushort senderId, BinaryReader reader)
+        private static void HandleAnimationChunk(ushort senderId, byte[] buffer)
         {
-            Guid id = new Guid(reader.ReadBytes(16));
-            int chunkIndex = reader.ReadInt32();
-            int length = reader.ReadInt32();
+            if (!TryReadChunkHeader(buffer, out Guid id, out int chunkIndex, out int length))
+                throw new EndOfStreamException("Animation chunk header is truncated.");
 
             if (!_inboundAnimations.TryGetValue(id, out InboundAnimationTransfer transfer))
                 return;
@@ -2652,8 +2721,7 @@ namespace Basis.ImagePickup
             if (length != expectedLength)
                 return;
 
-            byte[] data = reader.ReadBytes(length);
-            if (data.Length != length)
+            if (buffer.Length - ImageChunkHeaderBytes < length)
                 return;
 
             if (transfer.Received[chunkIndex] == 0)
@@ -2661,7 +2729,7 @@ namespace Basis.ImagePickup
                 transfer.Deadline =
                     Time.unscaledTime
                     + BasisImagePickupSettings.InboundTransferTimeoutSeconds;
-                NativeArray<byte>.Copy(data, 0, transfer.Buffer, offset, length);
+                NativeArray<byte>.Copy(buffer, ImageChunkHeaderBytes, transfer.Buffer, offset, length);
                 transfer.Received[chunkIndex] = 1;
                 transfer.ReceivedCount++;
                 transfer.Rate.MovedBytes += length;
@@ -4144,6 +4212,21 @@ namespace Basis.ImagePickup
 
         private static void ProcessOutboundAnimationTransfers()
         {
+            if (BasisNetworkModeration.GifsBlockedLocally)
+            {
+                while (_outboundAnimations.Count > 0)
+                {
+                    OutboundAnimationTransfer held = _outboundAnimations.Dequeue();
+                    if (_owned.TryGetValue(held.Id, out OwnedImage heldOwner) && held.Recipients != null)
+                    {
+                        for (int i = 0; i < held.Recipients.Length; i++)
+                            heldOwner.AnimationRecipients.Remove(held.Recipients[i]);
+                    }
+                    DisposeOutboundAnimationTransfer(held);
+                }
+                return;
+            }
+
             int chunksRemaining =
                 BasisImagePickupSettings.MaxAnimationNetworkChunksPerFrame;
 
@@ -4526,7 +4609,7 @@ namespace Basis.ImagePickup
         /// <see cref="ImageChunkHeaderBytes"/> plus <paramref name="length"/> bytes long. The transports
         /// copy the buffer before returning, so a caller may reuse one array for every chunk of a transfer.
         /// </summary>
-        private static void EncodeChunkInto(
+        internal static void EncodeChunkInto(
             byte[] destination,
             Guid id,
             int chunkIndex,
@@ -4535,14 +4618,11 @@ namespace Basis.ImagePickup
             int length
         )
         {
-            using var stream = new MemoryStream(destination, true);
-            using var writer = new BinaryWriter(stream, Encoding.UTF8);
-            writer.Write(OpChunk);
-            BasisAnimatedImageNetworkCodec.WriteGuid(writer, id);
-            writer.Write(chunkIndex);
-            writer.Write(length);
-            writer.Write(source, offset, length);
-            writer.Flush();
+            destination[0] = OpChunk;
+            BasisGuid128.FromGuid(id).WriteTo(new Span<byte>(destination, 1, BasisGuid128.SerializedSize));
+            BinaryPrimitives.WriteInt32LittleEndian(new Span<byte>(destination, 1 + BasisGuid128.SerializedSize, sizeof(int)), chunkIndex);
+            BinaryPrimitives.WriteInt32LittleEndian(new Span<byte>(destination, 1 + BasisGuid128.SerializedSize + sizeof(int), sizeof(int)), length);
+            Buffer.BlockCopy(source, offset, destination, ImageChunkHeaderBytes, length);
         }
 
         private static byte[] EncodeTransform(Guid id, Vector3 position, Quaternion rotation, float scale)
@@ -4755,6 +4835,7 @@ namespace Basis.ImagePickup
             _visibilityCameraPositions.Clear();
             _visibilityCameraForwards.Clear();
             _visibilityCameraOrthographic.Clear();
+            _visibilityCameraCullingMasks.Clear();
             _registeredCameraScratch.Clear();
             _visibilityFrustums.Clear();
             _localVisibilityCameraIndex = -1;
@@ -5136,6 +5217,12 @@ namespace Basis.ImagePickup
                 EnforceResidentNativeBudget();
                 _pendingRemoval.Clear();
 
+                if (BasisNetworkModeration.GifsBlockedLocally)
+                {
+                    SuspendPlayersForGifLock();
+                    return;
+                }
+
                 bool useDepthBufferOcclusion =
                     BasisImagePickupSettings.UseDepthBufferAnimationVisibility;
                 CollectVisibilityCameras();
@@ -5253,7 +5340,7 @@ namespace Basis.ImagePickup
                 for (int i = playerCount - 1; i >= 0; i--)
                 {
                     BasisAnimatedImagePlayer player = _players[i];
-                    if (player == null || !player.CanReleaseDecodedData || (pass == 0 && player.HasAllocatedCompositor))
+                    if (player == null || !player.HasDecodedData || !player.CanReleaseDecodedData || (pass == 0 && player.HasAllocatedCompositor))
                     {
                         continue;
                     }
@@ -5261,6 +5348,17 @@ namespace Basis.ImagePickup
                     if (BasisAnimatedImageData.TotalResidentNativeBytes <= limit)
                         return;
                 }
+            }
+        }
+
+        private static void SuspendPlayersForGifLock()
+        {
+            int playerCount = _players.Count;
+            for (int i = 0; i < playerCount; i++)
+            {
+                BasisAnimatedImagePlayer player = _players[i];
+                if (player != null)
+                    player.SuspendForAdminLock();
             }
         }
 
@@ -5314,15 +5412,15 @@ namespace Basis.ImagePickup
                 return 0;
 
             Bounds bounds = pickup.FrontRendererBounds;
+            int rendererLayer = pickup.FrontRendererLayer;
             pickup.GetFrontFacePose(out Vector3 faceCenter, out Vector3 frontNormal);
             int cameraCount = Mathf.Min(_visibilityCameras.Count, MaximumCpuFacingCameraBits);
             ulong cameraMask = 0;
             for (int cameraIndex = 0; cameraIndex < cameraCount; cameraIndex++)
             {
-                Camera camera = _visibilityCameras[cameraIndex];
                 if (
                     !IsCpuFrontFacingCandidate(
-                        pickup.FrontRendererLayer,
+                        rendererLayer,
                         bounds,
                         _visibilityFrustums[cameraIndex],
                         frontNormal,
@@ -5330,7 +5428,7 @@ namespace Basis.ImagePickup
                         _visibilityCameraPositions[cameraIndex],
                         _visibilityCameraForwards[cameraIndex],
                         _visibilityCameraOrthographic[cameraIndex],
-                        camera.cullingMask
+                        _visibilityCameraCullingMasks[cameraIndex]
                     )
                 )
                 {
@@ -5533,7 +5631,7 @@ namespace Basis.ImagePickup
                 if (
                     !TryHasUnoccludedFaceSample(
                         pickup,
-                        camera,
+                        _visibilityCameraCullingMasks[i],
                         _visibilityCameraPositions[i],
                         _visibilityCameraForwards[i],
                         _visibilityCameraOrthographic[i],
@@ -5571,7 +5669,7 @@ namespace Basis.ImagePickup
 
         private static bool TryHasUnoccludedFaceSample(
             BasisImagePickupObject pickup,
-            Camera camera,
+            int cameraCullingMask,
             Vector3 cameraPosition,
             Vector3 cameraForward,
             bool cameraOrthographic,
@@ -5588,7 +5686,7 @@ namespace Basis.ImagePickup
                 raycastsRemaining--;
 
                 Vector3 sample = pickup.GetFrontFaceOcclusionSample(sampleIndex, frontNormal);
-                if (IsFaceSampleUnoccluded(pickup, camera, cameraPosition, cameraForward, cameraOrthographic, sample))
+                if (IsFaceSampleUnoccluded(pickup, cameraCullingMask, cameraPosition, cameraForward, cameraOrthographic, sample))
                 {
                     visible = true;
                     return true;
@@ -5599,7 +5697,7 @@ namespace Basis.ImagePickup
 
         private static bool IsFaceSampleUnoccluded(
             BasisImagePickupObject pickup,
-            Camera camera,
+            int cameraCullingMask,
             Vector3 cameraPosition,
             Vector3 cameraForward,
             bool cameraOrthographic,
@@ -5638,7 +5736,7 @@ namespace Basis.ImagePickup
                 return true;
 
             // Use the camera's own culling mask so geometry it cannot render does not occlude.
-            int layerMask = camera.cullingMask & Physics.DefaultRaycastLayers;
+            int layerMask = cameraCullingMask & Physics.DefaultRaycastLayers;
             int hitCount = Physics.RaycastNonAlloc(
                 origin,
                 direction,
@@ -5693,6 +5791,7 @@ namespace Basis.ImagePickup
             _visibilityCameraPositions.Clear();
             _visibilityCameraForwards.Clear();
             _visibilityCameraOrthographic.Clear();
+            _visibilityCameraCullingMasks.Clear();
             for (int i = 0; i < cameraCount; i++)
             {
                 Camera camera = _visibilityCameras[i];
@@ -5700,6 +5799,7 @@ namespace Basis.ImagePickup
                 _visibilityCameraPositions.Add(cameraPosition);
                 _visibilityCameraForwards.Add(cameraRotation * Vector3.forward);
                 _visibilityCameraOrthographic.Add(camera.orthographic);
+                _visibilityCameraCullingMasks.Add(camera.cullingMask);
                 GeometryUtility.CalculateFrustumPlanes(camera, _visibilityFrustums[i]);
             }
         }

@@ -342,15 +342,19 @@ namespace BasisNetworkServer.Security
                     break;
 
                 case AdminRequestMode.EnableAnnounceMode:
+                    Require(peer, PermNodes.ModerationAnnounce, () => HandleAnnounceMode(peer, reader.GetUShort(), true));
+                    break;
+
                 case AdminRequestMode.DisableAnnounceMode:
-                    Require(peer, PermNodes.ModerationAnnounce, () =>
-                        HandleAnnounceMode(peer, reader, mode == AdminRequestMode.EnableAnnounceMode));
+                    ReleaseMode(peer, reader.GetUShort(), id => HandleAnnounceMode(peer, id, false));
                     break;
 
                 case AdminRequestMode.EnableShoutMode:
+                    Require(peer, PermNodes.ModerationAnnounce, () => HandleShoutMode(peer, reader.GetUShort(), true));
+                    break;
+
                 case AdminRequestMode.DisableShoutMode:
-                    Require(peer, PermNodes.ModerationAnnounce, () =>
-                        HandleShoutMode(peer, reader, mode == AdminRequestMode.EnableShoutMode));
+                    ReleaseMode(peer, reader.GetUShort(), id => HandleShoutMode(peer, id, false));
                     break;
 
                 case AdminRequestMode.SetFullQualityBroadcast:
@@ -360,12 +364,30 @@ namespace BasisNetworkServer.Security
 
                 case AdminRequestMode.SetVoiceMute:
                     Require(peer, PermNodes.ModerationMute, () =>
-                        SendBackMessage(peer, BasisPlayerMuteManager.Apply(reader.GetString(), voice: true, reader.GetBool())));
+                    {
+                        string uuid = reader.GetString();
+                        SendBackMessage(peer, BasisPlayerMuteManager.Apply(uuid, voice: true, reader.GetBool()));
+                        BasisPlayerMuteManager.SendStateToModerator(peer, uuid);
+                    });
                     break;
 
                 case AdminRequestMode.SetTextMute:
                     Require(peer, PermNodes.ModerationMute, () =>
-                        SendBackMessage(peer, BasisPlayerMuteManager.Apply(reader.GetString(), voice: false, reader.GetBool())));
+                    {
+                        string uuid = reader.GetString();
+                        SendBackMessage(peer, BasisPlayerMuteManager.Apply(uuid, voice: false, reader.GetBool()));
+                        BasisPlayerMuteManager.SendStateToModerator(peer, uuid);
+                    });
+                    break;
+
+                case AdminRequestMode.GetMuteState:
+                    Require(peer, PermNodes.ModerationMute, () =>
+                        BasisPlayerMuteManager.SendStateToModerator(peer, reader.GetString()));
+                    break;
+
+                case AdminRequestMode.RenamePlayer:
+                    Require(peer, PermNodes.ModerationRename, () =>
+                        HandleRenamePlayer(peer, reader));
                     break;
 
                 case AdminRequestMode.ForceAvatar:
@@ -500,6 +522,18 @@ namespace BasisNetworkServer.Security
                 case AdminRequestMode.GlobalToggleSafeDisplayNames:
                     Require(peer, PermNodes.ModerationGlobalLock, () =>
                         HandleGlobalProtectionToggle(peer, "Safe display names", BasisGlobalLockManager.ToggleSafeDisplayNames()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleGifs:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                    {
+                        bool nowLocked = BasisGlobalLockManager.ToggleGifs();
+                        HandleGlobalFeatureToggle(peer, "GIF animation", nowLocked);
+                        if (!nowLocked)
+                        {
+                            Basis.Network.Server.Generic.BasisNetworkImageCache.ResumeAnimationsAfterUnlock();
+                        }
+                    });
                     break;
 
                 case AdminRequestMode.SetGlobalAvatarScaleLimits:
@@ -784,6 +818,12 @@ namespace BasisNetworkServer.Security
             action();
         }
 
+        private static void ReleaseMode(NetPeer peer, ushort target, Action<ushort> release)
+        {
+            if (target == peer.Id) release(target);
+            else Require(peer, PermNodes.ModerationAnnounce, () => release(target));
+        }
+
         private static void HandlePermissionEdit(AdminRequestMode mode, NetPeer peer, NetPacketReader reader)
         {
             // SetUserGroup/SetUserNode/SetGroupNode/SetGroupParent all carry a trailing `add` bool.
@@ -955,16 +995,14 @@ namespace BasisNetworkServer.Security
             NetworkServer.ReturnWriter(writer);
         }
 
-        private static void HandleAnnounceMode(NetPeer peer, NetPacketReader reader, bool enable)
+        private static void HandleAnnounceMode(NetPeer peer, ushort id, bool enable)
         {
-            ushort id = reader.GetUShort();
             Basis.Network.Server.Generic.BasisSavedState.SetAnnounceMode(id, enable);
             BasisServerHandle.BasisServerHandleEvents.BroadcastAnnounceModeState(id, enable, (ushort)peer.Id);
         }
 
-        private static void HandleShoutMode(NetPeer peer, NetPacketReader reader, bool enable)
+        private static void HandleShoutMode(NetPeer peer, ushort id, bool enable)
         {
-            ushort id = reader.GetUShort();
             Basis.Network.Server.Generic.BasisSavedState.SetShoutMode(id, enable);
             BasisServerHandle.BasisServerHandleEvents.BroadcastShoutModeState(id, enable, (ushort)peer.Id);
         }
@@ -975,6 +1013,48 @@ namespace BasisNetworkServer.Security
             bool enable = reader.GetBool();
             BasisNetworkServer.BasisNetworkingReductionSystem.BasisServerReductionSystemEvents.SetBypassReduction(id, enable);
             SendBackMessage(peer, $"Full-quality broadcast {(enable ? "ENABLED" : "DISABLED")} for player {id}.");
+        }
+
+        private static void HandleRenamePlayer(NetPeer peer, NetPacketReader reader)
+        {
+            ushort targetId = reader.GetUShort();
+            string newName = BasisDisplayNameSanitizer.Sanitize(reader.GetString());
+
+            if (string.IsNullOrEmpty(newName))
+            {
+                SendBackMessage(peer, "Name invalid");
+                return;
+            }
+
+            if (!NetworkServer.AuthenticatedPeers.TryGetValue(targetId, out NetPeer targetPeer))
+            {
+                SendBackMessage(peer, "Player not found");
+                return;
+            }
+
+            bool hasUuid = NetworkServer.AuthIdentity.NetIDToUUID(targetPeer, out string targetUUID);
+            if (targetPeer.Id != peer.Id && hasUuid && IsProtected(targetUUID))
+            {
+                SendBackMessage(peer, "Target is protected");
+                return;
+            }
+
+            Basis.Network.Server.Generic.BasisSavedState.SetDisplayName(targetPeer.Id, newName);
+            if (hasUuid && PermissionIntegration.TryGetPlayerMeta(targetUUID, out var meta))
+            {
+                meta.playerDisplayName = newName;
+                PermissionIntegration.StorePlayerMeta(targetUUID, meta);
+            }
+
+            var writer = NetworkServer.RentWriter();
+            new AdminRequest().Serialize(writer, AdminRequestMode.RenamePlayer);
+            writer.Put(targetId);
+            writer.Put(newName);
+            writer.Put((ushort)peer.Id);
+            NetworkServer.BroadcastMessageToClients(writer, BasisNetworkCommons.AdminChannel, NetworkServer.PeerSnapshot, DeliveryMethod.ReliableOrdered);
+            NetworkServer.ReturnWriter(writer);
+
+            SendBackMessage(peer, $"Player {targetId} renamed to '{newName}'.");
         }
 
         /// <summary>
@@ -1044,7 +1124,10 @@ namespace BasisNetworkServer.Security
                 return;
             }
 
-            if (NetworkServer.AuthIdentity.NetIDToUUID(targetPeer, out string targetUUID) && IsProtected(targetUUID))
+            // Protection keeps other moderators off a player; it was never meant to lock a moderator
+            // out of their own movement, so a request aimed at the sender skips it.
+            if (targetPeer.Id != peer.Id &&
+                NetworkServer.AuthIdentity.NetIDToUUID(targetPeer, out string targetUUID) && IsProtected(targetUUID))
             {
                 SendBackMessage(peer, "Target is protected");
                 return;

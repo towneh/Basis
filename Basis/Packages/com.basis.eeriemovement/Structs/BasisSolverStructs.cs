@@ -8,16 +8,12 @@ using System;
 using Unity.Mathematics;
 namespace Basis.IK
 {
-    public struct BasisArmSlotState
+    public struct BasisArmState
     {
-        public Vector3 HintBend, HintAxis, HintDrag;
-        public Quaternion HintBodyRot;
-        public float HintReach;
-        public bool HintSeeded;
-        public Vector3 PoleDir;
-        public Quaternion PoleRot;
-        public bool PoleValid;
-        public int Collided, GuardSide;
+        public float SwivelDeg, SwitchTimer, PriorDeg, RawDeg, ReachRatio, ElbowDeg, HumeralDeg, PronationDeg, WristFlexDeg, WristDevDeg, Cost, ShoulderBlend;
+        public Vector3 LastTarget, LastAxis, ElbowDir, PriorDir;
+        public Quaternion ShoulderHold;
+        public bool Seeded, Switched, ShoulderHeld;
     }
     public struct BasisLegSlotState
     {

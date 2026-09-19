@@ -35,7 +35,9 @@ public readonly struct BasisMetaLoadResult
         return error.IndexOf("Network error:", StringComparison.OrdinalIgnoreCase) >= 0
             || error.IndexOf("Cancelled", StringComparison.OrdinalIgnoreCase) >= 0
             || error.IndexOf("Timeout", StringComparison.OrdinalIgnoreCase) >= 0
-            || error.IndexOf("SSL", StringComparison.OrdinalIgnoreCase) >= 0;
+            || error.IndexOf("SSL", StringComparison.OrdinalIgnoreCase) >= 0
+            || error.IndexOf("could not be validated", StringComparison.OrdinalIgnoreCase) >= 0
+            || error.IndexOf("resolves to a blocked address", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 }
 
@@ -239,6 +241,7 @@ public static class BasisBeeManagement
 
         if (output.Item1 == null || output.Item3 != string.Empty)
         {
+            if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
             throw new Exception($"Bundle load failed for {wrapper?.LoadableBundle?.BasisRemoteBundleEncrypted?.RemoteBeeFileLocation ?? "unknown"}: {output.Item3}");
         }
         // Generic (glTF) fallback section: no AssetBundle exists for this platform, the bytes

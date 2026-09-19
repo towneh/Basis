@@ -504,6 +504,14 @@ public static class BasisNetworkModeration
                 HandleMuteStateApply(reader);
                 break;
 
+            case AdminRequestMode.MuteStateResult:
+                HandleMuteStateResult(reader);
+                break;
+
+            case AdminRequestMode.RenamePlayer:
+                HandlePlayerRenamed(reader);
+                break;
+
             case AdminRequestMode.LogBundleBegin:
                 BasisLogBundleReceiver.Begin(reader);
                 break;
@@ -757,6 +765,31 @@ public static class BasisNetworkModeration
             w => w.Put(muted));
     }
 
+    public struct MuteStateResult
+    {
+        public string Uuid;
+        public bool VoiceMuted;
+        public bool TextMuted;
+    }
+
+    public static event Action<MuteStateResult> OnMuteStateResult;
+
+    public static void QueryMuteState(string uuid)
+    {
+        if (!ValidateString(uuid, nameof(uuid))) return;
+        SendAdminRequest(AdminRequestMode.GetMuteState, w => w.Put(uuid));
+    }
+
+    private static void HandleMuteStateResult(NetDataReader reader)
+    {
+        OnMuteStateResult?.Invoke(new MuteStateResult
+        {
+            Uuid = reader.GetString(),
+            VoiceMuted = reader.GetBool(),
+            TextMuted = reader.GetBool(),
+        });
+    }
+
     private static void HandleMuteStateApply(NetDataReader reader)
     {
         bool voiceMuted = reader.GetBool();
@@ -782,6 +815,51 @@ public static class BasisNetworkModeration
                 ? "A moderator muted your text chat - your messages will not be delivered until you are unmuted."
                 : "A moderator unmuted your text chat - your messages are delivered again.");
         }
+    }
+
+    #endregion
+
+    #region Rename
+
+    public static event Action<ushort, string> OnPlayerRenamed;
+
+    public static void RenamePlayer(ushort playerId, string newName)
+    {
+        if (ValidateString(newName, nameof(newName)))
+        {
+            SendAdminRequest(AdminRequestMode.RenamePlayer,
+                w => w.Put(playerId),
+                w => w.Put(newName));
+        }
+    }
+
+    private static void HandlePlayerRenamed(NetDataReader reader)
+    {
+        ushort targetPlayerId = reader.GetUShort();
+        string newName = reader.GetString();
+        ushort initiatorPlayerId = reader.GetUShort();
+
+        bool isLocalPlayer = BasisNetworkPlayer.LocalPlayer != null && targetPlayerId == BasisNetworkPlayer.LocalPlayer.playerId;
+        if (isLocalPlayer)
+        {
+            if (BasisLocalPlayer.Instance != null)
+            {
+                BasisLocalPlayer.Instance.DisplayName = newName;
+                BasisLocalPlayer.Instance.SetSafeDisplayname();
+            }
+            if (initiatorPlayerId != targetPlayerId)
+            {
+                DisplayMessage($"{ResolveDisplayName(initiatorPlayerId)} renamed you to {BasisRemotePlayer.BuildSafeDisplayName(newName)}.");
+            }
+        }
+        else if (BasisNetworkPlayers.RemotePlayers.TryGetValue(targetPlayerId, out BasisRemotePlayer remote) && remote != null)
+        {
+            remote.DisplayName = newName;
+            remote.SetSafeDisplayname();
+            Basis.Scripts.UI.NamePlate.BasisRemoteNamePlateDriver.RebakeNamePlate(remote);
+        }
+
+        OnPlayerRenamed?.Invoke(targetPlayerId, newName);
     }
 
     #endregion
@@ -1222,6 +1300,10 @@ public static class BasisNetworkModeration
     /// </summary>
     public static bool GlobalSafeDisplayNamesForced { get; private set; }
 
+    public static bool GlobalGifsLocked { get; private set; }
+
+    public static event Action<bool> OnGlobalGifsLockedChanged;
+
     /// <summary>Fired when the text-chat lock flag changes.</summary>
     public static event Action<bool> OnGlobalTextChatLockedChanged;
 
@@ -1255,6 +1337,34 @@ public static class BasisNetworkModeration
         return perms != null &&
                (perms.Contains(BasisPermissions.PermNodes.All) ||
                 perms.Contains(BasisPermissions.PermNodes.ModerationGlobalLock));
+    }
+
+    public static bool LocalPlayerIsModerator()
+    {
+        var perms = BasisNetworkManagement.LocalPermissions;
+        if (perms == null) return false;
+        if (perms.Contains(BasisPermissions.PermNodes.All) || perms.Contains(BasisPermissions.PermNodes.PlayerModeration)) return true;
+        string prefix = BasisPermissions.PermNodes.PlayerModeration + ".";
+        foreach (string node in perms)
+        {
+            if (node != null && node.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    public static bool LocalPlayerHasNode(string node)
+    {
+        var perms = BasisNetworkManagement.LocalPermissions;
+        if (perms == null || string.IsNullOrWhiteSpace(node)) return false;
+        node = node.Trim();
+        if (perms.Contains(node) || perms.Contains(BasisPermissions.PermNodes.All)) return true;
+        int idx = node.Length;
+        while (true)
+        {
+            idx = node.LastIndexOf('.', idx - 1);
+            if (idx <= 0) return false;
+            if (perms.Contains(node.Substring(0, idx) + ".*")) return true;
+        }
     }
 
     /// <summary>
@@ -1313,6 +1423,9 @@ public static class BasisNetworkModeration
     /// </summary>
     public static bool PropGrabbingBlockedLocally =>
         GlobalPropGrabbingLocked && !LocalPlayerHasGlobalLockBypass();
+
+    public static bool GifsBlockedLocally =>
+        GlobalGifsLocked && !LocalPlayerHasGlobalLockBypass();
 
     private static void HandleGlobalLockState(NetDataReader reader)
     {
@@ -1478,7 +1591,16 @@ public static class BasisNetworkModeration
                 OnGlobalSafeDisplayNamesForcedChanged?.Invoke(GlobalSafeDisplayNamesForced);
             }
         }
-        BasisDebug.Log($"Global lock state updated - Avatars: {GlobalAvatarsLocked}, Props: {GlobalPropsLocked}, Worlds: {GlobalWorldsLocked}, Servers: {GlobalServersLocked}, ThirdPerson: {GlobalThirdPersonDisabled}, AdditionalAvatarData: {GlobalAdditionalAvatarDataLock}, CameraMask: {GlobalCameraDisallowMask}, Restriction: {GlobalUserRestrictionMode}, PlayspaceMover: {GlobalPlayspaceMoverLocked}, DirectConnect: {GlobalDirectConnectLocked}, Cilbox: {GlobalCilboxLocked}, Images: {GlobalImagesLocked}, EndEffectorIKDisabled: {GlobalEndEffectorIKDisabled}, TextChat: {GlobalTextChatLocked}, VoiceChat: {GlobalVoiceChatLocked}, MediaPlayer: {GlobalMediaPlayerLocked}, CameraCapture: {GlobalCameraCaptureLocked}, PropGrabbing: {GlobalPropGrabbingLocked}, SafeDisplayNames: {GlobalSafeDisplayNamesForced}", BasisDebug.LogTag.Networking);
+        if (reader.AvailableBytes >= 1)
+        {
+            bool nextGifsLocked = reader.GetBool();
+            if (nextGifsLocked != GlobalGifsLocked)
+            {
+                GlobalGifsLocked = nextGifsLocked;
+                OnGlobalGifsLockedChanged?.Invoke(GlobalGifsLocked);
+            }
+        }
+        BasisDebug.Log($"Global lock state updated - Avatars: {GlobalAvatarsLocked}, Props: {GlobalPropsLocked}, Worlds: {GlobalWorldsLocked}, Servers: {GlobalServersLocked}, ThirdPerson: {GlobalThirdPersonDisabled}, AdditionalAvatarData: {GlobalAdditionalAvatarDataLock}, CameraMask: {GlobalCameraDisallowMask}, Restriction: {GlobalUserRestrictionMode}, PlayspaceMover: {GlobalPlayspaceMoverLocked}, DirectConnect: {GlobalDirectConnectLocked}, Cilbox: {GlobalCilboxLocked}, Images: {GlobalImagesLocked}, EndEffectorIKDisabled: {GlobalEndEffectorIKDisabled}, TextChat: {GlobalTextChatLocked}, VoiceChat: {GlobalVoiceChatLocked}, MediaPlayer: {GlobalMediaPlayerLocked}, CameraCapture: {GlobalCameraCaptureLocked}, PropGrabbing: {GlobalPropGrabbingLocked}, SafeDisplayNames: {GlobalSafeDisplayNamesForced}, Gifs: {GlobalGifsLocked}", BasisDebug.LogTag.Networking);
         OnGlobalLockStateChanged?.Invoke(GlobalAvatarsLocked, GlobalPropsLocked, GlobalWorldsLocked, GlobalServersLocked);
     }
 
@@ -1510,6 +1632,7 @@ public static class BasisNetworkModeration
         if (GlobalCameraCaptureLocked) { GlobalCameraCaptureLocked = false; OnGlobalCameraCaptureLockedChanged?.Invoke(false); }
         if (GlobalPropGrabbingLocked) { GlobalPropGrabbingLocked = false; OnGlobalPropGrabbingLockedChanged?.Invoke(false); }
         if (GlobalSafeDisplayNamesForced) { GlobalSafeDisplayNamesForced = false; OnGlobalSafeDisplayNamesForcedChanged?.Invoke(false); }
+        if (GlobalGifsLocked) { GlobalGifsLocked = false; OnGlobalGifsLockedChanged?.Invoke(false); }
 
         if (GlobalEndEffectorIKDisabled)
         {
@@ -1690,6 +1813,11 @@ public static class BasisNetworkModeration
     public static void GlobalToggleSafeDisplayNames()
     {
         SendAdminRequest(AdminRequestMode.GlobalToggleSafeDisplayNames);
+    }
+
+    public static void GlobalToggleGifs()
+    {
+        SendAdminRequest(AdminRequestMode.GlobalToggleGifs);
     }
 
     /// <summary>

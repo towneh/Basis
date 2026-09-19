@@ -334,6 +334,27 @@ public class CrowdScaleTests
     }
 
     [Fact]
+    public void JoinFill_SkipsAPlayerWhoLeftAfterTheSnapshotWasTaken()
+    {
+        using Crowd crowd = new Crowd(3, 512);
+        FakeNetPeer departed = crowd.Peers[1];
+        BasisSavedState.RemovePlayer(departed.Id);
+
+        BasisServerHandleEvents.SendClientListToNewClient(crowd.Joiner, new LocalAvatarSyncMessage());
+
+        HashSet<ushort> spawned = new HashSet<ushort>();
+        foreach ((byte[] data, byte _, DeliveryMethod _) in crowd.Joiner.Sent)
+        {
+            List<ushort> decoded = DecodeAsTheClientWould(data, out string error);
+            Assert.Equal(string.Empty, error);
+            spawned.UnionWith(decoded);
+        }
+        Assert.DoesNotContain((ushort)departed.Id, spawned);
+        Assert.Contains((ushort)crowd.Peers[0].Id, spawned);
+        Assert.Contains((ushort)crowd.Peers[2].Id, spawned);
+    }
+
+    [Fact]
     public void JoinFill_WithAnOversizedSingleRecord_StillDeliversEveryone()
     {
         // One player whose avatar record is larger than a whole batch ends up alone in a batch that
@@ -730,6 +751,43 @@ public class CrowdScaleTests
         Assert.True(largestPayload <= ServerReadyBatchMessage.MaxInflatedBytes);
         Assert.Contains((ushort)0, spawned);
         Assert.Contains((ushort)(fullHouse - 1), spawned);
+    }
+
+    [Fact]
+    public void PreAuthDrops_DoNotCountTowardTheProtocolErrorDisconnect()
+    {
+        // A client that starts streaming a beat before its handshake completes (a slow crowd
+        // join with the handheld camera up, at frame rate) has every packet dropped. Those drops
+        // must not pre-load the post-auth protocol-error budget, or the first real slip after
+        // admission is the one that gets the peer kicked.
+        BasisServerMessageRegistry.EnsureInitialized();
+        using Crowd crowd = new Crowd(4, 64);
+
+        FakeNetPeer joiner = crowd.Peers[0];
+        joiner.Tag = new object();
+        byte[] pooled = new byte[32];
+        try
+        {
+            for (int index = 0; index < 600; index++)
+            {
+                BasisNetworkMessageProcessor.ProcessMessage(
+                    joiner, NetPacketReader.Create(pooled, 0, 1, () => { }),
+                    BasisNetworkCommons.CameraPIPPositionChannel, DeliveryMethod.Sequenced);
+            }
+            Assert.Equal(0, joiner.DisconnectCalls);
+
+            joiner.Tag = NetworkServer.AuthenticatedPeerTag;
+            pooled[0] = BasisNetworkCommons.EventType_PlayerTempBlock;
+            BasisNetworkMessageProcessor.ProcessMessage(
+                joiner, NetPacketReader.Create(pooled, 0, 1, () => { }),
+                BasisNetworkCommons.EventsChannel, DeliveryMethod.ReliableOrdered);
+
+            Assert.Equal(0, joiner.DisconnectCalls);
+        }
+        finally
+        {
+            BasisNetworkMessageProcessor.ClearPeerErrors(joiner.Id);
+        }
     }
 
     [Fact]

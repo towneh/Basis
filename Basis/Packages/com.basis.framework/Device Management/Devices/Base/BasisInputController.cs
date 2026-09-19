@@ -17,7 +17,7 @@ public abstract class BasisInputController : BasisInput
     /// <summary>
     /// Calibrated hand coordinates (final values after processing offsets/scales).
     /// </summary>
-    public BasisCalibratedCoords HandFinal = new BasisCalibratedCoords();
+    public BasisCalibratedCoords HandFinal = BasisCalibratedCoords.Identity;
 
     [Header("IK Offsets")]
     public Vector3 leftHandToIKRotationOffset = new Vector3(0,0,0);
@@ -82,7 +82,7 @@ public abstract class BasisInputController : BasisInput
     /// </summary>
     public void ControlOnlyAsHand(Vector3 Position,Quaternion Rotation)
     {
-        if (hasRoleAssigned && Control.HasTracked != BasisHasTracked.HasNoTracker)
+        if (hasRoleAssigned && !IgnoresPose && Control.HasTracked != BasisHasTracked.HasNoTracker)
         {
             Control.SetIncoming(Position, Rotation);
         }

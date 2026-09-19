@@ -149,6 +149,8 @@ namespace Basis.Network.Core
             t.Fields.Add(new FieldDoc("SetPort", " UDP port the server binds and listens on; clients connect to this. ushort, range 1-65535. "));
             t.Fields.Add(new FieldDoc("ServerName", " Display name shown as the row title in client server-list UIs (server-info query). string. "));
             t.Fields.Add(new FieldDoc("ServerMotd", " Short message-of-the-day returned alongside the server name. string; empty = none. "));
+            t.Fields.Add(new FieldDoc("CompanyName", " Company name a connecting client must report (Unity Player Settings > Company Name). Exact match; any other value is rejected before authentication. string. Default Basis Unity. "));
+            t.Fields.Add(new FieldDoc("ProductName", " Product name a connecting client must report (Unity Player Settings > Product Name). Exact match; any other value is rejected before authentication. string. Default Basis Unity. "));
             t.Fields.Add(new FieldDoc("EnableStatistics", " Collect transport statistics (per-peer/packet counters) and run the stats worker; surfaced via the health endpoint. true|false. "));
             t.Fields.Add(new FieldDoc("HasFileSupport", " Master switch for writing data to disk: server logs, on-disc moderation lists, auth-identity persistence, chat file support. Set false for an in-memory/ephemeral server. true|false. "));
             t.Fields.Add(new FieldDoc("HealthCheckHost", " Host/interface the HTTP health endpoint binds. string (hostname or IP). ", " ===== Health-check HTTP endpoint ===== "));
@@ -226,6 +228,7 @@ namespace Basis.Network.Core
             t.Fields.Add(new FieldDoc("CameraCaptureLocked", " Stop non-bypass clients from taking photos with the handheld camera. Enforced client-side (capture is entirely local). Separate from CameraMetadataDisallowMask, which only strips metadata. true|false; default false. "));
             t.Fields.Add(new FieldDoc("SafeDisplayNamesForced", " Render other players' display names with rich-text markup stripped and TMP rich text off. Enforced client-side. Stops name markup being used to draw over the screen. true|false; default false. "));
             t.Fields.Add(new FieldDoc("PropGrabbingLocked", " Stop non-bypass clients from picking up or grabbing props. Enforced client-side (grabbing is local interaction logic). Separate from PropsLocked, which blocks prop loading instead. true|false; default false. "));
+            t.Fields.Add(new FieldDoc("GifsLocked", " Stop GIFs animating for players without basis.moderation.globallock: they see each GIF's first frame, the server drops GIF animation data they send, and it stops replaying cached GIF animations to them. Still images are unaffected, and animation resumes when the lock is lifted. true|false; default false. "));
             _docs[typeof(global::Configuration)] = t;
         }
 
