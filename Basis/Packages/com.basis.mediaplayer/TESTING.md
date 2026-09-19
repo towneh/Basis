@@ -105,10 +105,10 @@ and both admin rows, are about what the panel shows.
 | --- | --- | --- |
 | Load | One client sets a URL from the panel; the other loads it | The second client plays the same source without being touched |
 | Transport | Play, pause and stop from the owner | Each reaches the follower. Stop closes it there too |
-| Seek | Owner scrubs the timeline | The follower lands near the same place, then settles |
+| Seek | Owner scrubs the timeline, once playing and once paused | The follower lands near the same place, then settles. Scrubbed while paused, both clients show the new frame and stay paused, and Play then resumes both from it |
 | Convergence | Watch the follower for the half minute after a seek | It **slews** onto the owner's position rather than jumping. Repeated visible jumps mean the target is being fed but not converged, which is the engine ladder failing, not the protocol |
 | Late join | Second client arrives while the first is playing | It loads, and lands at the owner's position rather than at zero |
-| Late join, owner paused | Owner pauses mid-video, then a second client leaves and rejoins. Run it with a direct `.mp4` and with a page URL, and once more with the owner pausing while the rejoining client is still loading | It lands paused on the owner's frame and seek bar position, not playing and not on the opening frame |
+| Late join, owner paused | Owner pauses mid-video, then a second client leaves and rejoins. Run it with a direct `.mp4` and with a page URL, and once more with the owner pausing while the rejoining client is still loading | It lands paused on the owner's frame and seek bar position, not playing and not on the opening frame, and no sound is heard while it lands. The panel reads Paused, and the owner pressing Play starts it from there. The mid-load variant runs the other way too: owner paused when the client starts loading, then presses Play before it is up, and the client comes up playing at the owner's position |
 | Ownership | Second client takes control, then drives | The first becomes a follower and stops beating its position. Neither fights the other |
 | Owner leaves | Owner disconnects mid-playback | The follower keeps playing free-running rather than freezing on the last target |
 | Admin only | Set `AdminOnly` with the second client holding no permission | It cannot take control, and the panel gives it no playback tab |
@@ -153,7 +153,7 @@ anything.
 | --- | --- | --- |
 | Visibility | A scene with no players, then one | The menu entry is absent, then appears |
 | Selection | Switch between players | Status, URL and the transport controls follow the selection |
-| Scrubber | Drag the timeline handle | It stays where you put it while dragging, issues one seek once the handle comes to rest, and does not bounce back to the old position on a short seek |
+| Scrubber | Drag the timeline handle | It stays where you put it while dragging, issues one seek once the handle comes to rest, and does not bounce back to the old position on a short seek. Dragged while paused, the picture changes to the new position and playback stays paused |
 | Timeline-less media | A live lane | The scrubber hides rather than showing a meaningless bar |
 | Caption rows | Toggle captions, then switch player | The setting is the viewer's: it applies to every player, and switching selection does not move the rows |
 | Subtitles | A source offering sidecar tracks | The language row appears only while captions are on, and reverting to the first row restores the in-band feed |

@@ -38,12 +38,22 @@ matches `developer` there.
 | `AddDomain(uri)` trusted-URL scoping | Already on the Rust side, identical. Auto-merges. |
 | `LoadApprovedUrl(url)` | Not needed. On the Rust side, URL approval lives in the shims, so `OpenUserUrl` is already the approved-load entry. |
 
-## The one deferred feature
+## Behaviour `developer` added inside the networking component
 
-`developer`'s **`ResyncLocal` asks the room for the current state first** and only reloads blind
-if no one answers within a timeout (`forcedResyncPending`, `resyncAnswerDeadline`, a
-`TickPendingResync` fallback). The Rust side has a simpler local resync that re-opens blind.
-This is the only media-player feature intent not yet on the Rust side. It is deferred, not
-dropped: to close it, add the request-then-timeout path to the port's existing local resync
-button, sending a state request on press and falling back to the current blind re-open from a
-tick if nobody answers. It needs the two-client rig to verify.
+Two of `developer`'s changes are behaviour rather than API, both in
+`BasisMediaPlayerNetworking.cs`. The Rust side has both, so keep the port's file and drop
+`developer`'s text.
+
+- **`ResyncLocal` asks the room for the current state first** and only reloads blind if no one
+  answers within a timeout (`forcedResyncPending`, `resyncAnswerDeadline`, a `TickPendingResync`
+  fallback). The port's local resync does the same.
+- **Paused rejoin**: a client joining a room whose owner is paused lands paused on the owner's
+  frame. The port gets there in a different shape. Play, pause and seek arriving while a load is
+  in flight are recorded on the stashed owner state (`RestampPendingRemoteState`) and applied
+  when the load lands. There is no counterpart to `ArmPauseWhenSeekLands` /
+  `TickPauseWhenSeekLands`, and none is needed: the Rust engine holds a pause across a seek
+  itself, so the component seeks and pauses on the same tick.
+
+Nothing `developer` has added to the media player is outstanding on the Rust side. Both of the
+above need the two-client rig to verify; the rows are in the package `TESTING.md` under Shared
+playback.
