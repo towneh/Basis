@@ -887,8 +887,40 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
     }
 
+    // While a load is in flight the session on hand is the outgoing or still-opening one,
+    // and the stash overwrites whatever it is told once the load lands. A transport command
+    // arriving in that window is recorded on the stash instead. A negative position keeps
+    // the stashed one, aged up to now when the owner was playing.
+    private bool RestampPendingRemoteState(SyncedPlaybackState state, long positionTicks)
+    {
+        if (!pendingRemoteApply)
+        {
+            return false;
+        }
+
+        float now = Time.realtimeSinceStartup;
+        if (positionTicks < 0)
+        {
+            positionTicks = pendingRemotePositionTicks;
+            if (pendingRemoteState == SyncedPlaybackState.Playing)
+            {
+                positionTicks += (long)((now - pendingRemoteStashedAt) * TimeSpan.TicksPerSecond);
+            }
+        }
+
+        pendingRemoteState = state;
+        pendingRemotePositionTicks = positionTicks;
+        pendingRemoteStashedAt = now;
+        return true;
+    }
+
     private void ApplyRemotePlay()
     {
+        if (RestampPendingRemoteState(SyncedPlaybackState.Playing, -1))
+        {
+            return;
+        }
+
         applyingRemoteCommand = true;
         try
         {
@@ -902,6 +934,11 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
     private void ApplyRemotePause()
     {
+        if (RestampPendingRemoteState(SyncedPlaybackState.Paused, -1))
+        {
+            return;
+        }
+
         applyingRemoteCommand = true;
         try
         {
@@ -932,6 +969,11 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private void ApplyRemoteSeek(long ticks)
     {
         if (ticks < 0)
+        {
+            return;
+        }
+
+        if (RestampPendingRemoteState(pendingRemoteState, ticks))
         {
             return;
         }
