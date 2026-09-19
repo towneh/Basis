@@ -1213,9 +1213,11 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         switch (mediaPlayer.State)
         {
             case BmState.Opening:
-            case BmState.Buffering:
             case BmState.Playing:
                 return;
+            // A buffering session may be landing a seek it will pause on; Play withdraws
+            // that pause and is otherwise a no-op there.
+            case BmState.Buffering:
             case BmState.Paused:
                 mediaPlayer.Play();
                 return;
