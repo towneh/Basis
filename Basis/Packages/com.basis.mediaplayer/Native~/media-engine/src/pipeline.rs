@@ -41,6 +41,125 @@ const DECODE_TICK: Duration = Duration::from_millis(4);
 /// A consumer pull within this window keeps audio as the clock master.
 const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 
+/// `seek_floor_us` when the generation presents from wherever it starts.
+pub(crate) const NO_FLOOR: i64 = i64::MIN;
+/// The most a seek will decode forward from its keyframe to reach the
+/// target exactly. Everything in that span is decoded before anything
+/// shows, so the bound is a bound on how long a seek can sit in Buffering;
+/// past it the seek presents from the keyframe and says so.
+const ACCURATE_SEEK_MAX: MediaTime = MediaTime::from_secs(12);
+/// Audio kept ahead of the floor so the decoder's overlap state is warm by
+/// the first sample that is heard. The ring trims it off again.
+const SEEK_AUDIO_LEAD_IN: MediaTime = MediaTime::from_millis(100);
+/// How long the demux thread waits on a full decode channel while it
+/// feeds the span ahead of the floor.
+const SEEK_FEED_WAIT: Duration = Duration::from_millis(2);
+
+/// Where a generation starts presenting when that is not where its seek
+/// landed: the target, if the demuxer stopped short of it by no more than
+/// [`ACCURATE_SEEK_MAX`].
+fn presentation_floor(target: MediaTime, landed: MediaTime) -> Option<MediaTime> {
+    (landed < target && target - landed <= ACCURATE_SEEK_MAX).then_some(target)
+}
+
+/// The frames a seek decodes to build its target's picture. They come out
+/// of the decoder like any other and none of them is shown. Output is in
+/// display order, so the first frame to reach the floor ends the span.
+#[derive(Default)]
+struct UnseenSpan {
+    before_us: Option<i64>,
+    dropped: u32,
+    /// The last frame dropped, kept in case the stream ends inside the
+    /// span: a target past the final picture has nothing at or after it
+    /// to show, and that frame is then the one to land on.
+    held: Option<VideoFrame>,
+}
+
+/// What [`UnseenSpan::admit`] makes of one decoded frame.
+#[derive(Debug, PartialEq, Eq)]
+enum Admit {
+    /// Ahead of the floor: decoded, never shown.
+    Unseen,
+    /// The first frame at or past the floor, and how many were dropped to
+    /// get to it.
+    Reached { dropped: u32 },
+    /// No span is open.
+    Show,
+}
+
+impl UnseenSpan {
+    /// Open the span a Flush brings with it, or none.
+    fn arm(&mut self, floor_us: i64) {
+        self.before_us = (floor_us != NO_FLOOR).then_some(floor_us);
+        self.dropped = 0;
+        self.held = None;
+    }
+
+    fn admit(&mut self, pts_us: i64) -> Admit {
+        match self.before_us {
+            None => Admit::Show,
+            Some(at) if pts_us < at => {
+                self.dropped += 1;
+                Admit::Unseen
+            }
+            Some(_) => {
+                self.before_us = None;
+                Admit::Reached {
+                    dropped: self.dropped,
+                }
+            }
+        }
+    }
+
+    /// The frame, unless it belongs to the span. Every site that takes a
+    /// frame from the decoder goes through here, the end-of-stream drain
+    /// included: a seek that lands close to the end reaches Eos with
+    /// frames ahead of the floor still inside the decoder.
+    fn filter(&mut self, px: &PipelineShared, frame: VideoFrame) -> Option<VideoFrame> {
+        match self.admit(frame.pts_us()) {
+            Admit::Unseen => {
+                self.held = Some(frame);
+                None
+            }
+            Admit::Show => Some(frame),
+            Admit::Reached { dropped } => {
+                self.held = None;
+                px.diag.event(
+                    px.wall.now(),
+                    EventCode::Seek,
+                    Stage::Decode,
+                    format!(
+                        "reached the target at {}us after {dropped} frames decoded unseen",
+                        frame.pts_us()
+                    ),
+                );
+                Some(frame)
+            }
+        }
+    }
+
+    /// The decoder has drained dry. A span still open will never be
+    /// reached: the target lies past the last picture, which happens at
+    /// the very end of a clip and wherever audio outlasts video. Nothing
+    /// would reach the pool, the parked clock would never start and the
+    /// session would sit in Buffering, so the span closes on the last
+    /// frame it dropped.
+    fn give_up(&mut self, px: &PipelineShared) -> Option<VideoFrame> {
+        let at = self.before_us.take()?;
+        let frame = self.held.take()?;
+        px.diag.event(
+            px.wall.now(),
+            EventCode::Seek,
+            Stage::Decode,
+            format!(
+                "the stream ended ahead of the target at {at}us; landing on its last frame at {}us",
+                frame.pts_us()
+            ),
+        );
+        Some(frame)
+    }
+}
+
 /// Presented video pts minus the audio playhead, or the unknown sentinel.
 ///
 /// Both terms have to belong to the same generation for the difference to mean
@@ -231,6 +350,25 @@ pub struct PipelineShared {
     /// completes only at zero: freezing the wall under a seek in flight
     /// would land it against a stopped release schedule.
     pub seeks_pending: std::sync::atomic::AtomicU32,
+    /// Where the current generation starts presenting, or [`NO_FLOOR`]. A
+    /// demuxer lands a seek on the keyframe at or before the target; when
+    /// that is early, the target is the floor, and everything decoded
+    /// ahead of it is there to build the target's picture and is never
+    /// shown or heard. Written by the demux thread after it advances the
+    /// generation and before the Flush goes out, so a decode thread only
+    /// ever reads it for the generation it has adopted.
+    pub seek_floor_us: std::sync::atomic::AtomicI64,
+    /// Access units the demux thread has sent straight to the video
+    /// decoder for the span ahead of the floor, and how many of this
+    /// generation's the video thread has taken off its channel. The
+    /// channel holds a whole span at once, so the demux thread is done
+    /// feeding long before the decoder is done decoding, and the Bank's
+    /// release schedule starts at its first push: pushed then, it would
+    /// release audio for as long as the decode takes, into a ring that
+    /// holds two seconds and has no consumer until the seek lands. The
+    /// first push waits for the two to meet instead.
+    pub seek_fed: std::sync::atomic::AtomicU64,
+    pub seek_taken: std::sync::atomic::AtomicU64,
     /// Caption cues scanned from the video AUs' SEI on the demux thread,
     /// surfaced on arrival with their due PTS (§6.2/§6.12 — captions
     /// bypass the Bank's release schedule so the consumer gets the full
@@ -827,6 +965,19 @@ pub fn run_demux_leg(
     // and is scanned here for the same reason.
     let mut user_data_scanner = media_bitstream::UserDataScanner::new();
     let mut user_data_track: Option<(media_demux::TrackId, bool)> = None;
+    // Where the generation starts presenting when a seek landed ahead of
+    // its target, and the track whose access units have to reach the
+    // decoder to get there.
+    let mut floor: Option<MediaTime> = None;
+    let mut video_track: Option<media_demux::TrackId> = None;
+    // What the caption display holds once the span ahead of the floor has
+    // been decoded: the text of the last cue in it, empty for a clear.
+    let mut caption_at_floor: Option<String> = None;
+    // Set once an access unit at or past the floor has been scanned. From
+    // there cues go out as they are decoded, in decode order, as they do
+    // on any timeline: a reordered frame that displays just ahead of the
+    // floor still follows the one that reached it.
+    let mut captions_live = true;
     // The floor on how much media the Bank will hold before it refuses a
     // push. Read once: a session's Bank config is settled at open.
     let decoder_cushion_us = px
@@ -853,6 +1004,10 @@ pub fn run_demux_leg(
                 && followed_seek != Some(generation)
             {
                 followed_seek = Some(generation);
+                // The pair shares one floor: the video leg set it before it
+                // published the seek this leg is following.
+                let shared_floor = px.seek_floor_us.load(Ordering::Relaxed);
+                floor = (shared_floor != NO_FLOOR).then(|| MediaTime::from_micros(shared_floor));
 
                 match demuxer.seek(landed, generation) {
                     Ok(_) => {}
@@ -883,20 +1038,35 @@ pub fn run_demux_leg(
             let generation = px.bank.bank.lock().expect("bank lock").generation().next();
             match demuxer.seek(target, generation) {
                 Ok(landed) => {
+                    // A demuxer lands on the keyframe at or before the
+                    // target. Within the bound the generation starts at the
+                    // target itself and the span before it is decoded
+                    // unseen; past it, and wherever the demuxer landed at or
+                    // after the target, it starts where the demuxer stopped.
+                    floor = presentation_floor(target, landed);
+                    caption_at_floor = None;
+                    captions_live = floor.is_none();
+                    let start = floor.unwrap_or(landed);
                     px.bank
                         .bank
                         .lock()
                         .expect("bank lock")
                         .advance_generation(generation);
                     px.shared.generation.store(generation.0, Ordering::Relaxed);
+                    px.seek_floor_us.store(
+                        floor.map_or(NO_FLOOR, MediaTime::as_micros),
+                        Ordering::Relaxed,
+                    );
+                    px.seek_fed.store(0, Ordering::Relaxed);
+                    px.seek_taken.store(0, Ordering::Relaxed);
                     {
-                        // Snap to the landed position and park the clock;
-                        // the video thread restarts it when the first
+                        // Snap to where the generation starts and park the
+                        // clock; the video thread restarts it when the first
                         // post-seek frame is ready, so decode latency never
                         // reads as lateness.
                         let wall = px.wall.now();
                         let mut clock = px.clock.lock().expect("clock lock");
-                        clock.advance_generation(wall, generation, landed);
+                        clock.advance_generation(wall, generation, start);
                         clock.set_playing(wall, false);
                         px.clock_playing.store(false, Ordering::Relaxed);
                         px.present.mirror_clock(wall, MediaTime::ZERO, false);
@@ -911,24 +1081,28 @@ pub fn run_demux_leg(
                         px.wall.now(),
                         EventCode::Seek,
                         Stage::Demux,
-                        format!("to {target}, landed {landed}"),
+                        if floor.is_some() {
+                            format!("to {target}, landed {landed}, presenting from {start}")
+                        } else {
+                            format!("to {target}, landed {landed}")
+                        },
                     );
                     px.shared
                         .position_us
-                        .store(landed.as_micros(), Ordering::Relaxed);
+                        .store(start.as_micros(), Ordering::Relaxed);
                     pending = None;
                     eos_reached = false;
                     carries_eos = false;
                     held_eos = None;
                     // Captions from the old position must not survive the
                     // jump: reset the decoder, drop queued cues, and clear
-                    // the display at the landed position.
+                    // the display where the generation starts.
                     caption_scanner.reset();
                     px.captions.lock().expect("captions lock").clear();
                     user_data_scanner.reset();
                     px.user_data.lock().expect("user data lock").clear();
                     px.push_caption(media_bitstream::CaptionCue {
-                        pts_us: landed.as_micros(),
+                        pts_us: start.as_micros(),
                         text: String::new(),
                     });
                     // Hand the landing to the audio leg, and let both legs
@@ -937,7 +1111,7 @@ pub fn run_demux_leg(
                         split.clear_eos();
                         split.rebase();
                         split.reset_origin(leg);
-                        *split.seek.lock().expect("split seek lock") = Some((generation, landed));
+                        *split.seek.lock().expect("split seek lock") = Some((generation, start));
                     }
                     px.bank.changed.notify_all();
                 }
@@ -1004,6 +1178,7 @@ pub fn run_demux_leg(
                     match &event {
                         _ if leg == Leg::Audio => {}
                         StreamEvent::Format(track, Format::Video { codec, .. }) => {
+                            video_track = Some(*track);
                             caption_track =
                                 (*codec == media_demux::VideoCodec::H264).then_some(*track);
                             user_data_track = match codec {
@@ -1012,12 +1187,48 @@ pub fn run_demux_leg(
                                 _ => None,
                             };
                         }
-                        StreamEvent::Au(au) => {
+                        // Nothing ahead of the floor is shown, so its cues
+                        // and user data are not the new timeline's. The
+                        // caption decoder is stateful though: a caption that
+                        // went up ahead of the floor and is still up at it
+                        // is only known by decoding that span. Its cues are
+                        // held back, and the last of them is what the
+                        // display holds when the floor is reached. User
+                        // data has no state to rebuild and is skipped whole.
+                        StreamEvent::Au(au)
+                            if !captions_live && floor.is_some_and(|floor| au.pts < floor) =>
+                        {
                             if Some(au.track) == caption_track
                                 && let Some(cue) =
                                     caption_scanner.scan_au(&au.data, false, au.pts.as_micros())
                             {
-                                px.push_caption(cue);
+                                caption_at_floor = Some(cue.text);
+                            }
+                        }
+                        StreamEvent::Au(au) => {
+                            if Some(au.track) == caption_track {
+                                // The floor is reached here, ahead of this
+                                // access unit's own scan: what was already
+                                // up goes out first, or a cue this unit
+                                // carries would be overwritten by the older
+                                // text it replaces. A clear needs nothing,
+                                // the seek cleared the display at the floor.
+                                if !captions_live {
+                                    captions_live = true;
+                                    if let (Some(at), Some(text)) = (floor, caption_at_floor.take())
+                                        && !text.is_empty()
+                                    {
+                                        px.push_caption(media_bitstream::CaptionCue {
+                                            pts_us: at.as_micros(),
+                                            text,
+                                        });
+                                    }
+                                }
+                                if let Some(cue) =
+                                    caption_scanner.scan_au(&au.data, false, au.pts.as_micros())
+                                {
+                                    px.push_caption(cue);
+                                }
                             }
                             if let Some((track, hevc)) = user_data_track
                                 && au.track == track
@@ -1097,6 +1308,59 @@ pub fn run_demux_leg(
             }
         }
         let is_eos = matches!(event, StreamEvent::Eos(_));
+
+        // Media ahead of the floor never enters the Bank, which would pace
+        // it out at 1x. Video goes straight to the decoder, on the channel
+        // and from the thread that carried the Flush, so it decodes as fast
+        // as the decoder takes it and the Bank's first event of the
+        // generation is the first one at the floor. Decode order decides:
+        // a frame that displays after the floor can still decode before it.
+        // Audio has no such dependency and is dropped, bar a short lead-in.
+        // The first access unit to reach the floor ends it: from there the
+        // generation is an ordinary one. Nothing is pushed until the video
+        // thread has taken what was fed, so the Bank starts its schedule
+        // with the decoder at the floor rather than a span behind it.
+        if let (Some(at), StreamEvent::Au(au)) = (floor, &event) {
+            let ahead = if Some(au.track) == video_track {
+                au.dts < at
+            } else {
+                au.pts + SEEK_AUDIO_LEAD_IN < at
+            };
+            if !ahead
+                && px.seek_taken.load(Ordering::Relaxed) < px.seek_fed.load(Ordering::Relaxed)
+                && px.state() != State::Error as u32
+            {
+                pending = Some(event);
+                std::thread::park_timeout(SEEK_FEED_WAIT);
+                continue;
+            }
+            if Some(au.track) == video_track {
+                if au.dts < at {
+                    let StreamEvent::Au(au) = event else {
+                        unreachable!("matched an access unit above")
+                    };
+                    match video_tx.try_send(MediaMsg::Au(au)) {
+                        Ok(()) => {
+                            px.seek_fed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+                        Err(std::sync::mpsc::TrySendError::Full(MediaMsg::Au(au))) => {
+                            pending = Some(StreamEvent::Au(au));
+                            std::thread::park_timeout(SEEK_FEED_WAIT);
+                        }
+                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                            unreachable!("an access unit was sent")
+                        }
+                    }
+                    continue;
+                }
+                floor = None;
+            } else if au.pts + SEEK_AUDIO_LEAD_IN < at {
+                continue;
+            } else if video_track.is_none() {
+                floor = None;
+            }
+        }
 
         // On a split pair the session has ended only once both sources
         // have. The legs are cuts of the same content but rarely the exact
@@ -1528,6 +1792,8 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     };
     let mut draining = false;
     let mut pending_frame: Option<VideoFrame> = None;
+    // Opened by a Flush whose seek landed ahead of its target.
+    let mut unseen = UnseenSpan::default();
     let mut pending_au: Option<Au> = None;
     let mut eos_after_drain = false;
     let mut current_coded: Option<(media_demux::VideoCodec, u32, u32)> = None;
@@ -1566,15 +1832,17 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         if !flush_pending && pending_frame.is_none() && decoder.is_some() {
             match decoder.as_mut().expect("decoder checked").try_output() {
                 Ok(Some(frame)) => {
-                    px.shared.frames_decoded.fetch_add(1, Ordering::Relaxed);
-                    match px.pool.try_publish(frame, generation.0) {
-                        Ok(()) => {
-                            px.diag
-                                .stage(Stage::Decode)
-                                .out_count
-                                .fetch_add(1, Ordering::Relaxed);
+                    if let Some(frame) = unseen.filter(px, frame) {
+                        px.shared.frames_decoded.fetch_add(1, Ordering::Relaxed);
+                        match px.pool.try_publish(frame, generation.0) {
+                            Ok(()) => {
+                                px.diag
+                                    .stage(Stage::Decode)
+                                    .out_count
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(frame) => pending_frame = Some(frame),
                         }
-                        Err(frame) => pending_frame = Some(frame),
                     }
                 }
                 Ok(None) => {}
@@ -1803,6 +2071,10 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 if au.generation != generation || flush_pending {
                     continue;
                 }
+                // Counted on arrival, decoder or none: a message is only
+                // taken once the one before it has been accepted, and a
+                // track nothing can decode must not hold a seek open.
+                px.seek_taken.fetch_add(1, Ordering::Relaxed);
                 px.diag
                     .stage(Stage::Decode)
                     .in_count
@@ -1817,6 +2089,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 eos_after_drain = false;
                 pending_au = None;
                 pending_frame = None;
+                unseen.arm(px.seek_floor_us.load(Ordering::Relaxed));
                 if let Some(active) = decoder.as_mut()
                     && let Err(e) = active.reset()
                 {
@@ -1851,13 +2124,19 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         if !flush_pending && draining && pending_frame.is_none() && decoder.is_some() {
             match decoder.as_mut().expect("decoder checked").try_output() {
                 Ok(Some(frame)) => {
-                    px.shared.frames_decoded.fetch_add(1, Ordering::Relaxed);
-                    pending_frame = Some(frame);
+                    if let Some(frame) = unseen.filter(px, frame) {
+                        px.shared.frames_decoded.fetch_add(1, Ordering::Relaxed);
+                        pending_frame = Some(frame);
+                    }
                 }
                 Ok(None) => {
                     if decoder.as_ref().expect("decoder checked").drain_dry() {
                         draining = false;
                         eos_after_drain = true;
+                        if let Some(frame) = unseen.give_up(px) {
+                            px.shared.frames_decoded.fetch_add(1, Ordering::Relaxed);
+                            pending_frame = Some(frame);
+                        }
                     }
                 }
                 Err(e) => {
@@ -1908,6 +2187,10 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         offset: usize,
     }
     let mut pending: Option<Pending> = None;
+    // Where this generation's audio starts: zero, which is what removes
+    // encoder priming, or the floor of a seek that landed ahead of its
+    // target, which removes the lead-in kept to warm the decoder.
+    let mut origin_us = 0i64;
     let mut generation = {
         let bank = px.bank.bank.lock().expect("bank lock");
         bank.generation()
@@ -1963,9 +2246,11 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             let remaining = &chunk.data[chunk.offset..];
             if !remaining.is_empty() {
                 let frames_left = remaining.len() / channels;
-                // Drop what still precedes the media-time origin: encoder
-                // priming, which carries a negative pts.
-                let drop_frames = frames_before_origin(chunk.pts_us, frames_left, rate);
+                // Drop what still precedes the origin: encoder priming,
+                // which carries a negative pts, and after a seek the audio
+                // ahead of where the generation starts.
+                let drop_frames =
+                    frames_before_origin(chunk.pts_us.saturating_sub(origin_us), frames_left, rate);
                 if drop_frames > 0 {
                     chunk.offset += drop_frames * channels;
                     chunk.pts_us += drop_frames as i64 * 1_000_000 / i64::from(rate);
@@ -2348,6 +2633,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             }
             Ok(MediaMsg::Flush { generation: new }) => {
                 generation = new;
+                origin_us = px.seek_floor_us.load(Ordering::Relaxed).max(0);
                 pending = None;
                 pending_au = None;
                 park_since = None;
@@ -2541,6 +2827,57 @@ mod user_data_ring_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every frame the decoder hands back meets the same gate, whichever
+    /// site took it, so the span is judged here rather than at a site.
+    #[test]
+    fn the_unseen_span_ends_at_the_first_frame_to_reach_the_floor() {
+        let mut span = UnseenSpan::default();
+        assert_eq!(span.admit(0), Admit::Show, "no span is open by default");
+
+        span.arm(3_200_000);
+        assert_eq!(span.admit(2_000_000), Admit::Unseen);
+        assert_eq!(span.admit(3_166_666), Admit::Unseen);
+        assert_eq!(span.admit(3_200_000), Admit::Reached { dropped: 2 });
+        assert_eq!(
+            span.admit(3_100_000),
+            Admit::Show,
+            "once reached the span is over, whatever follows"
+        );
+
+        span.arm(5_000_000);
+        assert_eq!(span.admit(4_000_000), Admit::Unseen);
+        span.arm(NO_FLOOR);
+        assert_eq!(
+            span.admit(4_000_000),
+            Admit::Show,
+            "a seek that takes no floor closes the span the last one left open"
+        );
+    }
+
+    /// A seek decodes forward to its target only while that is cheap
+    /// enough to do unseen.
+    #[test]
+    fn the_floor_is_the_target_only_within_the_bound() {
+        let at = MediaTime::from_millis;
+        assert_eq!(presentation_floor(at(3_200), at(2_000)), Some(at(3_200)));
+        assert_eq!(
+            presentation_floor(at(14_000), at(2_000)),
+            Some(at(14_000)),
+            "the bound itself is inside it"
+        );
+        assert_eq!(
+            presentation_floor(at(14_001), at(2_000)),
+            None,
+            "past the bound the seek presents from its keyframe"
+        );
+        assert_eq!(presentation_floor(at(4_000), at(4_000)), None);
+        assert_eq!(
+            presentation_floor(at(4_000), at(4_500)),
+            None,
+            "a demuxer that lands late has nothing ahead of the target to skip"
+        );
+    }
 
     /// The never-pulled sentinel is `i64::MIN`, and `MediaTime`'s `Sub` is a
     /// plain subtraction, so reaching it with any positive wall clock panics

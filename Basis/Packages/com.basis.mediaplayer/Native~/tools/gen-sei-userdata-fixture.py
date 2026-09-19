@@ -7,6 +7,10 @@ authored: a 6 s H.264 (no B-frames, GOP 60) + AAC sine mux with one
 `user_data_unregistered` message injected into every access unit. The
 message layout below is the ground truth the engine tests assert against.
 
+The same streams are then remuxed, untouched, into an MP4 beside it. The
+TS demuxer refuses seeks, so the rows that need a seekable source with
+user data in it (keyframes at 0, 2 and 4 s) read that one.
+
 Needs ffmpeg + ffprobe on PATH. Run from Native~ (the fixture path is
 relative to it):
 
@@ -28,6 +32,7 @@ import sys
 import tempfile
 
 FIXTURE = os.path.join("fixtures", "h264-sei-userdata-640x360-30fps.ts")
+FIXTURE_MP4 = os.path.join("fixtures", "h264-sei-userdata-640x360-30fps.mp4")
 FIXTURE_UUID = bytes.fromhex("7a1c3e5f9b2d4c6e8f0a1b2c3d4e5f60")
 FRAMES = 180
 FILLER = 512
@@ -148,6 +153,11 @@ def main():
     if probe != str(FRAMES):
         sys.exit(f"ffprobe counts {probe} video packets, expected {FRAMES}")
     print(f"wrote {FIXTURE}: {FRAMES} video AUs, one message each")
+    run([
+        "ffmpeg", "-y", "-i", FIXTURE, "-c", "copy",
+        "-movflags", "+faststart", FIXTURE_MP4,
+    ])
+    print(f"wrote {FIXTURE_MP4}: the same streams, seekable")
 
 
 if __name__ == "__main__":

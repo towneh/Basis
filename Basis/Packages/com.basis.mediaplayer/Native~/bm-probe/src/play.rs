@@ -19,6 +19,7 @@ pub struct Options {
     pub allow_local: bool,
     pub live: bool,
     pub audio_track: usize,
+    pub seek_to_ms: Option<u64>,
     pub audio_url: Option<String>,
 }
 
@@ -83,6 +84,8 @@ pub fn run(options: &Options) -> ExitCode {
     let mut next_sample = Instant::now();
     let interval = Duration::from_millis(options.interval_ms.max(10));
     let end = Instant::now() + Duration::from_secs(options.duration);
+    let mut seek_to = options.seek_to_ms;
+    let mut playing_since: Option<Instant> = None;
 
     loop {
         let now = Instant::now();
@@ -92,6 +95,18 @@ pub fn run(options: &Options) -> ExitCode {
         let state = shared.state.load(Ordering::Relaxed);
         if state == State::Error as u32 || state == State::Ended as u32 {
             break;
+        }
+        if state == State::Playing as u32 {
+            let since = *playing_since.get_or_insert(now);
+            if now.duration_since(since) >= Duration::from_secs(2)
+                && let Some(ms) = seek_to.take()
+            {
+                session.seek(media_clock::MediaTime::from_millis(ms as i64));
+            }
+        } else {
+            // Two seconds of playback, not two seconds since it first
+            // played: a stall starts the count again.
+            playing_since = None;
         }
 
         if now >= next_sample {
@@ -208,10 +223,11 @@ pub fn run(options: &Options) -> ExitCode {
         snapshot[media_diag::Stage::Pool as usize].drops,
     );
     println!(
-        "audio:     {} frames pulled, {} silence, {} trimmed @ {} Hz x {}",
+        "audio:     {} frames pulled, {} silence, {} trimmed, {} ring drops @ {} Hz x {}",
         audio_frames,
         budget_frames.saturating_sub(audio_frames),
         diag.audio_trimmed(),
+        snapshot[media_diag::Stage::AudioRing as usize].drops,
         shared.audio_rate.load(Ordering::Relaxed),
         shared.audio_channels.load(Ordering::Relaxed),
     );

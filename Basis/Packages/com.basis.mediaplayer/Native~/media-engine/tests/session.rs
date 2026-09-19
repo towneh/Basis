@@ -536,6 +536,92 @@ fn a_seek_while_paused_stays_paused() {
     session.close();
 }
 
+/// The fixture's keyframes are at 0, 2 and 4 s, so a seek to 3.2 s lands
+/// the demuxer on 2 s. The session has to present the target's frame, not
+/// the keyframe's: paused, nothing would ever move it off the wrong one.
+#[test]
+fn a_paused_seek_between_keyframes_shows_the_target() {
+    const TARGET_US: i64 = 3_200_000;
+    // One frame of the 30 fps fixture, and a little for rounding.
+    const FRAME_US: i64 = 34_000;
+    let mut session = open_playing();
+    session.pause();
+    let shared = session.shared().clone();
+    let diag = session.diag().clone();
+    let presented_before = diag
+        .stage(media_diag::Stage::Present)
+        .out_count
+        .load(Ordering::Relaxed);
+    session.seek(MediaTime::from_micros(TARGET_US));
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.state.load(Ordering::Relaxed) == State::Paused as u32
+                && diag
+                    .stage(media_diag::Stage::Present)
+                    .out_count
+                    .load(Ordering::Relaxed)
+                    > presented_before
+        }),
+        "the seek did not settle paused on a new frame (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    let shown = shared.position_us.load(Ordering::Relaxed);
+    assert!(
+        (TARGET_US..=TARGET_US + FRAME_US).contains(&shown),
+        "paused on {shown}, not on the frame at {TARGET_US}"
+    );
+    session.close();
+}
+
+/// Playing, the same seek never reports or shows anything from the span
+/// between the keyframe and the target: the position goes to the target
+/// when the seek runs and moves on from there.
+#[test]
+fn a_seek_between_keyframes_plays_on_from_the_target() {
+    const TARGET_US: i64 = 3_200_000;
+    let mut session = open_playing();
+    let shared = session.shared().clone();
+    session.seek(MediaTime::from_micros(TARGET_US));
+    // The session was a fraction of a second in; the seek moves the
+    // position to at least the keyframe at 2 s when it runs.
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.position_us.load(Ordering::Relaxed) >= 1_900_000
+        }),
+        "the seek never ran"
+    );
+    let mut earliest = i64::MAX;
+    let resumed = wait_for(Duration::from_secs(5), || {
+        let position = shared.position_us.load(Ordering::Relaxed);
+        earliest = earliest.min(position);
+        shared.state.load(Ordering::Relaxed) == State::Playing as u32
+            && position > TARGET_US + 200_000
+    });
+    assert!(
+        resumed,
+        "playback did not carry on past the target (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    assert!(
+        earliest >= TARGET_US,
+        "the new timeline showed {earliest}, ahead of the target {TARGET_US}"
+    );
+    // Audio starts on the same line: the ring's first sample is the
+    // target's, to within a sample of the 48 kHz fixture.
+    let first_heard = session
+        .pipeline()
+        .audio_shared
+        .base_pts_us
+        .load(Ordering::Relaxed);
+    assert!(
+        (TARGET_US..=TARGET_US + 50).contains(&first_heard),
+        "the new timeline's audio starts at {first_heard}, not at the target {TARGET_US}"
+    );
+    session.close();
+}
+
 /// The same on an audio-only session, where nothing presents: the ring
 /// standing ready at the landed position is what completes the pause.
 #[test]
@@ -819,6 +905,199 @@ fn caption_lane_delivers_the_scripted_cues() {
     session.close();
 }
 
+/// A long decode-forward must not cost audio. The Bank starts releasing at
+/// its first push, the audio ring holds two seconds, and nothing pulls from
+/// it until the seek lands: pushed while the decoder is still working
+/// through the span, the Bank releases for as long as that takes and the
+/// overflow is discarded, which is heard as a skip two seconds after Play.
+/// Paused is the sharp case, since nothing pulls afterwards either.
+///
+/// Needs a span long enough to take real time to decode, which no checked-in
+/// fixture has: this reads the rig's clip, whose keyframe before 17 s is at
+/// 9.75 s. Run it with the rig up and `-- --ignored`.
+#[test]
+#[ignore = "reads https://mr.town/vod/imax_51.mp4; run with the rig up"]
+fn a_long_decode_forward_discards_no_audio() {
+    let mut session = Session::open(OpenRequest::new(
+        "https://mr.town/vod/imax_51.mp4".to_owned(),
+    ));
+    let shared = session.shared().clone();
+    let diag = session.diag().clone();
+    let ring_drops = || {
+        diag.stage(media_diag::Stage::AudioRing)
+            .drops
+            .load(Ordering::Relaxed)
+    };
+    let presented = || {
+        diag.stage(media_diag::Stage::Present)
+            .out_count
+            .load(Ordering::Relaxed)
+    };
+    assert!(
+        wait_for(Duration::from_secs(20), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > 200_000
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    session.pause();
+    // Paused, the release schedule is frozen, so whatever this consumer
+    // that never pulls has cost the ring so far has stopped growing.
+    std::thread::sleep(Duration::from_millis(800));
+    let drops_before = ring_drops();
+    let presented_before = presented();
+
+    session.seek(MediaTime::from_millis(17_000));
+    assert!(
+        wait_for(Duration::from_secs(20), || {
+            shared.state.load(Ordering::Relaxed) == State::Paused as u32
+                && presented() > presented_before
+        }),
+        "the seek did not settle paused (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    // Past the liveness window, so anything stuck against the ring has
+    // been given up on by now.
+    std::thread::sleep(Duration::from_millis(1500));
+    let lost = ring_drops() - drops_before;
+    session.close();
+    assert_eq!(lost, 0, "the landing discarded {lost} chunks of audio");
+}
+
+/// A caption that went up ahead of a seek's target and is still up at it
+/// is on screen after the seek. The caption decoder is stateful, so the
+/// span the seek decodes unseen is scanned too, its cues held back, and
+/// the last of them published at the target. The fixture's keyframes are
+/// 2 s apart and its roll-up caption gains its second row at 7 s, so a
+/// seek to 7.5 s lands the demuxer on 6 s with that row still to come.
+#[test]
+fn a_caption_already_up_at_a_seeks_target_is_shown() {
+    const TARGET_US: i64 = 7_500_000;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-608-640x360-30fps.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    session.seek(MediaTime::from_micros(TARGET_US));
+    // Settled first: the seek empties the caption ring part-way through,
+    // and everything in it after that belongs to the new timeline.
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > TARGET_US + 100_000
+        }),
+        "playback did not carry on past the target (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    let cues = Session::drain_captions(&px, 16);
+    session.close();
+    let up: Vec<_> = cues.iter().filter(|c| !c.text.is_empty()).collect();
+    assert!(
+        up.first()
+            .is_some_and(|c| c.pts_us == TARGET_US && c.text.ends_with("SECOND")),
+        "the caption up at the target was not published there: {cues:?}"
+    );
+}
+
+/// The caption already up goes out ahead of anything the access unit at the
+/// target carries. The fixture's second roll-up row arrives on the frame at
+/// 7 s exactly, so a seek to 7 s has both: "ROLL UP" held over from the
+/// span decoded unseen, and the two-row text from the target's own frame.
+/// In the other order the display ends on the text that was replaced.
+#[test]
+fn a_caption_held_over_precedes_the_targets_own_cue() {
+    const TARGET_US: i64 = 7_000_000;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-608-640x360-30fps.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    session.seek(MediaTime::from_micros(TARGET_US));
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > TARGET_US + 100_000
+        }),
+        "playback did not carry on past the target (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    let cues = Session::drain_captions(&px, 16);
+    session.close();
+    let up: Vec<(i64, &str)> = cues
+        .iter()
+        .filter(|c| !c.text.is_empty())
+        .map(|c| (c.pts_us, c.text.as_str()))
+        .collect();
+    assert_eq!(
+        up,
+        vec![(TARGET_US, "ROLL UP"), (TARGET_US, "ROLL UP\nSECOND")],
+        "what was up comes first, then what the target's frame brings"
+    );
+}
+
+/// A target past the last picture has no frame at or after it. Every frame
+/// the seek decodes is ahead of the floor, so none would reach the pool,
+/// the parked clock would never start and the session would sit in
+/// Buffering. It lands on the last frame instead and ends from there. The
+/// fixture's last frame is at 5.967 s of 6 s.
+#[test]
+fn a_seek_past_the_last_frame_lands_on_it_and_ends() {
+    let mut session = open_playing();
+    let shared = session.shared().clone();
+    let diag = session.diag().clone();
+    let presented_before = diag
+        .stage(media_diag::Stage::Present)
+        .out_count
+        .load(Ordering::Relaxed);
+    session.seek(MediaTime::from_millis(5_990));
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Ended as u32
+        }),
+        "the session never ended (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    assert!(
+        diag.stage(media_diag::Stage::Present)
+            .out_count
+            .load(Ordering::Relaxed)
+            > presented_before,
+        "it ended without showing the last frame"
+    );
+    let shown = shared.position_us.load(Ordering::Relaxed);
+    assert!(
+        (5_900_000..6_000_000).contains(&shown),
+        "it landed on {shown}, not on the last frame"
+    );
+    session.close();
+}
+
 /// `diag_csv` writes the capture-recorder CSV on close: header row per the
 /// pinned column contract plus at least one 100 ms sample per second of
 /// playback (the engine-owned sampler behind the managed ABI).
@@ -1088,6 +1367,54 @@ fn user_data_lane_delivers_every_frames_message() {
         "x264's own user data passes through under its UUID"
     );
     assert_eq!(foreign[0].pts_us, ours[0].pts_us);
+}
+
+/// A seek that decodes forward to its target delivers no user data from
+/// the span it skipped: those frames are never shown, and a consumer
+/// driving lights off them would replay a second of cues in an instant.
+#[test]
+fn a_seek_delivers_no_user_data_from_ahead_of_its_target() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-sei-userdata-640x360-30fps.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    // The fixture's keyframes are at 0, 2 and 4 s, so this lands the
+    // demuxer more than a second short of the target.
+    let target_us = 3_200_000;
+    session.seek(MediaTime::from_micros(target_us));
+    // Settled first, drained after. The seek empties the ring part-way
+    // through running, so a drain that starts any earlier can pick up the
+    // old timeline's messages. Everything in the ring once playback has
+    // passed the target was scanned after the clear, and the span the
+    // seek covers is a fraction of what the ring holds.
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > target_us + 200_000
+        }),
+        "playback did not carry on past the target (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    let messages = Session::drain_user_data(&px, 1024, 1 << 24);
+    session.close();
+    assert!(!messages.is_empty(), "the new timeline delivered nothing");
+    let earliest = messages.iter().map(|m| m.pts_us).min().expect("non-empty");
+    assert!(
+        earliest >= target_us,
+        "user data from {earliest} was delivered for a seek to {target_us}"
+    );
 }
 
 /// A seek clears the A/V offset and only re-arms it from the new timeline.

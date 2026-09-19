@@ -70,6 +70,10 @@ enum Command {
         /// the offered list. Out of range falls back to the first.
         #[arg(long, default_value_t = 0)]
         audio_track: usize,
+        /// Seek here, in ms, once playback has run for two seconds. The
+        /// capture and the summary then cover the landing as well.
+        #[arg(long)]
+        seek_to_ms: Option<u64>,
         /// A separate audio-only source to play against `url`, which is
         /// then treated as video-only — the shape adaptive ladders serve
         /// above their muxed rung. On-demand HTTP(S) and files only.
@@ -157,6 +161,7 @@ fn main() -> ExitCode {
             allow_local,
             live,
             audio_track,
+            seek_to_ms,
             audio_url,
         } => play::run(&play::Options {
             url,
@@ -167,6 +172,7 @@ fn main() -> ExitCode {
             allow_local,
             live,
             audio_track,
+            seek_to_ms,
             audio_url,
         }),
         Command::Bench {

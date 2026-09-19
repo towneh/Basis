@@ -26,6 +26,7 @@ import sys
 import tempfile
 
 FIXTURE = os.path.join("fixtures", "h264-608-640x360-30fps.ts")
+FIXTURE_MP4 = os.path.join("fixtures", "h264-608-640x360-30fps.mp4")
 
 
 def parity(b):
@@ -152,6 +153,13 @@ def main():
              "-map", "0:v", "-map", "1:a", "-c", "copy", "-f", "mpegts",
              FIXTURE], check=True)
     print(f"wrote {FIXTURE}")
+    # The same streams again as an MP4, untouched: the TS demuxer refuses
+    # seeks, and the rows about captions across a seek need one that does
+    # not (keyframes every 2 s).
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", FIXTURE, "-c", "copy",
+         "-movflags", "+faststart", FIXTURE_MP4], check=True)
+    print(f"wrote {FIXTURE_MP4}")
 
     # Oracle check: ffmpeg's own 608 decoder must see the scripted text.
     # (Forward slashes: the movie= filter parses backslashes as escapes.)
