@@ -14,6 +14,7 @@ mod hevc;
 mod mkv;
 mod mp3;
 mod mp4;
+mod mp4_fragment;
 mod mp4_index;
 mod ogg_opus;
 mod source;
