@@ -3,6 +3,8 @@
 //! events must interleave in decode order, and hostile input must produce
 //! typed errors.
 
+mod common;
+
 use media_clock::{Generation, MediaTime};
 use media_demux::{
     AudioCodec, DemuxLimits, Demuxer, EosReason, Format, MemSource, Mp4Demuxer, StreamEvent,
@@ -182,6 +184,40 @@ fn truncated_metadata_is_a_typed_error() {
         Generation(1),
     );
     assert!(result.is_err());
+}
+
+/// A file whose fragments are as far apart as a real long video's: the
+/// walk has to pay for the headers it parses, not for a cache block per
+/// fragment, or the budget runs out part-way down the file.
+#[test]
+fn many_fragment_files_open_when_their_fragments_are_spread_out() {
+    for name in ["h264-aac-manyfrag.mp4", "h264-aac-manyfrag-sidx.mp4"] {
+        let baseline = drain(&mut open(name));
+        let inflated = common::inflate(&fixture(name));
+        let counters = inflated.counters();
+        let len = inflated.len();
+        assert!(
+            len > DemuxLimits::default().max_metadata_bytes,
+            "{name} must outgrow the budget a block per fragment would charge ({len} bytes)"
+        );
+
+        let mut demux = Mp4Demuxer::open(Box::new(inflated), DemuxLimits::default(), Generation(1))
+            .unwrap_or_else(|e| panic!("{name} spread out must open: {e:?}"));
+        let fetched = counters.bytes();
+        assert!(
+            fetched < 16 * 1024 * 1024,
+            "{name} open fetched {fetched} bytes"
+        );
+
+        // The padding is past every sample, so the streams are the ones
+        // the plain fixture holds.
+        let s = drain(&mut demux);
+        assert_eq!(s.video_aus, baseline.video_aus, "{name}");
+        assert_eq!(s.audio_aus, baseline.audio_aus, "{name}");
+        assert_eq!(s.video_keys, baseline.video_keys, "{name}");
+        assert_eq!(s.first_video_au, baseline.first_video_au, "{name}");
+        assert_eq!(s.first_audio_pts, baseline.first_audio_pts, "{name}");
+    }
 }
 
 #[test]

@@ -9,12 +9,13 @@
 //! silently.
 
 use std::collections::VecDeque;
+use std::io::{Read, Seek, SeekFrom};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use media_clock::{Generation, MediaTime};
 
 use crate::demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer, push_note};
-use crate::source::{ByteSource, SourceReader};
+use crate::source::{ByteSource, CachedSource, SourceReader};
 use crate::{Au, AudioCodec, DemuxError, EosReason, Format, StreamEvent, TrackId, VideoCodec};
 
 /// ISO/IEC 14496-3 sampling-frequency-index table.
@@ -52,7 +53,7 @@ struct AudioTrack {
 }
 
 pub struct Mp4Demuxer {
-    src: Box<dyn ByteSource>,
+    src: CachedSource,
     limits: DemuxLimits,
     generation: Generation,
     duration: Option<MediaTime>,
@@ -86,7 +87,7 @@ impl Mp4Demuxer {
         // Cached reads: the box walk revisits headers and fragmented
         // files interleave per-track sample runs, both of which thrash a
         // ranged HTTP source without a cache.
-        let mut src: Box<dyn ByteSource> = Box::new(crate::source::CachedSource::new(src));
+        let mut src = CachedSource::new(src);
         let len = src
             .size()
             .map_err(DemuxError::Source)?
@@ -94,8 +95,28 @@ impl Mp4Demuxer {
                 "progressive MP4 needs a source with a known length",
             ))?;
 
+        // A fragmented file's sample tables are spread over the whole
+        // file, one `moof` per few seconds of media, and each sits in a
+        // region of its own. Read those with the source's own fetches
+        // sized to the headers being parsed: through the block cache the
+        // budget buys a block per fragment and the file length sets a
+        // ceiling on how long a video can be.
+        let (fragmented, probed) = {
+            let mut reader = SourceReader::new(&mut src, len, limits.max_metadata_bytes);
+            let fragmented = has_fragments(&mut reader, len);
+            (
+                fragmented,
+                limits.max_metadata_bytes - reader.remaining_budget(),
+            )
+        };
+        let budget = limits.max_metadata_bytes.saturating_sub(probed);
+
         let mp4 = {
-            let reader = SourceReader::new(src.as_mut(), len, limits.max_metadata_bytes);
+            let reader = if fragmented {
+                SourceReader::new_sparse(src.inner_mut(), len, budget)
+            } else {
+                SourceReader::new(&mut src, len, budget)
+            };
             // The parser is safe Rust but has panic paths on inconsistent
             // sample tables; contain them to a typed error at this boundary
             // so hostile metadata is a refusal, not a session abort.
@@ -518,6 +539,51 @@ impl Mp4Demuxer {
         let a = self.audio.as_ref()?;
         a.samples.get(self.aidx).copied()
     }
+}
+
+/// Top-level boxes the fragmentation probe looks at before giving up. A
+/// fragmented file's first `moof` follows `moov` within a box or two;
+/// everything else has a handful of top-level boxes in total.
+const MAX_PROBED_BOXES: usize = 64;
+
+/// Whether the file carries movie fragments, read from the top-level box
+/// chain alone. Sizes come from the headers, so a malformed chain simply
+/// ends the probe and the sample-table parse reports it.
+fn has_fragments(reader: &mut SourceReader<'_>, len: u64) -> bool {
+    let mut pos = 0u64;
+    for _ in 0..MAX_PROBED_BOXES {
+        if len - pos < 8 || reader.seek(SeekFrom::Start(pos)).is_err() {
+            return false;
+        }
+        let mut header = [0u8; 16];
+        if reader.read_exact(&mut header[..8]).is_err() {
+            return false;
+        }
+        if &header[4..8] == b"moof" || &header[4..8] == b"styp" {
+            return true;
+        }
+        let mut size = u64::from(u32::from_be_bytes([
+            header[0], header[1], header[2], header[3],
+        ]));
+        if size == 1 {
+            if reader.read_exact(&mut header[8..16]).is_err() {
+                return false;
+            }
+            size = u64::from_be_bytes(header[8..16].try_into().expect("eight bytes"));
+            if size < 16 {
+                return false;
+            }
+        } else if size < 8 {
+            // Zero means "to the end of the file", so there is no box
+            // after this one; below the header size is malformed.
+            return false;
+        }
+        if size > len - pos {
+            return false;
+        }
+        pos += size;
+    }
+    false
 }
 
 /// What a picker needs to show for one audio track, read straight from

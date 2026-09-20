@@ -93,6 +93,13 @@ impl CachedSource {
             blocks: [(u64::MAX, Vec::new()), (u64::MAX, Vec::new())],
         }
     }
+
+    /// The source under the cache, for a reader that sizes its own
+    /// fetches. A walk whose every step lands in a fresh region gets no
+    /// reuse out of the blocks and pays a whole one per step.
+    pub fn inner_mut(&mut self) -> &mut dyn ByteSource {
+        self.src.as_mut()
+    }
 }
 
 impl ByteSource for CachedSource {
@@ -236,6 +243,14 @@ pub(crate) struct SourceReader<'a> {
     pos: u64,
     cache: Vec<u8>,
     cache_start: u64,
+    /// Bytes fetched on a cache miss, and charged to the budget. Fixed at
+    /// [`CACHE_CHUNK`] over a [`CachedSource`], whose own block is that
+    /// size; when the reader fetches from the source itself it starts at
+    /// [`SPARSE_WINDOW`] after a jump and doubles while reads stay
+    /// contiguous, so a walk that touches a header per region pays for
+    /// the header rather than for a block.
+    window: usize,
+    min_window: usize,
     /// Metadata bytes remaining before the budget trips.
     budget: u64,
     /// Total bytes *served* remaining. The fetch budget only counts fresh
@@ -249,18 +264,42 @@ pub(crate) struct SourceReader<'a> {
 }
 
 pub(crate) const CACHE_CHUNK: usize = 256 * 1024;
+/// First fetch after a non-contiguous jump in sparse mode. A fragment
+/// header is a few hundred bytes, so a fragmented file's walk pays this
+/// per fragment.
+const SPARSE_WINDOW: usize = 16 * 1024;
 
 impl<'a> SourceReader<'a> {
+    /// Reads through a [`CachedSource`], whose block size the fetch
+    /// window matches.
     pub fn new(src: &'a mut dyn ByteSource, len: u64, budget: u64) -> Self {
+        Self::with_window(src, len, budget, CACHE_CHUNK)
+    }
+
+    /// Reads from an uncached source, sizing each fetch to what the parse
+    /// is using.
+    pub fn new_sparse(src: &'a mut dyn ByteSource, len: u64, budget: u64) -> Self {
+        Self::with_window(src, len, budget, SPARSE_WINDOW)
+    }
+
+    fn with_window(src: &'a mut dyn ByteSource, len: u64, budget: u64, window: usize) -> Self {
         Self {
             src,
             len,
             pos: 0,
             cache: Vec::new(),
-            cache_start: 0,
+            cache_start: u64::MAX,
+            window,
+            min_window: window,
             budget,
             serve_budget: budget.saturating_mul(8),
         }
+    }
+
+    /// Budget left, so a second reader over the same parse continues the
+    /// bound rather than restarting it.
+    pub fn remaining_budget(&self) -> u64 {
+        self.budget
     }
 }
 
@@ -277,7 +316,13 @@ impl Read for SourceReader<'_> {
         let in_cache =
             self.pos >= self.cache_start && self.pos < self.cache_start + self.cache.len() as u64;
         if !in_cache {
-            let want = CACHE_CHUNK.min((self.len - self.pos) as usize);
+            let contiguous = self.pos == self.cache_start.saturating_add(self.cache.len() as u64);
+            self.window = if contiguous {
+                self.window.saturating_mul(2).min(CACHE_CHUNK)
+            } else {
+                self.min_window
+            };
+            let want = self.window.min((self.len - self.pos) as usize);
             if (want as u64) > self.budget {
                 return Err(std::io::Error::other("metadata byte budget exceeded"));
             }
