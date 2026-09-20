@@ -15,6 +15,10 @@ cargo +nightly fuzz run mp4_stream corpus/mp4_stream crashes/  # replay pinned c
 
 - `corpus/<target>/` — seed corpus, committed. The C player's corpus
   fixtures carry over as seeds as their formats gain demuxers here.
+  Keep them small: a seed of a few kilobytes reaches the same code as a
+  megabyte one and mutates far faster. `seed-frag-sidx.mp4` is a second
+  of video cut into four fragments with a segment index, the layout that
+  opens from the index rather than by walking the file.
 - `crashes/` — pinned crash reproducers, committed once found and fixed;
   CI replays them.
 

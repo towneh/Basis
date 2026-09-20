@@ -4,6 +4,12 @@
 //! re_mp4's own panic paths as typed errors; everything after open — sample
 //! walking, Annex-B conversion, seek — runs unfenced and is what this
 //! target actually exercises.)
+//!
+//! The seeds include a fragmented file carrying a segment index, which is
+//! the layout that opens from the index and reads a movie fragment per
+//! seek: a mutation inside a fragment leaves the index still covering the
+//! file, so the index walk, the subsegment reader and the per-fragment
+//! sample builder all run on bytes they did not expect.
 
 #![no_main]
 
@@ -32,11 +38,19 @@ fuzz_target!(|data: &[u8]| {
             Ok(_) => {}
         }
     }
-    let _ = demux.seek(MediaTime::from_secs(1), Generation(2));
-    for _ in 0..64 {
-        match demux.next_event() {
-            Ok(StreamEvent::Eos(_)) | Err(_) => break,
-            Ok(_) => {}
+    // The start, somewhere inside, and past the last sample: an index
+    // seek searches forward and back from where the index puts the
+    // target, and every landing reads a fragment of its own.
+    for (generation, secs) in [0i64, 1, 5, 3600].into_iter().enumerate() {
+        let _ = demux.seek(
+            MediaTime::from_secs(secs),
+            Generation(generation as u64 + 2),
+        );
+        for _ in 0..64 {
+            match demux.next_event() {
+                Ok(StreamEvent::Eos(_)) | Err(_) => break,
+                Ok(_) => {}
+            }
         }
     }
 });
