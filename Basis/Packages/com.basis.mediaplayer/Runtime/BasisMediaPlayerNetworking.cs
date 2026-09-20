@@ -143,6 +143,13 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private SyncedPlaybackState pendingRemoteState;
     private long pendingRemotePositionTicks;
     private float pendingRemoteStashedAt;
+    // The player's LoadGeneration when the load the stash waits on was asked for. A page
+    // URL is resolved before it opens and the session it replaces runs on meanwhile, so
+    // the stash belongs to whatever opens after this, never to the session still playing.
+    private int pendingRemoteLoadGeneration;
+    // The player was already in Error when that load was asked for, so an Error seen
+    // before the load starts is the dead session's and says nothing about the new one.
+    private bool pendingRemoteErrorAtRequest;
 
     // A resync this client asked for on its own behalf (ResyncEveryone). The stash above
     // is then our own state, so the pending-apply gate has to run even though we are the
@@ -574,6 +581,13 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
     }
 
+    // Called just before the open a stash waits on.
+    private void NotePendingLoadRequest()
+    {
+        pendingRemoteLoadGeneration = mediaPlayer.LoadGeneration;
+        pendingRemoteErrorAtRequest = mediaPlayer.State == BmState.Error;
+    }
+
     private void ReloadSelfInPlace()
     {
         if (mediaPlayer == null)
@@ -604,6 +618,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         selfResyncApply = true;
         suppressResyncSettleBroadcast = true;
         ClearSyncTarget();
+        NotePendingLoadRequest();
         mediaPlayer.OpenUserUrl(currentSyncedUrl);
     }
 
@@ -1049,6 +1064,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
                 pendingRemotePositionTicks = positionTicks;
                 pendingRemoteStashedAt = Time.realtimeSinceStartup;
                 pendingRemoteApply = true;
+                NotePendingLoadRequest();
                 mediaPlayer.OpenUserUrl(url);
                 return;
             }
@@ -1096,7 +1112,12 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
 
         BmState state = mediaPlayer.State;
-        if (state == BmState.Idle || state == BmState.Opening || state == BmState.Buffering)
+        bool loadStarted = mediaPlayer.LoadGeneration != pendingRemoteLoadGeneration;
+        bool settling = state == BmState.Idle || state == BmState.Opening || state == BmState.Buffering;
+        // A resolve that fails reports Error without ever opening, and that releases the
+        // stash too.
+        bool failedBeforeOpening = !loadStarted && state == BmState.Error && !pendingRemoteErrorAtRequest;
+        if (settling || (!loadStarted && !failedBeforeOpening))
         {
             // A load that never reaches playback (a resolve that fails back to Idle without
             // setting Error) would otherwise hold the stash forever, and with it the
