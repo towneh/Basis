@@ -11,8 +11,6 @@
 //! middle of a box, and hostile input is the normal case for a player
 //! that opens arbitrary URLs.
 
-#![allow(dead_code)]
-
 /// One subsegment: a `moof` and the `mdat` it indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IndexEntry {

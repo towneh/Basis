@@ -3,6 +3,7 @@
 
     fixtures/h264-aac-manyfrag-sidx.mp4   fragmented, with a segment index
     fixtures/h264-aac-manyfrag.mp4        the same streams, no index
+    fixtures/h264-aac-longfrag-sidx.mp4   indexed, keyframes inside fragments
 
 40 s of H.264 (320x180, 24 fps, GOP 12, two B-frames so pts and dts
 differ) + stereo AAC, cut into a fragment every 100 ms and at every
@@ -19,6 +20,11 @@ short of the end of the file while the audio track's reaches it.
 The second file is a stream copy of the first, so the two hold identical
 samples and differ only in the index. Both end in an `mfra`.
 
+The third is 20 s cut every 2 s without `+frag_keyframe`, so its
+keyframes fall inside fragments rather than at their starts: a seek into
+it lands part-way through a fragment, where the fragment's earlier
+samples belong to the seek before it rather than after.
+
 Needs ffmpeg on PATH. Run from Native~ (the fixture paths are relative
 to it):
 
@@ -32,7 +38,9 @@ import sys
 
 INDEXED = os.path.join("fixtures", "h264-aac-manyfrag-sidx.mp4")
 PLAIN = os.path.join("fixtures", "h264-aac-manyfrag.mp4")
+LONGFRAG = os.path.join("fixtures", "h264-aac-longfrag-sidx.mp4")
 SECONDS = 40
+LONGFRAG_SECONDS = 20
 FRAGMENT = ["-frag_duration", "100000"]
 BITEXACT = ["-bitexact", "-fflags", "+bitexact"]
 
@@ -72,14 +80,14 @@ def sidx_reach(data, pos, size):
     return pos + size + first_offset + total, count
 
 
-def check(path, want_index):
+def check(path, want_index, min_fragments=257):
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path,
                     "-f", "null", "-"], check=True)
     data = open(path, "rb").read()
     boxes = list(top_level(data))
     kinds = [kind for kind, _, _ in boxes]
     fragments = kinds.count("moof")
-    assert fragments > 256, f"{path}: only {fragments} fragments"
+    assert fragments >= min_fragments, f"{path}: only {fragments} fragments"
     assert kinds[-1] == "mfra", f"{path}: no trailing mfra"
     media_end = boxes[-1][1]
     reaches = [sidx_reach(data, pos, size)
@@ -108,8 +116,19 @@ def main():
         ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", INDEXED, "-c", "copy",
          "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
          *FRAGMENT, *BITEXACT, PLAIN], check=True)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y",
+         "-f", "lavfi", "-i",
+         f"testsrc2=duration={LONGFRAG_SECONDS}:size=320x180:rate=24",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={LONGFRAG_SECONDS}",
+         "-c:v", "libx264", "-preset", "slow", "-crf", "32", "-g", "12",
+         "-bf", "2", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "2",
+         "-movflags", "+empty_moov+default_base_moof+global_sidx",
+         "-frag_duration", "2000000", *BITEXACT, LONGFRAG], check=True)
     check(INDEXED, want_index=True)
     check(PLAIN, want_index=False)
+    check(LONGFRAG, want_index=True, min_fragments=8)
     return 0
 
 

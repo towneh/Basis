@@ -3,18 +3,28 @@
 //! costs a couple of range requests, never a full download); sample payloads
 //! are then range-read on demand as the engine pulls.
 //!
+//! A fragmented file that carries a segment index is opened from the index
+//! alone: `ftyp`, `moov` and the index are all that is read before the
+//! first picture, and a movie fragment is parsed when playback or a seek
+//! reaches it. What the demuxer holds is then a fragment's worth of sample
+//! references whatever the file's length, and a twelve-hour video costs the
+//! same to open as a three-minute one.
+//!
 //! M2 scope: one H.264 video track and one AAC audio track, interleaved in
 //! decode order. Remaining tracks are reported via [`Mp4Demuxer::take_notes`]
 //! so the engine can surface them as diagnostics rather than dropping them
 //! silently.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use media_clock::{Generation, MediaTime};
+use re_mp4::{BoxHeader, BoxType, MoofBox, ReadBox as _};
 
 use crate::demuxer::{AudioTrackInfo, DemuxLimits, DemuxOptions, Demuxer, push_note};
+use crate::mp4_fragment::{Cursors, FragmentSample, TrackDefaults};
+use crate::mp4_index::{IndexEntry, SegmentIndex};
 use crate::source::{ByteSource, CachedSource, SourceReader};
 use crate::{Au, AudioCodec, DemuxError, EosReason, Format, StreamEvent, TrackId, VideoCodec};
 
@@ -32,9 +42,43 @@ struct SampleRef {
     sync: bool,
 }
 
+/// Where a track's sample references come from.
+enum Samples {
+    /// The whole table, built at open from `moov` or from a walk of every
+    /// movie fragment.
+    Whole { all: Vec<SampleRef>, next: usize },
+    /// One fragment's worth at a time, read as playback reaches it.
+    Held(VecDeque<SampleRef>),
+}
+
+impl Samples {
+    fn peek(&self) -> Option<SampleRef> {
+        match self {
+            Self::Whole { all, next } => all.get(*next).copied(),
+            Self::Held(held) => held.front().copied(),
+        }
+    }
+
+    fn take(&mut self) {
+        match self {
+            Self::Whole { next, .. } => *next += 1,
+            Self::Held(held) => {
+                held.pop_front();
+            }
+        }
+    }
+
+    fn held(&self) -> usize {
+        match self {
+            Self::Whole { .. } => 0,
+            Self::Held(held) => held.len(),
+        }
+    }
+}
+
 struct VideoTrack {
     id: TrackId,
-    samples: Vec<SampleRef>,
+    samples: Samples,
     /// H.264/HEVC conversion parameters (HEVC packs VPS/SPS/PPS into
     /// `sps`); `None` for codecs whose samples pass through as stored
     /// (VP9 raw frames, AV1 temporal units).
@@ -49,7 +93,26 @@ struct AvcParams {
 
 struct AudioTrack {
     id: TrackId,
-    samples: Vec<SampleRef>,
+    samples: Samples,
+    /// Encoder priming from the edit list, in the track's timescale: the
+    /// shift that puts the samples before the origin at negative times.
+    priming: i64,
+}
+
+/// The state a file read a fragment at a time carries between fragments.
+struct Fragments {
+    index: SegmentIndex,
+    defaults: BTreeMap<u32, TrackDefaults>,
+    cursors: Cursors,
+    /// The subsegment to read when the held samples run out.
+    next: usize,
+}
+
+/// A subsegment's samples, split by the tracks the demuxer has bound.
+#[derive(Default)]
+struct Loaded {
+    video: Vec<SampleRef>,
+    audio: Vec<SampleRef>,
 }
 
 pub struct Mp4Demuxer {
@@ -60,13 +123,13 @@ pub struct Mp4Demuxer {
     video: Option<VideoTrack>,
     audio: Option<AudioTrack>,
     pending: VecDeque<StreamEvent>,
-    vidx: usize,
-    aidx: usize,
     notes: Vec<String>,
     emit_raw_video: bool,
     audio_tracks: Vec<AudioTrackInfo>,
     /// Cover art from `moov/udta/meta/ilst/covr`.
     artwork: Option<crate::Artwork>,
+    /// Present when the file's fragments are read as they are reached.
+    fragments: Option<Fragments>,
 }
 
 impl Mp4Demuxer {
@@ -95,43 +158,77 @@ impl Mp4Demuxer {
                 "progressive MP4 needs a source with a known length",
             ))?;
 
-        // A fragmented file's sample tables are spread over the whole
-        // file, one `moof` per few seconds of media, and each sits in a
-        // region of its own. Read those with the source's own fetches
-        // sized to the headers being parsed: through the block cache the
-        // budget buys a block per fragment and the file length sets a
-        // ceiling on how long a video can be.
-        let (fragmented, probed) = {
-            let mut reader = SourceReader::new(&mut src, len, limits.max_metadata_bytes);
-            let fragmented = has_fragments(&mut reader, len);
-            (
-                fragmented,
-                limits.max_metadata_bytes - reader.remaining_budget(),
-            )
+        // `moov` first, and nothing past it: whether this file has
+        // fragments at all is stated there, so the box after it answers
+        // nothing and, on a file whose `moov` is megabytes of sample
+        // table, costs a cache block fetched from the middle of the
+        // media to read eight bytes.
+        let mut notes = Vec::new();
+        let mut budget = limits.max_metadata_bytes;
+        let head = {
+            let mut reader = SourceReader::new(&mut src, len, budget);
+            let head = scan_prefix(&mut reader, 0, len, &mut notes, true);
+            budget = reader.remaining_budget();
+            head
         };
-        let budget = limits.max_metadata_bytes.saturating_sub(probed);
 
-        let mp4 = {
-            let reader = if fragmented {
-                SourceReader::new_sparse(src.inner_mut(), len, budget)
-            } else {
-                SourceReader::new(&mut src, len, budget)
-            };
-            // The parser is safe Rust but has panic paths on inconsistent
-            // sample tables; contain them to a typed error at this boundary
-            // so hostile metadata is a refusal, not a session abort.
-            match catch_unwind(AssertUnwindSafe(|| re_mp4::Mp4::read(reader, len))) {
-                Ok(Ok(mp4)) => mp4,
-                Ok(Err(re_mp4::Error::Io(io))) => return Err(DemuxError::Io(io)),
-                Ok(Err(other)) => return Err(DemuxError::Parse(other.to_string())),
-                Err(_) => {
-                    return Err(DemuxError::Parse(
-                        "mp4 parser panicked on inconsistent metadata".into(),
-                    ));
+        // With a trusted index the whole file need not be walked: `moov`
+        // and the index say where every fragment is. Without one the
+        // sample tables come from a walk of every `moof`, whose fetches
+        // are sized to the headers it parses rather than to a cache block
+        // (a fragmented file's fragments are far apart, so a block per
+        // fragment would exhaust the budget part-way down a long file).
+        let mut index = None;
+        let mut mp4 = None;
+        let mut fragmented = head.first_fragment.is_some();
+        if let Some(moov_end) = head.moov_end {
+            let header = read_metadata(&mut src, moov_end, &mut budget, false)?;
+            // A fragmented file states `mvex` and keeps no samples in
+            // `moov`. Anything else has described itself entirely by
+            // here, and this parse is the whole of it.
+            if header.moov.mvex.is_some() && header.tracks().values().all(|t| t.samples.is_empty())
+            {
+                fragmented = true;
+                let video = header
+                    .tracks()
+                    .iter()
+                    .find(|(_, track)| track.kind == Some(re_mp4::TrackKind::Video))
+                    .map(|(id, _)| *id);
+                let tail = {
+                    let mut reader = SourceReader::new(&mut src, len, budget);
+                    let tail = scan_prefix(&mut reader, moov_end, len, &mut notes, false);
+                    budget = reader.remaining_budget();
+                    tail
+                };
+                if let Some(first) = tail.first_fragment {
+                    let media_end = media_end(&tail.indexes, len, &mut src);
+                    let trusted: Vec<SegmentIndex> = tail
+                        .indexes
+                        .into_iter()
+                        .filter(|candidate| {
+                            candidate.starts_at(first) && candidate.tiles(media_end)
+                        })
+                        .collect();
+                    index = choose_index(trusted, video);
                 }
+                if index.is_some() {
+                    mp4 = Some(header);
+                }
+            } else {
+                mp4 = Some(header);
             }
+        }
+        let mp4 = match mp4 {
+            Some(mp4) => mp4,
+            None => read_metadata(&mut src, len, &mut budget, fragmented)?,
         };
 
+        let fragments = index.map(|index| Fragments {
+            defaults: crate::mp4_fragment::track_defaults(&mp4.moov),
+            cursors: Cursors::new(),
+            index,
+            next: 0,
+        });
         let mut this = Self {
             src,
             limits,
@@ -140,12 +237,11 @@ impl Mp4Demuxer {
             video: None,
             audio: None,
             pending: VecDeque::new(),
-            vidx: 0,
-            aidx: 0,
-            notes: Vec::new(),
+            notes,
             emit_raw_video: false,
             audio_tracks: Vec::new(),
             artwork: artwork_from_moov(&mp4),
+            fragments,
         };
         this.extract_tracks(&mp4, options)?;
 
@@ -153,6 +249,9 @@ impl Mp4Demuxer {
             return Err(DemuxError::Unsupported(
                 "no decodable track (need H.264 video or AAC audio)",
             ));
+        }
+        if this.duration.is_none() {
+            this.duration = stated_duration(&mp4, this.fragments.as_ref());
         }
         Ok(this)
     }
@@ -244,9 +343,7 @@ impl Mp4Demuxer {
                     continue;
                 }
             }
-            if track.timescale > 0 {
-                let track_duration =
-                    MediaTime::from_micros(scale_to_us(track.duration as i64, track.timescale));
+            if let Some(track_duration) = stated_span(track.duration, track.timescale) {
                 duration = duration.max(track_duration);
             }
         }
@@ -334,7 +431,7 @@ impl Mp4Demuxer {
             }
         };
 
-        let samples = self.collect_samples(&track.samples)?;
+        let samples = self.new_samples(self.collect_samples(&track.samples)?);
         let width = if box_width != 0 {
             box_width
         } else {
@@ -471,9 +568,20 @@ impl Mp4Demuxer {
         ));
         self.audio = Some(AudioTrack {
             id: track_id,
-            samples,
+            samples: self.new_samples(samples),
+            priming,
         });
         Some(())
+    }
+
+    /// The whole table for a file that states one, an empty queue for a
+    /// file whose fragments are read as they are reached.
+    fn new_samples(&self, all: Vec<SampleRef>) -> Samples {
+        if self.fragments.is_some() {
+            Samples::Held(VecDeque::new())
+        } else {
+            Samples::Whole { all, next: 0 }
+        }
     }
 
     fn collect_samples(&self, samples: &[re_mp4::Sample]) -> Result<Vec<SampleRef>, DemuxError> {
@@ -491,15 +599,17 @@ impl Mp4Demuxer {
                 if s.size > self.limits.max_au_bytes {
                     return Err(DemuxError::Cap("sample larger than the AU ceiling"));
                 }
-                let timescale = s.timescale.max(1);
+                let (pts, dts) = shifted(
+                    s.composition_timestamp,
+                    s.decode_timestamp,
+                    shift,
+                    s.timescale.max(1),
+                );
                 Ok(SampleRef {
                     offset: s.offset,
                     size: s.size as u32,
-                    pts: MediaTime::from_micros(scale_to_us(
-                        s.composition_timestamp - shift,
-                        timescale,
-                    )),
-                    dts: MediaTime::from_micros(scale_to_us(s.decode_timestamp - shift, timescale)),
+                    pts,
+                    dts,
                     sync: s.is_sync,
                 })
             })
@@ -531,59 +641,518 @@ impl Mp4Demuxer {
     }
 
     fn next_video(&self) -> Option<SampleRef> {
-        let v = self.video.as_ref()?;
-        v.samples.get(self.vidx).copied()
+        self.video.as_ref()?.samples.peek()
     }
 
     fn next_audio(&self) -> Option<SampleRef> {
-        let a = self.audio.as_ref()?;
-        a.samples.get(self.aidx).copied()
+        self.audio.as_ref()?.samples.peek()
+    }
+
+    /// Sample references the demuxer is holding. A file read a fragment
+    /// at a time holds a fragment's worth whatever its length, which is
+    /// what makes a twelve-hour video cost what a three-minute one does.
+    pub fn held_samples(&self) -> usize {
+        self.video.as_ref().map_or(0, |v| v.samples.held())
+            + self.audio.as_ref().map_or(0, |a| a.samples.held())
+    }
+
+    /// Read the subsegment at `at` and turn its runs into sample
+    /// references for the bound tracks. `anchor` seeds the decode
+    /// timelines from the index, for a fragment reached by a seek that
+    /// states no base time of its own.
+    fn load_fragment(&mut self, at: usize, anchor: bool) -> Result<Loaded, DemuxError> {
+        let fragments = self
+            .fragments
+            .as_mut()
+            .expect("only a fragmented file loads fragments");
+        let entry = *fragments
+            .index
+            .entries
+            .get(at)
+            .ok_or(DemuxError::Parse("subsegment past the index".into()))?;
+        if anchor {
+            let index_scale = fragments.index.timescale;
+            for (id, defaults) in &fragments.defaults {
+                let at = rescale(entry.time, u64::from(index_scale), defaults.timescale);
+                fragments.cursors.insert(*id, at.cast_signed());
+            }
+        }
+
+        let moofs = read_subsegment(&mut self.src, entry, &self.limits)?;
+        let video_id = self.video.as_ref().map(|v| v.id.0);
+        let audio_id = self.audio.as_ref().map(|a| a.id.0);
+        let priming = self.audio.as_ref().map_or(0, |a| a.priming);
+        let mut loaded = Loaded::default();
+        for moof in &moofs {
+            let built =
+                crate::mp4_fragment::build(moof, &fragments.defaults, &mut fragments.cursors)
+                    .map_err(|why| DemuxError::Parse(why.into()))?;
+            for (track_id, samples) in built {
+                let (out, shift) = if Some(track_id) == video_id {
+                    (&mut loaded.video, 0)
+                } else if Some(track_id) == audio_id {
+                    (&mut loaded.audio, priming)
+                } else {
+                    continue;
+                };
+                let timescale = fragments
+                    .defaults
+                    .get(&track_id)
+                    .map_or(1, |d| d.timescale.max(1));
+                for sample in samples {
+                    out.push(to_ref(sample, timescale, shift, &self.limits)?);
+                }
+            }
+        }
+        Ok(loaded)
+    }
+
+    /// Read ahead until both bound tracks have something to pick from, or
+    /// the file runs out.
+    fn fill(&mut self) -> Result<(), DemuxError> {
+        while self.fragments.is_some() {
+            let starved = self
+                .video
+                .as_ref()
+                .is_some_and(|v| v.samples.peek().is_none())
+                || self
+                    .audio
+                    .as_ref()
+                    .is_some_and(|a| a.samples.peek().is_none());
+            let fragments = self.fragments.as_ref().expect("checked above");
+            if !starved || fragments.next >= fragments.index.entries.len() {
+                break;
+            }
+            if self.held_samples() >= MAX_HELD_SAMPLES {
+                break;
+            }
+            let at = fragments.next;
+            let loaded = self.load_fragment(at, false)?;
+            self.queue(loaded);
+            self.fragments.as_mut().expect("checked above").next = at + 1;
+        }
+        Ok(())
+    }
+
+    fn queue(&mut self, loaded: Loaded) {
+        if let Some(Samples::Held(held)) = self.video.as_mut().map(|v| &mut v.samples) {
+            held.extend(loaded.video);
+        }
+        if let Some(Samples::Held(held)) = self.audio.as_mut().map(|a| &mut a.samples) {
+            held.extend(loaded.audio);
+        }
+    }
+
+    fn clear_queues(&mut self) {
+        if let Some(Samples::Held(held)) = self.video.as_mut().map(|v| &mut v.samples) {
+            held.clear();
+        }
+        if let Some(Samples::Held(held)) = self.audio.as_mut().map(|a| &mut a.samples) {
+            held.clear();
+        }
+    }
+
+    /// Reposition by the index: find the subsegment holding the target,
+    /// then the last sync sample at or before it inside that subsegment.
+    fn seek_fragmented(&mut self, target: MediaTime) -> Result<MediaTime, DemuxError> {
+        let (index_scale, entries) = {
+            let fragments = self.fragments.as_ref().expect("fragmented");
+            (fragments.index.timescale, fragments.index.entries.len())
+        };
+        let wanted = target.as_micros().max(0).cast_unsigned();
+        let mut at = {
+            let fragments = self.fragments.as_ref().expect("fragmented");
+            fragments
+                .index
+                .floor(rescale(wanted, 1_000_000, u64::from(index_scale)))
+        };
+        let mut loaded = self.load_fragment(at, true)?;
+
+        // The index states one track's times, and the landing is chosen
+        // on another's, so its subsegment boundaries can be a sample out.
+        let mut steps = 0;
+        while at + 1 < entries
+            && steps < MAX_SEEK_STEPS
+            && last_dts(&loaded).is_some_and(|d| d < target)
+        {
+            at += 1;
+            loaded = self.load_fragment(at, true)?;
+            steps += 1;
+        }
+        let mut steps = 0;
+        let mut key = landing(&loaded.video, target);
+        while key.is_none() && at > 0 && steps < MAX_SEEK_STEPS && self.video.is_some() {
+            at -= 1;
+            loaded = self.load_fragment(at, true)?;
+            key = landing(&loaded.video, target);
+            steps += 1;
+        }
+
+        let landed = match key.and_then(|i| loaded.video.get(i)) {
+            Some(sample) => sample.pts,
+            // No video track, or none of the file's sync samples reaches
+            // back to the target: the audio partition decides, as it does
+            // for a file that has no picture at all.
+            None => target,
+        };
+
+        self.clear_queues();
+        let video = loaded
+            .video
+            .split_off(key.unwrap_or(0).min(loaded.video.len()));
+        self.queue(Loaded {
+            video,
+            audio: loaded
+                .audio
+                .into_iter()
+                .filter(|s| s.pts >= landed)
+                .collect(),
+        });
+        self.fragments.as_mut().expect("fragmented").next = at + 1;
+        Ok(landed)
     }
 }
 
-/// Top-level boxes the fragmentation probe looks at before giving up. A
+/// The last sync sample presenting at or before `target`, by decode
+/// order: what the whole-table seek picks across a file's every sample.
+fn landing(samples: &[SampleRef], target: MediaTime) -> Option<usize> {
+    let mut key = None;
+    for (i, sample) in samples.iter().enumerate() {
+        if sample.dts > target {
+            break;
+        }
+        if sample.sync {
+            key = Some(i);
+        }
+    }
+    key
+}
+
+fn last_dts(loaded: &Loaded) -> Option<MediaTime> {
+    loaded
+        .video
+        .last()
+        .or_else(|| loaded.audio.last())
+        .map(|sample| sample.dts)
+}
+
+/// One fragment sample as the demuxer's own reference, on the shared
+/// microsecond timeline and with the track's priming shift applied.
+fn to_ref(
+    sample: FragmentSample,
+    timescale: u64,
+    shift: i64,
+    limits: &DemuxLimits,
+) -> Result<SampleRef, DemuxError> {
+    if u64::from(sample.size) > limits.max_au_bytes {
+        return Err(DemuxError::Cap("sample larger than the AU ceiling"));
+    }
+    let (pts, dts) = shifted(sample.pts, sample.dts, shift, timescale);
+    Ok(SampleRef {
+        offset: sample.offset,
+        size: sample.size,
+        pts,
+        dts,
+        sync: sample.sync,
+    })
+}
+
+/// A sample's stored times on the shared microsecond timeline, with the
+/// track's priming shift applied. The shift comes from the edit list, so
+/// it is whatever the file says: the subtraction saturates rather than
+/// wrapping, and the scaling clamps, so hostile numbers cost a wrong
+/// timestamp rather than a panic or a time running backwards.
+fn shifted(pts: i64, dts: i64, shift: i64, timescale: u64) -> (MediaTime, MediaTime) {
+    (
+        MediaTime::from_micros(scale_to_us(pts.saturating_sub(shift), timescale)),
+        MediaTime::from_micros(scale_to_us(dts.saturating_sub(shift), timescale)),
+    )
+}
+
+/// Top-level boxes the prefix scan looks at before giving up. A
 /// fragmented file's first `moof` follows `moov` within a box or two;
 /// everything else has a handful of top-level boxes in total.
-const MAX_PROBED_BOXES: usize = 64;
+const MAX_PREFIX_BOXES: usize = 64;
+/// Ceiling on one segment index, above ISO's own limit of 65,535
+/// references at twelve bytes each.
+const MAX_INDEX_BYTES: u64 = 1024 * 1024;
+/// Ceiling on one movie fragment's header, well above any real one.
+const MAX_FRAGMENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Sample references a fragmented file holds before it stops reading
+/// ahead. Only a file whose fragments carry one track each comes near it.
+const MAX_HELD_SAMPLES: usize = 65536;
+/// Fragments a seek steps over looking for the one holding its target,
+/// in either direction.
+const MAX_SEEK_STEPS: usize = 64;
+/// The longest a stated duration is believed, matching what the
+/// Matroska demuxer accepts. Past it the file is not stating a length.
+const MAX_DURATION_US: i64 = 100 * 3600 * 1_000_000;
 
-/// Whether the file carries movie fragments, read from the top-level box
-/// chain alone. Sizes come from the headers, so a malformed chain simply
-/// ends the probe and the sample-table parse reports it.
-fn has_fragments(reader: &mut SourceReader<'_>, len: u64) -> bool {
-    let mut pos = 0u64;
-    for _ in 0..MAX_PROBED_BOXES {
+const STYP: u32 = u32::from_be_bytes(*b"styp");
+const SIDX: u32 = u32::from_be_bytes(*b"sidx");
+const PRFT: u32 = u32::from_be_bytes(*b"prft");
+
+/// What the top-level box chain holds before the media starts.
+#[derive(Default)]
+struct Prefix {
+    /// One past the end of `moov`, where it comes before the media.
+    moov_end: Option<u64>,
+    /// Where the first `moof` begins, when the file is fragmented.
+    first_fragment: Option<u64>,
+    indexes: Vec<SegmentIndex>,
+}
+
+/// Walk the top-level boxes from `from`, parsing any segment index on
+/// the way, and stop at the media — or, with `stop_after_moov`, at the
+/// end of `moov`.
+///
+/// Stopping there is what keeps a progressive file's open honest.
+/// Whether a file has fragments at all is stated inside `moov`, so
+/// reading the header of the box that follows it answers nothing, and on
+/// a file whose `moov` is megabytes of sample table that header is
+/// megabytes into the file: a whole cache block fetched to look at eight
+/// bytes of media. Sizes come from the headers, so a malformed chain
+/// simply ends the scan and the sample-table parse reports it.
+fn scan_prefix(
+    reader: &mut SourceReader<'_>,
+    from: u64,
+    len: u64,
+    notes: &mut Vec<String>,
+    stop_after_moov: bool,
+) -> Prefix {
+    let mut prefix = Prefix::default();
+    let mut pos = from;
+    for _ in 0..MAX_PREFIX_BOXES {
         if len - pos < 8 || reader.seek(SeekFrom::Start(pos)).is_err() {
-            return false;
+            break;
         }
-        let mut header = [0u8; 16];
-        if reader.read_exact(&mut header[..8]).is_err() {
-            return false;
+        let Ok(header) = BoxHeader::read(reader) else {
+            break;
+        };
+        // The header is eight bytes, or sixteen where the size is stated
+        // as a 64-bit one and the box's own size counts from there.
+        let Ok(body) = reader.stream_position() else {
+            break;
+        };
+        // A box's size counts from `body - 8`, which is where an
+        // ordinary header began and eight bytes into a 64-bit one, so
+        // the span is what bounds it rather than the size itself. A
+        // 64-bit size reaches the top of the range, so where it sums
+        // past it there is nothing to walk to.
+        let size = header.size;
+        let Some(next) = (body - 8).checked_add(size) else {
+            break;
+        };
+        if size < 8 || next > len {
+            break;
         }
-        if &header[4..8] == b"moof" || &header[4..8] == b"styp" {
-            return true;
-        }
-        let mut size = u64::from(u32::from_be_bytes([
-            header[0], header[1], header[2], header[3],
-        ]));
-        if size == 1 {
-            if reader.read_exact(&mut header[8..16]).is_err() {
-                return false;
+
+        match u32::from(header.name) {
+            kind if kind == u32::from(BoxType::MoofBox) || kind == STYP => {
+                prefix.first_fragment = Some(pos);
+                break;
             }
-            size = u64::from_be_bytes(header[8..16].try_into().expect("eight bytes"));
-            if size < 16 {
-                return false;
+            // Media: a file that puts it before `moov` keeps its tables
+            // at the end, where the whole-file parse finds them.
+            kind if kind == u32::from(BoxType::MdatBox) => break,
+            kind if kind == u32::from(BoxType::MoovBox) => {
+                prefix.moov_end = Some(next);
+                if stop_after_moov {
+                    break;
+                }
             }
-        } else if size < 8 {
-            // Zero means "to the end of the file", so there is no box
-            // after this one; below the header size is malformed.
-            return false;
+            // The body is what lies between the header and the end of
+            // the box, which the walk has already worked out; taking it
+            // from the stated size instead would depend on knowing that
+            // a 64-bit size is reported eight bytes short.
+            SIDX if next - body <= MAX_INDEX_BYTES => {
+                let mut index = vec![0u8; (next - body) as usize];
+                if reader.read_exact(&mut index).is_err() {
+                    break;
+                }
+                match crate::mp4_index::parse(&index, next) {
+                    Ok(index) => prefix.indexes.push(index),
+                    Err(why) => push_note(notes, || format!("segment index ignored: {why}")),
+                }
+            }
+            _ => {}
         }
-        if size > len - pos {
-            return false;
-        }
-        pos += size;
+        pos = next;
     }
-    false
+    prefix
+}
+
+/// The index to seek by. The video track's, so a seek lands where the
+/// picture does; on a file whose video track has no index the first
+/// serves, since one fragment carries every track.
+fn choose_index(trusted: Vec<SegmentIndex>, video: Option<u32>) -> Option<SegmentIndex> {
+    let at = trusted
+        .iter()
+        .position(|candidate| Some(candidate.reference_id) == video)
+        .unwrap_or(0);
+    trusted.into_iter().nth(at)
+}
+
+/// Where the file's media ends: its length, or the start of a trailing
+/// `mfra`, which is written after the last fragment and is not indexed.
+fn media_end(indexes: &[SegmentIndex], len: u64, src: &mut CachedSource) -> u64 {
+    if len < 16 || indexes.iter().any(|index| index.tiles(len)) {
+        return len;
+    }
+    // `mfro` is the last box in the file and states the `mfra` size.
+    let mut tail = [0u8; 16];
+    if src.read_exact_at(len - 16, &mut tail).is_err() {
+        return len;
+    }
+    if &tail[4..8] != b"mfro" || u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]) != 16 {
+        return len;
+    }
+    let mfra = u64::from(u32::from_be_bytes([tail[12], tail[13], tail[14], tail[15]]));
+    len.checked_sub(mfra).unwrap_or(len)
+}
+
+/// Parse the box structure up to `upto`, containing the parser's panic
+/// paths on inconsistent sample tables as a typed error: hostile metadata
+/// is a refusal, not a session abort.
+///
+/// `budget` is what the open has left and is spent, not merely read: one
+/// file can be parsed twice here — a prefix that turns out to describe
+/// only part of itself is followed by a walk of the whole — and the
+/// second parse continues the bound rather than restarting it.
+fn read_metadata(
+    src: &mut CachedSource,
+    upto: u64,
+    budget: &mut u64,
+    sparse: bool,
+) -> Result<re_mp4::Mp4, DemuxError> {
+    let mut reader = if sparse {
+        SourceReader::new_sparse(src.inner_mut(), upto, *budget)
+    } else {
+        SourceReader::new(&mut *src, upto, *budget)
+    };
+    let parsed = catch_unwind(AssertUnwindSafe(|| re_mp4::Mp4::read(&mut reader, upto)));
+    *budget = reader.remaining_budget();
+    match parsed {
+        Ok(Ok(mp4)) => Ok(mp4),
+        Ok(Err(re_mp4::Error::Io(io))) => Err(DemuxError::Io(io)),
+        Ok(Err(other)) => Err(DemuxError::Parse(other.to_string())),
+        Err(_) => Err(DemuxError::Parse(
+            "mp4 parser panicked on inconsistent metadata".into(),
+        )),
+    }
+}
+
+/// Duration for a file whose tracks state none, which is every file
+/// written with an empty `moov`: the movie header, then the fragment
+/// duration `mvex` declares, then what the index spans.
+fn stated_duration(mp4: &re_mp4::Mp4, fragments: Option<&Fragments>) -> Option<MediaTime> {
+    let mvhd = &mp4.moov.mvhd;
+    let timescale = u64::from(mvhd.timescale);
+    stated_span(mvhd.duration, timescale)
+        .or_else(|| {
+            let mehd = mp4.moov.mvex.as_ref()?.mehd.as_ref()?;
+            stated_span(mehd.fragment_duration, timescale)
+        })
+        .or_else(|| {
+            let fragments = fragments?;
+            stated_span(fragments.index.span(), u64::from(fragments.index.timescale))
+        })
+}
+
+/// A duration the container states, in microseconds, or `None` where it
+/// states that it does not know one. All ones is the stated marker for
+/// an unknown duration (8.2.2.3) in either width, and a span no file has
+/// is the same claim made carelessly. Reporting no duration is honest:
+/// a fabricated one reaches the seek bar, and a saturated zero reads as
+/// live to every `duration <= 0` test.
+fn stated_span(value: u64, timescale: u64) -> Option<MediaTime> {
+    if timescale == 0 || value == u64::from(u32::MAX) || value == u64::MAX {
+        return None;
+    }
+    let us = i128::from(value) * 1_000_000 / i128::from(timescale);
+    (0 < us && us <= i128::from(MAX_DURATION_US)).then(|| MediaTime::from_micros(us as i64))
+}
+
+/// The movie fragments inside one indexed subsegment. The index says
+/// where it starts and how long it is; a jump that does not land on a
+/// fragment is a refusal rather than a search for one, because the file
+/// came from a URL and the index is as untrusted as the rest of it.
+fn read_subsegment(
+    src: &mut CachedSource,
+    entry: IndexEntry,
+    limits: &DemuxLimits,
+) -> Result<Vec<MoofBox>, DemuxError> {
+    let ceiling = MAX_FRAGMENT_BYTES.min(limits.max_metadata_bytes);
+    let end = entry.offset.saturating_add(u64::from(entry.size));
+    let mut reader = SourceReader::new(&mut *src, end, ceiling);
+    let mut moofs = Vec::new();
+    let mut pos = entry.offset;
+
+    while end - pos >= 8 {
+        reader.seek(SeekFrom::Start(pos)).map_err(DemuxError::Io)?;
+        let header = BoxHeader::read(&mut reader)
+            .map_err(|e| DemuxError::Parse(format!("subsegment box header: {e}")))?;
+        let body = reader.stream_position().map_err(DemuxError::Io)?;
+        // As in the prefix walk, the size counts from `body - 8`, so a
+        // 64-bit header's box reaches eight bytes further than its size,
+        // and a size near the top of the range sums past it. The walk
+        // ends when `pos` reaches `end`, so a sum that wrapped would
+        // step backwards and could cycle rather than finish.
+        let size = header.size;
+        let past_the_end = DemuxError::Parse("a box in the subsegment runs past its end".into());
+        let Some(next) = (body - 8).checked_add(size) else {
+            return Err(past_the_end);
+        };
+        if size < 8 || next > end {
+            return Err(past_the_end);
+        }
+        if header.name == BoxType::MoofBox {
+            if size > ceiling {
+                return Err(DemuxError::Cap("movie fragment above the header ceiling"));
+            }
+            let moof = match catch_unwind(AssertUnwindSafe(|| MoofBox::read_box(&mut reader, size)))
+            {
+                Ok(Ok(moof)) => moof,
+                Ok(Err(e)) => return Err(DemuxError::Parse(format!("movie fragment: {e}"))),
+                Err(_) => {
+                    return Err(DemuxError::Parse(
+                        "mp4 parser panicked on a movie fragment".into(),
+                    ));
+                }
+            };
+            moofs.push(moof);
+        } else if moofs.is_empty() {
+            // A subsegment may be introduced by a segment type, an event
+            // message, a producer reference time or free space; anything
+            // else means the index does not describe this file.
+            let kind = u32::from(header.name);
+            let allowed = kind == STYP
+                || kind == PRFT
+                || kind == u32::from(BoxType::EmsgBox)
+                || kind == u32::from(BoxType::FreeBox);
+            if !allowed {
+                return Err(DemuxError::Parse(
+                    "the segment index does not land on a movie fragment".into(),
+                ));
+            }
+        }
+        pos = next;
+    }
+
+    if moofs.is_empty() {
+        return Err(DemuxError::Parse(
+            "the segment index does not land on a movie fragment".into(),
+        ));
+    }
+    Ok(moofs)
+}
+
+/// Move a time from one timescale to another.
+fn rescale(value: u64, from: u64, to: u64) -> u64 {
+    if from == 0 {
+        return value;
+    }
+    (u128::from(value) * u128::from(to) / u128::from(from)) as u64
 }
 
 /// What a picker needs to show for one audio track, read straight from
@@ -654,6 +1223,7 @@ impl Demuxer for Mp4Demuxer {
         if let Some(event) = self.pending.pop_front() {
             return Ok(event);
         }
+        self.fill()?;
 
         // Interleave in decode order; audio wins ties so it never trails a
         // burst of larger video AUs.
@@ -667,14 +1237,14 @@ impl Demuxer for Mp4Demuxer {
         if take_video {
             let sample = self.next_video().expect("checked above");
             let raw = self.read_sample(sample)?;
-            let video = self.video.as_ref().expect("checked above");
+            let video = self.video.as_mut().expect("checked above");
             let data = if self.emit_raw_video {
                 raw
             } else {
                 Self::convert_sample(video, raw, sample.sync)?
             };
             let track = video.id;
-            self.vidx += 1;
+            video.samples.take();
             Ok(StreamEvent::Au(Au {
                 track,
                 data,
@@ -686,8 +1256,9 @@ impl Demuxer for Mp4Demuxer {
         } else {
             let sample = self.next_audio().expect("checked above");
             let data = self.read_sample(sample)?;
-            let track = self.audio.as_ref().expect("checked above").id;
-            self.aidx += 1;
+            let audio = self.audio.as_mut().expect("checked above");
+            let track = audio.id;
+            audio.samples.take();
             Ok(StreamEvent::Au(Au {
                 track,
                 data,
@@ -701,26 +1272,30 @@ impl Demuxer for Mp4Demuxer {
 
     fn seek(&mut self, target: MediaTime, generation: Generation) -> Result<MediaTime, DemuxError> {
         self.generation = generation;
+        if self.fragments.is_some() {
+            return self.seek_fragmented(target);
+        }
 
-        let landed = if let Some(video) = &self.video {
+        let landed = if let Some(VideoTrack {
+            samples: Samples::Whole { all, next },
+            ..
+        }) = &mut self.video
+        {
             // Last sync sample at or before the target (by decode order —
             // sync samples present at their decode time).
-            let mut key = 0usize;
-            for (i, s) in video.samples.iter().enumerate() {
-                if s.sync && s.dts <= target {
-                    key = i;
-                } else if s.dts > target {
-                    break;
-                }
-            }
-            self.vidx = key;
-            video.samples.get(key).map(|s| s.pts).unwrap_or(target)
+            let key = landing(all, target).unwrap_or(0);
+            *next = key;
+            all.get(key).map(|s| s.pts).unwrap_or(target)
         } else {
             target
         };
 
-        if let Some(audio) = &self.audio {
-            self.aidx = audio.samples.partition_point(|s| s.pts < landed);
+        if let Some(AudioTrack {
+            samples: Samples::Whole { all, next },
+            ..
+        }) = &mut self.audio
+        {
+            *next = all.partition_point(|s| s.pts < landed);
         }
         Ok(landed)
     }
@@ -751,5 +1326,374 @@ impl Demuxer for Mp4Demuxer {
 }
 
 fn scale_to_us(value: i64, timescale: u64) -> i64 {
-    (value as i128 * 1_000_000 / timescale as i128) as i64
+    let us = i128::from(value) * 1_000_000 / i128::from(timescale.max(1));
+    us.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemSource;
+
+    fn subsegment(bytes: Vec<u8>, size: u32) -> Result<Vec<MoofBox>, DemuxError> {
+        let mut src = CachedSource::new(Box::new(MemSource(bytes)));
+        let entry = IndexEntry {
+            offset: 0,
+            size,
+            time: 0,
+            duration: 0,
+        };
+        read_subsegment(&mut src, entry, &DemuxLimits::default())
+    }
+
+    fn header(size: u32, kind: &[u8; 4]) -> Vec<u8> {
+        let mut out = size.to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out
+    }
+
+    /// A box stating its size as a 64-bit one, whose sixteen-byte header
+    /// is the case both box walks have to measure from the right place.
+    fn header64(size: u64, kind: &[u8; 4]) -> Vec<u8> {
+        let mut out = 1u32.to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(&size.to_be_bytes());
+        out
+    }
+
+    fn prefix_of(bytes: Vec<u8>) -> Prefix {
+        let len = bytes.len() as u64;
+        let mut src = CachedSource::new(Box::new(MemSource(bytes)));
+        let mut notes = Vec::new();
+        let mut reader = SourceReader::new(&mut src, len, 64 * 1024);
+        scan_prefix(&mut reader, 0, len, &mut notes, false)
+    }
+
+    /// A 64-bit size is stated from the start of the box and reported
+    /// eight bytes short of it, so a box overrunning the file by exactly
+    /// those eight bytes is the one a length check placed on the
+    /// reported size lets through — and the walk then steps past the end
+    /// and measures what is left of the file as a negative number.
+    #[test]
+    fn a_sixty_four_bit_box_is_bounded_by_where_it_ends() {
+        let mut bytes = header(16, b"ftyp");
+        bytes.extend_from_slice(&[0u8; 8]);
+        let at = bytes.len() as u64;
+        // Sixteen bytes of header, stating a box that ends eight bytes
+        // past the file.
+        bytes.extend_from_slice(&header64(
+            (bytes.len() + 16 - at as usize + 8) as u64,
+            b"moov",
+        ));
+        assert_eq!(bytes.len(), 32);
+        let prefix = prefix_of(bytes);
+        assert!(prefix.moov_end.is_none(), "the box does not fit the file");
+        assert_eq!(prefix.first_fragment, None);
+
+        // The same overrun inside a subsegment, where the walk runs on
+        // the playback path with no fence around it. Free space rather
+        // than a fragment, so nothing inside the box is read and the
+        // walk reaches its next step with the overrun in hand.
+        let over = header64(24, b"free");
+        let err = subsegment(over, 16).expect_err("refused");
+        assert!(matches!(err, DemuxError::Parse(_)), "{err}");
+
+        // A 64-bit size reaches the top of the range, so the sum that
+        // finds the box's end runs past it: a walk that steps backwards
+        // from a wrapped one could cycle rather than finish, and the
+        // subsegment walk finishes only by reaching the end.
+        let mut wraps = header(16, b"ftyp");
+        wraps.extend_from_slice(&[0u8; 8]);
+        wraps.extend_from_slice(&header64(u64::MAX, b"free"));
+        let prefix = prefix_of(wraps);
+        assert!(prefix.moov_end.is_none());
+        assert_eq!(prefix.first_fragment, None);
+
+        let mut wraps = header(8, b"free");
+        wraps.extend_from_slice(&header64(u64::MAX, b"free"));
+        let err = subsegment(wraps, 24).expect_err("refused");
+        assert!(matches!(err, DemuxError::Parse(_)), "{err}");
+
+        // A 64-bit box that does fit is walked, so the bound is not
+        // simply refusing the form.
+        let mut fits = header(16, b"ftyp");
+        fits.extend_from_slice(&[0u8; 8]);
+        fits.extend_from_slice(&header64(24, b"moov"));
+        fits.extend_from_slice(&[0u8; 8]);
+        fits.extend_from_slice(&header(8, b"moof"));
+        let prefix = prefix_of(fits);
+        assert!(prefix.moov_end.is_some());
+        assert_eq!(prefix.first_fragment, Some(40));
+    }
+
+    /// A fragment header whose declared size is beyond anything real is
+    /// refused on the header alone, before a byte of it is fetched.
+    #[test]
+    fn an_absurd_fragment_size_is_refused_before_it_is_read() {
+        let bytes = header(32 * 1024 * 1024, b"moof");
+        let err = subsegment(bytes, u32::MAX).expect_err("refused");
+        assert!(
+            matches!(err, DemuxError::Cap(_)),
+            "{err} should be a cap refusal"
+        );
+    }
+
+    /// The index says a subsegment begins here; if a movie fragment does
+    /// not, the index describes some other file.
+    #[test]
+    fn an_offset_that_is_not_a_fragment_is_a_parse_error() {
+        let mut bytes = header(16, b"mdat");
+        bytes.extend_from_slice(&[0u8; 8]);
+        let err = subsegment(bytes, 16).expect_err("refused");
+        assert!(matches!(err, DemuxError::Parse(_)), "{err}");
+
+        // Nothing at all in the range is the same refusal.
+        assert!(matches!(
+            subsegment(Vec::new(), 0).expect_err("refused"),
+            DemuxError::Parse(_)
+        ));
+    }
+
+    #[test]
+    fn a_box_running_past_the_subsegment_is_a_parse_error() {
+        let bytes = header(64, b"moof");
+        let err = subsegment(bytes, 16).expect_err("refused");
+        assert!(matches!(err, DemuxError::Parse(_)), "{err}");
+    }
+
+    /// A muxed file written with an index per track has to be seeked by
+    /// the video track's, since that is the one whose times a landing is
+    /// chosen against.
+    #[test]
+    fn the_video_tracks_index_is_the_one_seeked_by() {
+        let index = |reference_id| SegmentIndex {
+            reference_id,
+            timescale: 1000,
+            entries: Vec::new(),
+            end: 0,
+        };
+        let two = || vec![index(1), index(2)];
+        assert_eq!(
+            choose_index(two(), Some(2)).expect("chosen").reference_id,
+            2
+        );
+        assert_eq!(
+            choose_index(two(), Some(1)).expect("chosen").reference_id,
+            1
+        );
+        // A track the indexes say nothing about, and a file with no
+        // picture at all, both fall back to the first.
+        assert_eq!(
+            choose_index(two(), Some(9)).expect("chosen").reference_id,
+            1
+        );
+        assert_eq!(choose_index(two(), None).expect("chosen").reference_id, 1);
+        assert!(choose_index(Vec::new(), Some(1)).is_none());
+    }
+
+    /// Encoder priming is stated once in the edit list and applied to
+    /// every fragment's samples, so the samples ahead of the origin carry
+    /// negative times and the PCM stage drops them.
+    #[test]
+    fn the_priming_shift_reaches_a_fragments_samples() {
+        let sample = FragmentSample {
+            offset: 0,
+            size: 4,
+            dts: 1024,
+            pts: 2048,
+            duration: 1024,
+            sync: true,
+        };
+        let plain = to_ref(sample, 48000, 0, &DemuxLimits::default()).expect("within the caps");
+        assert_eq!(plain.dts.as_micros(), 21333);
+        assert_eq!(plain.pts.as_micros(), 42666);
+
+        let primed = to_ref(sample, 48000, 2048, &DemuxLimits::default()).expect("within the caps");
+        assert_eq!(primed.dts.as_micros(), -21333);
+        assert_eq!(primed.pts.as_micros(), 0);
+
+        let huge = FragmentSample {
+            size: u32::MAX,
+            ..sample
+        };
+        assert!(matches!(
+            to_ref(huge, 48000, 0, &DemuxLimits::default()).expect_err("above the AU ceiling"),
+            DemuxError::Cap(_)
+        ));
+
+        // The shift is whatever the edit list states, so it reaches the
+        // subtraction as any `i64` and the scaling as any product of
+        // one: both saturate, so a hostile edit costs a wrong timestamp
+        // rather than a panic or a time that has wrapped round to the
+        // other end of the range.
+        let ends = |(pts, dts): (MediaTime, MediaTime)| (pts.as_micros(), dts.as_micros());
+        assert_eq!(
+            ends(shifted(0, 0, i64::MIN, 1)),
+            (i64::MAX, i64::MAX),
+            "a shift that would carry the times past the top of the range"
+        );
+        assert_eq!(
+            ends(shifted(0, 0, i64::MAX, 1)),
+            (i64::MIN, i64::MIN),
+            "and past the bottom of it"
+        );
+        assert_eq!(
+            ends(shifted(i64::MIN, i64::MAX, i64::MIN, 1)),
+            (0, i64::MAX),
+            "the times themselves at the ends of the range"
+        );
+    }
+
+    /// A `sidx` body stated behind a 64-bit size begins eight bytes
+    /// further in than one behind an ordinary size, and both are read
+    /// from the span the walk computed rather than from the size the
+    /// header reports. Read a byte short or a byte long and the index
+    /// parses as rubbish, or the read runs past the end of the file and
+    /// the walk stops, taking every box behind it.
+    #[test]
+    fn a_segment_index_behind_a_sixty_four_bit_size_is_read_whole() {
+        // version 0, one reference to media, no first offset.
+        let mut index = vec![0u8, 0, 0, 0];
+        index.extend_from_slice(&1u32.to_be_bytes()); // reference_ID
+        index.extend_from_slice(&1000u32.to_be_bytes()); // timescale
+        index.extend_from_slice(&0u32.to_be_bytes()); // earliest pts
+        index.extend_from_slice(&0u32.to_be_bytes()); // first offset
+        index.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        index.extend_from_slice(&1u16.to_be_bytes()); // reference count
+        index.extend_from_slice(&8u32.to_be_bytes()); // to media, 8 bytes
+        index.extend_from_slice(&1000u32.to_be_bytes()); // duration
+        index.extend_from_slice(&0x9000_0000u32.to_be_bytes()); // SAP type 1
+
+        for wide in [false, true] {
+            let mut bytes = header(16, b"ftyp");
+            bytes.extend_from_slice(&[0u8; 8]);
+            let head = if wide {
+                header64(16 + index.len() as u64, b"sidx")
+            } else {
+                header(8 + index.len() as u32, b"sidx")
+            };
+            bytes.extend_from_slice(&head);
+            bytes.extend_from_slice(&index);
+            let at = bytes.len() as u64;
+            bytes.extend_from_slice(&header(8, b"moof"));
+
+            let prefix = prefix_of(bytes);
+            assert_eq!(prefix.first_fragment, Some(at), "wide: {wide}");
+            let found = prefix.indexes.first().expect("the index parses");
+            assert_eq!(found.timescale, 1000, "wide: {wide}");
+            assert_eq!(found.entries.len(), 1, "wide: {wide}");
+            // The first reference is measured from the end of the box,
+            // so getting the body's extent wrong moves it off the
+            // fragment as well as misreading the table.
+            assert!(found.starts_at(at), "wide: {wide}");
+
+            // With nothing behind the box, reading past its end reads
+            // past the file's: the read fails, the walk stops, and the
+            // index goes with it. An over-read is invisible anywhere
+            // else, since the table is as long as its count says and
+            // whatever follows it is never looked at.
+            let mut last = header(16, b"ftyp");
+            last.extend_from_slice(&[0u8; 8]);
+            last.extend_from_slice(&head);
+            last.extend_from_slice(&index);
+            assert_eq!(
+                prefix_of(last).indexes.len(),
+                1,
+                "the index is the last box in the file, wide: {wide}"
+            );
+        }
+    }
+
+    /// One file can be parsed twice at open — a prefix that turns out to
+    /// describe only part of itself is followed by a walk of the whole —
+    /// and both come out of the one budget, or the cap on what an open
+    /// may fetch is worth double what it says.
+    #[test]
+    fn a_second_parse_continues_the_budget_rather_than_restarting_it() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures/h264-aac-640x360-30fps.mp4"),
+        )
+        .expect("fixture readable");
+        let len = bytes.len() as u64;
+        let mut src = CachedSource::new(Box::new(MemSource(bytes)));
+
+        let whole = DemuxLimits::default().max_metadata_bytes;
+        let mut budget = whole;
+        read_metadata(&mut src, len, &mut budget, false).expect("the fixture parses");
+        let after_one = budget;
+        assert!(after_one < whole, "the parse reported no spend at all");
+
+        read_metadata(&mut src, len, &mut budget, false).expect("the fixture parses again");
+        assert!(
+            budget < after_one,
+            "the second parse started the bound again: {budget} left after {after_one}"
+        );
+        assert_eq!(
+            whole - budget,
+            2 * (whole - after_one),
+            "two parses of one file cost twice one"
+        );
+    }
+
+    /// All ones is how a container states that it does not know its own
+    /// length, and a length no file has is the same claim made
+    /// carelessly. Either reaches the seek bar as fact if believed.
+    #[test]
+    fn a_duration_the_container_does_not_know_is_reported_as_none() {
+        assert_eq!(
+            stated_span(90_000, 1000),
+            Some(MediaTime::from_secs(90)),
+            "an ordinary duration"
+        );
+        assert_eq!(stated_span(0, 1000), None, "zero is unknown, not live");
+        assert_eq!(stated_span(1000, 0), None, "no timescale to scale by");
+        assert_eq!(
+            stated_span(u64::from(u32::MAX), 1000),
+            None,
+            "the version 0 unknown marker, which is 49 days if believed"
+        );
+        assert_eq!(
+            stated_span(u64::MAX, 1000),
+            None,
+            "the version 1 unknown marker"
+        );
+        // Against a large timescale the markers scale to a span that
+        // looks perfectly ordinary, so recognising them is what refuses
+        // these two rather than the plausibility bound.
+        assert_eq!(
+            stated_span(u64::from(u32::MAX), u64::from(u32::MAX)),
+            None,
+            "the version 0 marker, which is one second if believed"
+        );
+        assert_eq!(
+            stated_span(u64::MAX, u64::MAX),
+            None,
+            "and the version 1 marker, likewise"
+        );
+        assert_eq!(
+            stated_span(101 * 3600 * 1000, 1000),
+            None,
+            "longer than any file"
+        );
+        assert_eq!(
+            stated_span(99 * 3600 * 1000, 1000),
+            Some(MediaTime::from_secs(99 * 3600)),
+            "and the bound is not refusing long files as such"
+        );
+    }
+
+    /// A subsegment may be introduced by a segment type box, which is
+    /// what a file cut for delivery in pieces carries.
+    #[test]
+    fn a_segment_type_may_precede_the_fragment() {
+        let mut bytes = header(16, b"styp");
+        bytes.extend_from_slice(b"msdh\0\0\0\0");
+        bytes.extend_from_slice(&header(24, b"moof"));
+        bytes.extend_from_slice(&header(16, b"mfhd"));
+        bytes.extend_from_slice(&[0u8; 8]);
+        let moofs = subsegment(bytes, 40).expect("one fragment");
+        assert_eq!(moofs.len(), 1);
+        assert_eq!(moofs[0].start, 16);
+    }
 }

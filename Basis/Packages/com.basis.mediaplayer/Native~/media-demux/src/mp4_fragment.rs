@@ -7,8 +7,6 @@
 //! no `tfdt` continues the decode timeline of the fragment before it, so
 //! the caller carries a cursor per track and sets it after a seek.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use re_mp4::{MoofBox, MoovBox, TfhdBox, TrunBox};

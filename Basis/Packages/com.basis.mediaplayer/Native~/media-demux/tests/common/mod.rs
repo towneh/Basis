@@ -90,12 +90,55 @@ impl ByteSource for SparseSource {
     }
 }
 
+/// A progressive file whose `moov` is bigger than the demuxer's cache
+/// block, by giving it a `free` child of `pad` bytes. The padding is
+/// virtual, so the file costs its real size in memory; the sample
+/// offsets past `moov` are left where they were and are wrong
+/// afterwards, which is why this serves rows about what open *fetches*
+/// rather than about what it plays.
+pub fn pad_moov(data: &[u8], pad: u64) -> SparseSource {
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let size = u32::from_be_bytes(data[pos..pos + 4].try_into().expect("four bytes")) as usize;
+        assert!(size >= 8 && pos + size <= data.len(), "box at {pos}");
+        if &data[pos + 4..pos + 8] == b"moov" {
+            let grown = u32::try_from(size as u64 + 8 + pad).expect("moov stays 32-bit");
+            let mut head = data[..pos + size].to_vec();
+            head[pos..pos + 4].copy_from_slice(&grown.to_be_bytes());
+            // The `free` box's header is real; its body is the padding.
+            head.extend_from_slice(
+                &u32::try_from(8 + pad)
+                    .expect("free stays 32-bit")
+                    .to_be_bytes(),
+            );
+            head.extend_from_slice(b"free");
+            let after = head.len() as u64 + pad;
+            let tail = data[pos + size..].to_vec();
+            let len = after + tail.len() as u64;
+            return SparseSource::new(vec![(0, head), (after, tail)], len);
+        }
+        pos += size;
+    }
+    panic!("no moov in the fixture");
+}
+
 /// Spread a fragmented fixture's fragments [`FRAGMENT_PAD`] further apart
 /// without changing a sample. The padding goes inside each `mdat` past
 /// the samples, which `default-base-is-moof` offsets do not reach; each
 /// `sidx` reference grows by the same amount so an index still tiles the
 /// file; and the `mfra`, whose offsets are absolute, is dropped.
 pub fn inflate(data: &[u8]) -> SparseSource {
+    inflate_with(data, true)
+}
+
+/// As [`inflate`], leaving any index behind describing the file it was
+/// written for rather than the one that comes out: every reference is
+/// then short of its subsegment and the index covers none of the file.
+pub fn inflate_untiled(data: &[u8]) -> SparseSource {
+    inflate_with(data, false)
+}
+
+fn inflate_with(data: &[u8], pad_indexes: bool) -> SparseSource {
     let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut run: Vec<u8> = Vec::new();
     let mut run_start = 0u64;
@@ -115,7 +158,7 @@ pub fn inflate(data: &[u8]) -> SparseSource {
         if &kind == b"mfra" {
             continue;
         }
-        if &kind == b"sidx" {
+        if &kind == b"sidx" && pad_indexes {
             pad_index(&mut boxed);
         }
         if &kind == b"mdat" {
