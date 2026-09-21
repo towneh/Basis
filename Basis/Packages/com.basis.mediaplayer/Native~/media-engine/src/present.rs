@@ -57,6 +57,10 @@ pub struct PresentShared {
     /// Lock-free clock mirror: `clock.now(wall) − wall` µs, `i64::MIN`
     /// while the clock is parked (which disables selection).
     pub clock_offset_us: AtomicI64,
+    /// Render events between selecting a frame and its copy reaching the
+    /// host's texture, plus one. 1 where the copy lands in the selecting
+    /// event (D3D11, Vulkan); 2 on Direct3D 12, where it lands in the next.
+    pub lookahead_events: AtomicI64,
 }
 
 impl PresentShared {
@@ -65,6 +69,7 @@ impl PresentShared {
             last_event_wall_us: AtomicI64::new(i64::MIN),
             interval_us: AtomicI64::new(INTERVAL_SEED_US),
             clock_offset_us: AtomicI64::new(i64::MIN),
+            lookahead_events: AtomicI64::new(1),
         }
     }
 
@@ -94,19 +99,25 @@ impl PresentShared {
     /// Session time the selection grades against: mirrored clock plus one
     /// vsync of lookahead — the frame chosen now is the one that should be
     /// on screen during the *upcoming* refresh. Returned beside the clock's
-    /// own reading, which is what lateness is measured from. `None` while
-    /// parked.
+    /// own reading, which is what lateness is measured from. Where the copy
+    /// lands events later (`lookahead_events`), both move on by those
+    /// events, so the frame is chosen for when it is seen and its lateness
+    /// is judged there too. `None` while parked.
     pub fn selection_target(&self, wall: MediaTime) -> Option<(MediaTime, MediaTime)> {
         let offset = self.clock_offset_us.load(Ordering::Relaxed);
         if offset == i64::MIN {
             return None;
         }
-        let lookahead = self
+        let vsync = self
             .interval_us
             .load(Ordering::Relaxed)
             .clamp(LOOKAHEAD_MIN_US, LOOKAHEAD_MAX_US);
+        let delay = vsync * (self.lookahead_events.load(Ordering::Relaxed) - 1).max(0);
         let clock = wall + MediaTime::from_micros(offset);
-        Some((clock + MediaTime::from_micros(lookahead), clock))
+        Some((
+            clock + MediaTime::from_micros(delay + vsync),
+            clock + MediaTime::from_micros(delay),
+        ))
     }
 
     /// Mirror the clock for the render thread. Call under the clock lock
@@ -241,6 +252,23 @@ mod tests {
         assert!(select_for_render(&shared, &pool, MediaTime::from_millis(100)).is_none());
         shared.mirror_clock(MediaTime::from_millis(100), MediaTime::ZERO, true);
         assert!(select_for_render(&shared, &pool, MediaTime::from_millis(100)).is_some());
+    }
+
+    /// Where the copy lands a render event after selection, the frame is
+    /// chosen for, and its lateness judged at, the refresh it is seen on.
+    #[test]
+    fn a_copy_one_event_late_moves_selection_and_lateness_on_a_refresh() {
+        let shared = PresentShared::new();
+        shared.mirror_clock(MediaTime::ZERO, MediaTime::ZERO, true);
+        let wall = MediaTime::from_secs(1);
+        let (target, clock) = shared.selection_target(wall).expect("running");
+        assert_eq!(target.as_micros(), 1_000_000 + INTERVAL_SEED_US);
+        assert_eq!(clock.as_micros(), 1_000_000);
+
+        shared.lookahead_events.store(2, Ordering::Relaxed);
+        let (target, clock) = shared.selection_target(wall).expect("running");
+        assert_eq!(target.as_micros(), 1_000_000 + 2 * INTERVAL_SEED_US);
+        assert_eq!(clock.as_micros(), 1_000_000 + INTERVAL_SEED_US);
     }
 
     #[test]

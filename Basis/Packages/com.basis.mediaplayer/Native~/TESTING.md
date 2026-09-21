@@ -170,7 +170,7 @@ connection. Set **Liveness** to Live for those.
 | Audio pts-marker budget | The 1024 timestamp markers survive tiny audio chunks: contiguous chunks need none, and without a free slot the producer waits. | `cargo test -p media-engine --lib audio` | CI |
 | Audio ring sizing | Whatever rate and channel count is announced, the audio ring's allocation stays under 6 Mi samples, rounded to whole frames. | `cargo test -p media-engine --lib audio` | CI |
 | A/V output-latency compensation | The device's reported output latency shifts the audio clock back, clamped to 0 to 500 ms and applied by slewing. | `cargo test -p media-engine --lib audio` + `--test session audio_latency`; on device: listen for sync on a fixture and on the RTSP stereo stream | CI; Device (Quest) |
-| Render-event frame selection | The render event shows each 24 fps frame once at 72 Hz; the video thread takes over without events. | `cargo test -p media-engine --lib present` | CI |
+| Render-event frame selection | The render event shows each 24 fps frame once at 72 Hz; the video thread takes over without events. On Direct3D 12, where the copy lands one event later, frames are chosen and judged late one refresh further ahead. | `cargo test -p media-engine --lib present` | CI |
 | Output-texture ownership | Closing and reopening a source releases the output texture, and the texture count stays level across open and close cycles. | In the Editor or a standalone build, open, close and reopen a source half a dozen times with the Profiler's Memory module on Texture2D count | By hand |
 | Headless audio lane | `bm-probe` writes decoded PCM out as raw interleaved f32. | `bm-probe play <src> --audio-out out.f32` | By hand |
 
