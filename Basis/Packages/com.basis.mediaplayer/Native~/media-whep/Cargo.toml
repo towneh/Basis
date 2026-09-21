@@ -33,7 +33,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 # windows crate already in the workspace (no extra native builds); the
 # pure-Rust backend is not usable on MSVC because dimpl's certificate
 # feature (rcgen) hard-enables aws-lc-rs, which needs CMake + NASM there
-# (the same toolchain tax the §5.5 TLS decision refused).
+# (the toolchain cost media-io avoids by using ring).
 [target.'cfg(windows)'.dependencies]
 str0m = { version = "0.23", default-features = false, features = ["wincrypto"] }
 

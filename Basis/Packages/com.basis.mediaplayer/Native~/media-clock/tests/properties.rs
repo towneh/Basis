@@ -199,7 +199,7 @@ fn master_switch_does_not_move_position() {
     assert_eq!(c.rate_ppm(), 0);
 }
 
-/// §8.4's wall-master rung: `slew_wall` never moves `now` at the call
+/// The wall-master rung: `slew_wall` never moves `now` at the call
 /// instant, runs at 1x + ppm afterwards, clamps to the cap, and is inert
 /// under the audio master (there the correction rides the playhead).
 #[test]

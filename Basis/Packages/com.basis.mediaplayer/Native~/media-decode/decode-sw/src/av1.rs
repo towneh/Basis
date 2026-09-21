@@ -1,4 +1,4 @@
-//! AV1 software decode on rav1d (§6.7's software floor — pure Rust, the
+//! AV1 software decode on rav1d (the software fallback: pure Rust, the
 //! dav1d port, driven through its dav1d-compatible C API). 8-bit 4:2:0
 //! only for now: the present layer speaks NV12; 10-bit wants a P010 path
 //! it does not have yet, so higher depths are a typed refusal.

@@ -1,6 +1,6 @@
 //! Whole-resource fetcher for playlist-driven lanes (HLS): every fetch is
 //! an independent, vetted, cancellable GET — each URL re-runs the resolve →
-//! vet → pinned-connect discipline (§9.3) — or a local file read for
+//! vet → pinned-connect discipline — or a local file read for
 //! fixture playback.
 //!
 //! Which of those two a fetcher can do is fixed when it is built, from

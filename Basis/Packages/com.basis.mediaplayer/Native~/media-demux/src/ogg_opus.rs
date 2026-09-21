@@ -1,8 +1,8 @@
-//! Ogg Opus demuxer (§6.6): the `ogg` crate walks pages; this wrapper
+//! Ogg Opus demuxer: the `ogg` crate walks pages; this wrapper
 //! follows the OpusHead stream, derives per-packet durations from the TOC
 //! byte (exact for valid streams — granule positions only re-state it) and
 //! shifts the timeline by pre-skip so priming samples carry negative pts,
-//! which the engine's origin drop consumes (§6.9).
+//! which the engine's origin drop consumes.
 
 use std::io::{Read, Seek, SeekFrom};
 

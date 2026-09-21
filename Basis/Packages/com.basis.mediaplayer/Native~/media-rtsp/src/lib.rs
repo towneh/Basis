@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! RTSP session as a [`Demuxer`] (§6.6, §5.5): `retina` owns the RTSP
+//! RTSP session as a [`Demuxer`]: `retina` owns the RTSP
 //! state machine. `rtsp://` negotiates UDP first — media-rtp's reorder/
 //! RTCP-RR layer under retina's signalling (`udp` module), because
 //! retina's own UDP path has no reorder buffer and sends no receiver
@@ -53,7 +53,7 @@ const UDP_PROBE: Duration = Duration::from_secs(5);
 /// closing session never waits out the stall timeout.
 pub type CancelProbe = Box<dyn Fn() -> bool + Send>;
 
-/// Which transport the open negotiated (§10: transport choices are
+/// Which transport the open negotiated (transport choices are
 /// diagnosable, never silent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtspTransport {
@@ -87,7 +87,7 @@ impl RtspDemuxer {
     /// waits. `rtsp://` negotiates UDP first and falls back to
     /// TCP-interleaved; `rtspt://` pins TCP-interleaved. `udp_peer_allowed`
     /// vets the UDP peer address from the SETUP response before any
-    /// packet is sent to it (§9.3).
+    /// packet is sent to it.
     pub fn open(
         url: &str,
         generation: Generation,
@@ -261,7 +261,7 @@ pub struct StreamAlign {
 pub const MAX_STREAMS: usize = 8;
 
 /// First H.264 video stream and first AAC audio stream; breadth grows
-/// with the §6.7 decode table.
+/// with the decode table.
 pub(crate) fn select_streams(streams: &[retina::client::Stream]) -> (Option<usize>, Option<usize>) {
     let mut video_index = None;
     let mut audio_index = None;

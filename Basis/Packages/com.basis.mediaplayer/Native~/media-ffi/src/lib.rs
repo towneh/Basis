@@ -1,4 +1,4 @@
-//! ABI v4 boundary (§7): opaque generational handles, one snapshot poll
+//! ABI v4 boundary: opaque generational handles, one snapshot poll
 //! per frame, SPSC event drain, a lock-free audio pull, and one
 //! render-event function pointer, whose event id selects the pass.
 //! Poll-driven, no reverse callbacks; UTF-8 both directions;
@@ -74,7 +74,7 @@ pub struct BmSnapshot {
     pub duration_us: i64,
     pub frames_decoded: u64,
     pub frames_presented: u64,
-    /// Structured error (§7): stable code, category (see
+    /// Structured error: stable code, category (see
     /// `media_engine::ErrorCategory`), detail via the event drain.
     pub error_code: i32,
     pub error_category: u32,
@@ -90,7 +90,7 @@ pub struct BmSnapshot {
     /// reserved slot at this offset, so the struct is unchanged at 88
     /// bytes and every other field keeps its place.
     pub av_offset_us: i32,
-    /// Shared-playback sync (§8.4): the ladder's wanted rate offset from
+    /// Shared-playback sync: the ladder's wanted rate offset from
     /// 1x, ppm, after a `bm_session_set_sync_target` call. On lanes with
     /// an audio track the managed audio pull MUST apply it — consume
     /// source frames at `1 + ppm/1e6` times the stream rate through the
@@ -232,7 +232,7 @@ pub struct BmUserData {
 }
 
 /// The JSON descriptor `bm_session_open` accepts. The resolver-facing
-/// `SourceDescriptor` (§6.11) grows here field by field.
+/// `SourceDescriptor` grows here field by field.
 #[derive(serde::Deserialize)]
 struct Descriptor {
     url: String,
@@ -249,14 +249,14 @@ struct Descriptor {
     buffer_depth_ms: Option<u32>,
     /// "live" | "vod"; absent = auto, which is the default and lets the
     /// engine decide from the source itself. State one only to overrule
-    /// a server whose headers mislead (§6.11).
+    /// a server whose headers mislead.
     #[serde(default)]
     liveness: Option<String>,
     /// Index into the offered audio track list to bind. Absent = 0, the
     /// container's first. Switching track re-opens with a new value.
     #[serde(default)]
     audio_track: Option<u32>,
-    /// Absolute path the engine writes the §12.4 capture-recorder CSV
+    /// Absolute path the engine writes the capture-recorder CSV
     /// to on close (sampled at 100 ms engine-side). Absent = off.
     #[serde(default)]
     diag_csv: Option<String>,
@@ -265,12 +265,12 @@ struct Descriptor {
     /// Absent = replace.
     #[serde(default)]
     diag_csv_append: bool,
-    /// Shared-playback divergence bound on live lanes (§8.5),
+    /// Shared-playback divergence bound on live lanes,
     /// milliseconds: a ceiling on the Bank's lag cap and so on Auto's
     /// depth growth. Absent = the default cap.
     #[serde(default)]
     max_divergence_ms: Option<u32>,
-    /// Decode-route preference (§6.7): `"hardware_with_fallback"` |
+    /// Decode-route preference: `"hardware_with_fallback"` |
     /// `"hardware_only"` | `"software_only"`. A per-user machine
     /// setting, never world-authored; a rung the platform does not have
     /// refuses typed. Absent (or unrecognised) = hardware_with_fallback.
@@ -463,7 +463,7 @@ pub extern "C" fn bm_abi_version() -> u32 {
     BM_ABI_VERSION
 }
 
-/// Engine capability set (§6.11, normative): writes one UTF-8 JSON blob
+/// Engine capability set (normative): writes one UTF-8 JSON blob
 /// describing what this build will decode and play, and returns its byte
 /// length. Engine-level, not per-session — call any time after
 /// `bm_abi_version`. Call with (`NULL`, 0) to size, allocate, call again;
@@ -751,11 +751,11 @@ pub extern "C" fn bm_session_set_audio_latency(handle: u64, latency_us: i64) -> 
 }
 
 /// Feed the owner's extrapolated position as a shared-playback soft
-/// sync target (§8.4), microseconds; negative clears it. The engine runs
+/// sync target, microseconds; negative clears it. The engine runs
 /// dead band (150 ms) → 2% slew → seek only past 2 s. The slew reaches
 /// the audio consumer as the snapshot's `sync_rate_ppm` (see its
 /// contract comment); wall-master lanes are corrected engine-side. Live
-/// sessions ignore targets (§8.5 — divergence is bounded by
+/// sessions ignore targets (divergence is bounded by
 /// `max_divergence_ms` in the descriptor, not chased). Call at any
 /// cadence: the engine extrapolates the target at 1x between calls.
 #[unsafe(no_mangle)]
@@ -1244,7 +1244,7 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let handle = data as usize as u64;
         let Some(entry) = lookup(handle) else { return };
-        // Frame selection runs here, at display cadence (§6.8): the
+        // Frame selection runs here, at display cadence: the
         // engine stamps consumer liveness, picks the due frame against
         // its mirrored clock with a vsync of lookahead, and converts into
         // the shared texture; the keyed-mutex copy below then lands it in
@@ -1335,8 +1335,8 @@ fn stable_texture(generation: &AtomicU64, load: impl Fn() -> usize) -> Option<(u
     (generation.load(Ordering::Acquire) == before).then_some((texture, before))
 }
 
-/// Android render event: select the due frame at display cadence (§6.8
-/// — the engine grades due-ness against its mirrored clock with a
+/// Android render event: select the due frame at display cadence
+/// (the engine grades due-ness against its mirrored clock with a
 /// vsync of lookahead) and run the Vulkan conversion pass into the
 /// registered Unity RenderTexture (see `media_present::android` for the
 /// managed graphics contract).

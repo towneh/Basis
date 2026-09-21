@@ -102,7 +102,7 @@ macro_rules! delegate_video_decoder {
     };
 }
 
-/// Capability probe (§6.11): whether the platform VP9 decoder MFT (the
+/// Capability probe: whether the platform VP9 decoder MFT (the
 /// Store "VP9 Video Extensions") both enumerates and activates — the same
 /// path `Vp9Decoder::new` takes, so a `true` is a will-decode claim for
 /// the route the engine would actually use.
@@ -117,7 +117,7 @@ pub fn probe_vp9() -> bool {
 }
 
 /// H.264 through the fixed in-box decoder CLSID, fed Annex B with SPS/PPS
-/// on keyframes (the discovered M0 contract).
+/// on keyframes, which is what it requires.
 pub struct H264Decoder {
     mft: VideoMft,
 }
@@ -148,7 +148,7 @@ delegate_video_decoder!(H264Decoder);
 
 /// VP9 through the platform decoder (the Store "VP9 Video Extensions"
 /// MFT), found by probe: its absence is a typed error the engine reports
-/// (§6.7 — the silently-absent-extension class becomes a diagnostic).
+/// (the silently-absent-extension class becomes a diagnostic).
 pub struct Vp9Decoder {
     mft: VideoMft,
 }

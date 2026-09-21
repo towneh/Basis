@@ -14,7 +14,7 @@ public static class BasisMediaNative
     [DllImport(Dll)] public static extern uint bm_abi_version();
 
     /// <summary>
-    /// Engine capability set (§6.11): writes one UTF-8 JSON blob and
+    /// Engine capability set: writes one UTF-8 JSON blob and
     /// returns its byte length. Call with (null, 0) to size, allocate,
     /// call again; when the buffer is too small nothing is written and
     /// the required length still returns. Negative = error. Engine-level,
@@ -147,7 +147,7 @@ public enum BmLiveness
     Live = 2,
 }
 
-/// <summary>Decode-route preference (engine §6.7): a per-user machine
+/// <summary>Decode-route preference : a per-user machine
 /// setting, applied to every session the client opens — never a
 /// world-author control. A rung the platform does not have is a typed
 /// refusal (Quest has no software rung for H.264/HEVC/VP9).</summary>

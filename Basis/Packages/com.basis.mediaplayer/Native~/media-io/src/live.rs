@@ -1,5 +1,5 @@
 //! Sequential live HTTP(S) source: the async I/O domain under the
-//! `ByteSource` seam (§6.3, §6.10).
+//! `ByteSource` seam.
 //!
 //! One streaming GET; an async reader task on the shared runtime pulls
 //! chunks under a per-read stall timeout and fills a bounded channel the

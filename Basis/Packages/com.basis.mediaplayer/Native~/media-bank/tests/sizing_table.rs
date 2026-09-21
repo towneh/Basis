@@ -156,7 +156,7 @@ fn bank_meets_the_sizing_table_on_the_jitter_lanes() {
 
 #[test]
 fn three_seconds_absorbs_the_jitter_regime_outright() {
-    // §6.5's headline claim, asserted on both impaired TCP lanes.
+    // The sizing model's headline claim, asserted on both impaired TCP lanes.
     for capture in [
         GapCapture::ts_rtt300_loss005(),
         GapCapture::rtspt_rtt300_loss005(),

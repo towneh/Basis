@@ -1,4 +1,4 @@
-//! Capability probes (§6.11). Presence and route come from the NDK: a
+//! Capability probes. Presence and route come from the NDK: a
 //! decoder that `createDecoderByType` actually instantiates is a
 //! will-decode claim for the route the engine takes, and the codec name
 //! separates hardware from the `c2.android`/`OMX.google` software

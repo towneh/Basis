@@ -6,7 +6,7 @@
 //! media-rtsp's shared aligner/emit path — WHEP frames enter the engine
 //! exactly where RTSP frames do.
 //!
-//! §9.3 enforcement point: every datagram str0m wants to send passes
+//! Where the address policy is enforced: every datagram str0m wants to send passes
 //! the engine's address gate first. Remote ICE candidates are
 //! server-controlled (SDP and trickle alike), so the check sits at the
 //! transmit boundary where it cannot be bypassed — a blocked candidate's
@@ -174,7 +174,7 @@ pub(crate) async fn run_session(
     let mut aligning = true;
     let align_deadline = tokio::time::Instant::now() + ALIGN_WAIT;
     // One note per blocked address, up to a bound; a hostile candidate
-    // list must not flood stderr (§10).
+    // list must not flood stderr.
     let mut blocked_peers: Vec<std::net::IpAddr> = Vec::new();
 
     let mut buf = vec![0u8; 65_536];

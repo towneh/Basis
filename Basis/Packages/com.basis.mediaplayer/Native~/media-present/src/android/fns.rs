@@ -1,5 +1,5 @@
 //! The Vulkan device functions the present pass calls, loaded through
-//! Unity's `vkGetInstanceProcAddr` (the M0 discipline: no loader, no
+//! Unity's `vkGetInstanceProcAddr` (no loader, no
 //! global function tables — everything comes off the chain Unity itself
 //! uses).
 

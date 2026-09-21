@@ -1,5 +1,5 @@
-//! `conformance`: diff the demuxer's AU stream against the ffprobe oracle
-//! (§12.4) — announce, count, timestamps to 1 µs, and payload MD5 for
+//! `conformance`: diff the demuxer's AU stream against the ffprobe oracle:
+//! announce, count, timestamps to 1 µs, and payload MD5 for
 //! every packet (raw stored payloads, so keyframes need no exemption).
 //!
 //! Needs `ffprobe` on PATH; the fixture set is the committed `fixtures/`

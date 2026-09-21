@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-/// YUV→RGB matrix, as stated by the decoder (§6.8: colour comes from the
+/// YUV→RGB matrix, as stated by the decoder (colour comes from the
 /// stream's own reported parameters, never guessed from dimensions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum YuvMatrix {
@@ -102,7 +102,7 @@ pub trait OpaqueImage: Send {
     }
 }
 
-/// A decoded frame kept in decoder-native GPU memory (§6.8: opaque
+/// A decoded frame kept in decoder-native GPU memory (opaque
 /// end-to-end, never CPU-locked).
 pub struct OpaqueFrame {
     pub width: u32,

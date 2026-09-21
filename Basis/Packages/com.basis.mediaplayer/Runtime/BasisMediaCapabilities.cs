@@ -3,7 +3,7 @@ using System.Text;
 using UnityEngine;
 
 /// <summary>
-/// The engine-declared capability set (§6.11): what this basis_media
+/// The engine-declared capability set: what this basis_media
 /// build will decode and play, queried once after the ABI probe and
 /// cached. Consumers (the resolver's format selection, UI greying out
 /// unsupported sources) read the typed <see cref="Set"/> or the raw

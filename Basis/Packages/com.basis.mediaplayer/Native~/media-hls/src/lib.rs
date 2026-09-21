@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! HLS (§6.6): playlist-driven segment chaining over the TS and fMP4
+//! HLS: playlist-driven segment chaining over the TS and fMP4
 //! demuxers. `m3u8-rs` parses playlist bytes; everything schedulable is
 //! ours — variant choice, the live window cursor, refresh cadence,
 //! join point, discontinuity splices, seek-to-segment.
@@ -34,7 +34,7 @@ pub trait SegmentFetcher: Send {
     fn wait(&mut self, duration: Duration);
 }
 
-/// Parse-time caps (§6.6): enforced here, not around the demuxer.
+/// Parse-time caps: enforced here, not around the demuxer.
 const PLAYLIST_CAP: u64 = 4 * 1024 * 1024;
 const SEGMENT_CAP: u64 = 64 * 1024 * 1024;
 const MAX_SEGMENTS: usize = 65_536;

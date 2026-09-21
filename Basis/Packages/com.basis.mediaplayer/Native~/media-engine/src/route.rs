@@ -1,10 +1,10 @@
-//! Platform decoder routing (§6.7): one factory pair per platform behind
+//! Platform decoder routing: one factory pair per platform behind
 //! the same signatures, so the pipeline threads stay platform-free. A
 //! refusal is typed — the caller turns it into a CodecRefused diagnostic,
 //! mutes the track and plays on; a software fallback engaging is reported,
 //! never silent.
 //!
-//! The route ladder honours the user's decode preference (§6.7):
+//! The route ladder honours the user's decode preference:
 //! hardware-with-fallback (default) / hardware-only / software-only. A
 //! rung the platform does not have is a typed refusal. Software routes
 //! additionally enforce the performance cap: content over 1080p60
@@ -260,8 +260,8 @@ fn open_windows_software(
     }
 }
 
-/// Android: every route is the platform MediaCodec stack (§6.7 —
-/// platform-decoder-or-typed-refusal is the ceiling for the patented and
+/// Android: every route is the platform MediaCodec stack
+/// (platform-decoder-or-typed-refusal is the ceiling for the patented and
 /// the royalty-free video codecs alike; Quest has no software fallback
 /// for avc/hevc/vp9 and the rav1d floor has no Vulkan upload path yet, so
 /// a missing platform decoder is a typed refusal, observable, not
@@ -300,7 +300,7 @@ fn route_video_decoder(
 
 /// Headless platforms (Linux and anything else without a platform
 /// decoder adapter): only the in-process floors route. The patented
-/// codecs never bundle (§6.7), and the VAAPI adapter is future work, so
+/// codecs never bundle, and the VAAPI adapter is future work, so
 /// H.264/H.265/VP9/VP8 are typed refusals here — observable, never
 /// silent. The hardware-only preference has no rung.
 #[cfg(not(any(windows, target_os = "android")))]
@@ -357,7 +357,7 @@ pub fn open_audio_decoder(
     })
 }
 
-/// Android: AAC/MP3 decode on the platform (§6.7 — the patented codecs
+/// Android: AAC/MP3 decode on the platform (the patented codecs
 /// never bundle); FLAC and Opus stay on the in-process floors for one
 /// behaviour across platforms.
 #[cfg(target_os = "android")]
@@ -390,7 +390,7 @@ pub fn open_audio_decoder(
 }
 
 /// Headless platforms: FLAC and Opus on the in-process floors; AAC and
-/// MP3 have no platform decoder here and refuse typed (§6.7 — the
+/// MP3 have no platform decoder here and refuse typed (the
 /// patented codecs never bundle).
 #[cfg(not(any(windows, target_os = "android")))]
 pub fn open_audio_decoder(
@@ -406,7 +406,7 @@ pub fn open_audio_decoder(
         AudioCodec::Opus => Box::new(OpusDecoder::new(codec_private)?),
         AudioCodec::Aac | AudioCodec::Mp3 => {
             return Err(media_decode::DecodeError(
-                "no AAC/MP3 decode path on this platform (platform decoders only, §6.7)".into(),
+                "no AAC/MP3 decode path on this platform (platform decoders only)".into(),
             ));
         }
         AudioCodec::Pcm => Box::new(PcmDecoder::new(sample_rate, channels, codec_private)?),

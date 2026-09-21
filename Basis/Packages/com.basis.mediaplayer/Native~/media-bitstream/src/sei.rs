@@ -1,4 +1,4 @@
-//! SEI message walking (spec §6.12: shared by captions today and the
+//! SEI message walking (shared by captions today and the
 //! type-5 user-data lane later).
 //!
 //! A caption SEI arrives inside a video access unit as a NAL (H.264 type 6,

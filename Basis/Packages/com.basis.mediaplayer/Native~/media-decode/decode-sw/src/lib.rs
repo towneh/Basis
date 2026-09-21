@@ -1,4 +1,4 @@
-//! Software decoders (§6.7's software floor): permissively licensed,
+//! Software decoders: permissively licensed,
 //! in-process, one behaviour on every platform.
 //!
 //! The AV1 floor (rav1d) is absent on Android for now: the crates.io

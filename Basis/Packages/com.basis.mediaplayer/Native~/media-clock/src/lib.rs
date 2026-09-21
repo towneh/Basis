@@ -130,7 +130,7 @@ pub enum Master {
     Wall,
 }
 
-/// Ladder parameters. Defaults follow the calibration in the spec: 20 ms dead
+/// Ladder parameters. Defaults: 20 ms dead
 /// band (Media3's figure), 2% slew cap (validated on the C VOD branch, well
 /// under the ~6% audibility bound), 700 ms snap threshold (the C live
 /// branch's resync figure). The correction is proportional with the cap as a
@@ -188,7 +188,7 @@ impl Default for ClockConfig {
 }
 
 /// What an observation did, for the diagnostics event log (slew/seek
-/// corrections are default-verbosity events, §10).
+/// corrections are default-verbosity events).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Correction {
     /// Error inside the dead band, or observation ignored (wall master,
@@ -358,7 +358,7 @@ impl MediaClock {
         }
     }
 
-    /// External soft-target slew under the wall master (§8.4's ladder on
+    /// External soft-target slew under the wall master (the sync ladder on
     /// masterless lanes): rebase so `now` never jumps, then run at
     /// 1x + `ppm`, clamped to the slew cap. Ignored under the audio
     /// master — there the correction rides the audio playhead and

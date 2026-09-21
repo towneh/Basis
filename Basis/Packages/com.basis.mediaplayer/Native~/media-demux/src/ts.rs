@@ -12,7 +12,7 @@
 //! PIDs; PES packets reassemble per PID (delimited by payload-unit-start,
 //! not the untrusted PES_packet_length) and flush as access units. PCR/PTS
 //! are 90 kHz; the 33-bit wrap is unwrapped here so nothing downstream
-//! sees a wrapped value (§6.4).
+//! sees a wrapped value.
 
 use std::collections::VecDeque;
 

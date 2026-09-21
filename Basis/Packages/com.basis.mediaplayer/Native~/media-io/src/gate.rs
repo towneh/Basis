@@ -77,7 +77,7 @@ impl AddressGate for AllowAllGate {
     }
 }
 
-/// Resolve a bare host and vet every returned address (§9.3) — the
+/// Resolve a bare host and vet every returned address — the
 /// pre-connect check for transports whose clients do their own dialling
 /// (RTSP). A mixed public/private answer is the rebinding shape and is
 /// refused whole. TOCTOU note: the transport re-resolves at connect; the

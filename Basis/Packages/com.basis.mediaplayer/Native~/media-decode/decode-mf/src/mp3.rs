@@ -1,4 +1,4 @@
-//! MP3 decode through the in-box Media Foundation decoder (§6.7: the
+//! MP3 decode through the in-box Media Foundation decoder (the
 //! patents have expired, but the platform route needs no bundled code at
 //! all). Same sync-MFT driving as AAC; the input type is just
 //! MAJOR=Audio, SUBTYPE=MP3 plus the container-stated rate and channels —

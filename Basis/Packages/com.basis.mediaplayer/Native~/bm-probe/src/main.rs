@@ -1,9 +1,6 @@
-//! `bm-probe`: the harness player (spec §12.4). A CLI over the engine
+//! `bm-probe`: the harness player. A CLI over the engine
 //! crates directly — no Unity, no C ABI in the loop — with null sinks in
 //! place of the GPU presenter: frames land as hashes.
-//!
-//! Subcommands accrete per milestone; `probe` from M1, `play` and
-//! `conformance` from M2, `impair` at M3, `bench`/`resolve` at M4.
 
 #![forbid(unsafe_code)]
 
@@ -81,7 +78,7 @@ enum Command {
         #[arg(long)]
         allow_local: bool,
         /// Force the live path. Liveness is inferred from the source by
-        /// default; this overrules it (§6.11).
+        /// default; this overrules it.
         #[arg(long)]
         live: bool,
         /// Which of the container's audio tracks to bind, by index into
@@ -102,7 +99,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Decode::Fallback)]
         decode: Decode,
     },
-    /// Measure the §11 budgets for one lane: startup-to-first-frame and
+    /// Measure the performance budgets for one lane: startup-to-first-frame and
     /// seek-to-settled, repeated and aggregated.
     Bench {
         /// Local path or http(s) URL.
@@ -127,7 +124,7 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
-    /// Print the engine-declared capability set (§6.11) as JSON — the
+    /// Print the engine-declared capability set as JSON — the
     /// blob `bm_capabilities` serves, so format-selection rules are
     /// testable without Unity.
     Caps {
@@ -144,7 +141,7 @@ enum Command {
     },
     /// Replay a phase-0 impairment profile over a live lane (a TS file
     /// paced to 1x, or a live URL) and grade the Bank against the sizing
-    /// model (§12.2).
+    /// model.
     Impair {
         /// Local .ts path or live http(s) URL.
         url: String,

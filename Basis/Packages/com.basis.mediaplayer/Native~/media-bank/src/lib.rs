@@ -1,4 +1,4 @@
-//! The AU bank + pacer (spec §6.5): the live buffer, the VOD pacer, the HLS
+//! The AU bank + pacer: the live buffer, the VOD pacer, the HLS
 //! live margin and the RTSP jitter absorber as one component.
 //!
 //! The Bank sits between demux and decode for every transport. It is a
@@ -66,7 +66,7 @@ pub struct BankConfig {
     /// viewer may sit. Past it the Bank trades stutter for staying near
     /// the edge.
     pub lag_cap: MediaTime,
-    /// A high-bitrate source must not blow the memory budget (§11: 16 MiB
+    /// A high-bitrate source must not blow the memory budget (16 MiB
     /// default).
     pub byte_cap: usize,
     /// Cap on banked media duration.
@@ -76,7 +76,7 @@ pub struct BankConfig {
     pub startup_timeout: MediaTime,
     /// How fast decay returns surplus lag, ppm of wall time. Matches the
     /// present clock's slew cap so the give-back can be presented smoothly
-    /// (both halves or neither, §6.5).
+    /// (both halves or neither).
     pub decay_rate_ppm: i64,
     /// The decoder-priming allowance at every anchor, in both fill modes.
     ///
@@ -382,7 +382,7 @@ impl Bank {
     /// promise, and its cold-start philosophy is join-fast-grow-on-evidence
     /// (the seed bucket's upper edge makes cold target_lag a hair above
     /// zero, and +cushion would tax every Auto live join ~500 ms).
-    /// Target-zero lanes (the §6.14 shallow posture) lift immediately.
+    /// Target-zero lanes (the shallow posture) lift immediately.
     fn hold_target(&self) -> MediaTime {
         let target = self.target_lag();
         if self.priming()
@@ -640,7 +640,7 @@ impl Bank {
         self.pop_due_gated(wall, &|_| false)
     }
 
-    /// [`Bank::pop_due`] under a release gate (§6.3 per-track routing):
+    /// [`Bank::pop_due`] under a release gate (per-track routing):
     /// events the gate blocks are skipped — left queued, their relative
     /// order intact — so one track's full decode chain never wedges the
     /// other track's release. Only whole tracks may be blocked (the gate
@@ -753,10 +753,10 @@ impl Bank {
     /// so the schedule resumes 1x from wherever release actually reached
     /// and never pauses: released-ahead media is in-flight depth held by
     /// the decode channel, the frame pool and the audio ring, and the
-    /// remaining `arrived − released` is the bank's own lag — the §6.5
-    /// split. Crediting only the cushion here instead would defer the
+    /// remaining `arrived − released` is the bank's own lag.
+    /// Crediting only the cushion here instead would defer the
     /// schedule by the difference, and one anchor governs both tracks, so
-    /// that pause starves the audio ring as well as the pool (R4). No-op
+    /// that pause starves the audio ring as well as the pool. No-op
     /// outside a priming join.
     ///
     /// The Auto estimator is unaffected: it observes `behind + lag`, and

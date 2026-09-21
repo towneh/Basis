@@ -1,4 +1,4 @@
-//! FLAC decode on claxon (§6.7: in-process, no platform decoder involved —
+//! FLAC decode on claxon (in-process, no platform decoder involved —
 //! the C-era blocker was the hanging MF FLAC MFT, not FLAC itself).
 //!
 //! Each submitted AU is one complete FLAC frame (Matroska stores frames;

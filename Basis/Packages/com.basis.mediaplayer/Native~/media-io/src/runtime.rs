@@ -1,4 +1,4 @@
-//! The shared I/O runtime (§6.3): async is confined to the network edge,
+//! The shared I/O runtime: async is confined to the network edge,
 //! one small tokio runtime shared across sessions. The media path stays
 //! synchronous and consumes bounded channels this side fills.
 

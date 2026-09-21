@@ -1,7 +1,7 @@
 //! D3D11 shared-texture handoff into Unity via a keyed mutex.
 //!
 //! Producer (decode thread, own D3D11 device) converts the decoder's NV12
-//! frame into a shared BGRA texture with one GPU pass (§6.8, `gpu`);
+//! frame into a shared BGRA texture with one GPU pass (`gpu`);
 //! consumer (Unity render thread) opens the shared handle on Unity's
 //! device and copies into a Unity-created texture. Keyed-mutex protocol:
 //! producer acquires key 0 / releases key 1, consumer acquires key 1 /

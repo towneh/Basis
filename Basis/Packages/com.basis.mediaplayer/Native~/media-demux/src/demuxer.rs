@@ -1,4 +1,4 @@
-//! The pull-based demuxer contract (§6.2): the engine pulls, the demuxer
+//! The pull-based demuxer contract: the engine pulls, the demuxer
 //! owns nothing downstream and is never re-entered.
 
 use media_clock::{Generation, MediaTime};
@@ -34,7 +34,7 @@ pub struct DemuxOptions {
     pub audio_track: usize,
 }
 
-/// Parse-time caps drawn from the session budget (§6.6): enforced inside
+/// Parse-time caps drawn from the session budget: enforced inside
 /// the demuxer, not around it.
 #[derive(Debug, Clone)]
 pub struct DemuxLimits {

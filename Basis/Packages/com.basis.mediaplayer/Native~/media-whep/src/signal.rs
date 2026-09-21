@@ -13,7 +13,7 @@ use std::time::Duration;
 use media_io::{AddressGate, IoLimits};
 use url::Url;
 
-/// How the server answered the offer (§10: negotiation shape is
+/// How the server answered the offer (negotiation shape is
 /// diagnosable, never silent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnswerFlow {

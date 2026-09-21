@@ -1,4 +1,4 @@
-//! Raw FLAC file demuxer (§6.6): parses the stream header, then walks
+//! Raw FLAC file demuxer: parses the stream header, then walks
 //! frames by header validation (sync pattern, structural fields, CRC-8,
 //! and the expected frame/sample number) so each AU is one complete FLAC
 //! frame with an exact sample-derived pts. Decoding stays in decode-sw;

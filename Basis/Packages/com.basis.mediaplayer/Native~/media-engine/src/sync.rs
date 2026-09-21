@@ -1,4 +1,4 @@
-//! Shared-playback soft sync target (§8.4): receivers feed the owner's
+//! Shared-playback soft sync target: receivers feed the owner's
 //! extrapolated position in and the engine runs the correction ladder —
 //! dead band (no action) → bounded slew → seek only past a large
 //! threshold. The hard seek is the last rung, never the first.
@@ -16,7 +16,7 @@
 //! - **Wall master** (no audio track): the engine slews the clock
 //!   directly ([`media_clock::MediaClock::slew_wall`]).
 //!
-//! Live lanes ignore sync targets entirely (§8.5): the stream clock is
+//! Live lanes ignore sync targets entirely: the stream clock is
 //! authoritative there and depth is per-viewer latency — divergence is
 //! bounded by the Bank's lag cap (`OpenRequest::max_divergence_ms`), not
 //! chased by corrections.
@@ -38,7 +38,7 @@ pub const SYNC_DEAD_BAND: MediaTime = MediaTime::from_millis(150);
 /// last rung rather than the only one).
 pub const SYNC_SEEK_THRESHOLD: MediaTime = MediaTime::from_secs(2);
 /// Slew magnitude, ppm of 1x. Matches the clock's slew cap so an
-/// audio-master correction can be followed at full rate (§6.4's 2%,
+/// audio-master correction can be followed at full rate (2%,
 /// well under the ~6% audibility bound).
 pub const SYNC_SLEW_PPM: i64 = 20_000;
 
@@ -109,7 +109,7 @@ fn clear_rate(px: &PipelineShared) {
 }
 
 /// One ladder pass against the current position. Corrections only apply
-/// to a playing VOD session: live lanes never chase (§8.5), and a
+/// to a playing VOD session: live lanes never chase, and a
 /// buffering/paused/seeking session is left to settle first.
 pub(crate) fn evaluate(px: &PipelineShared, wall: MediaTime) {
     let Some(target) = *px.sync.target.lock().expect("sync lock") else {

@@ -1,5 +1,5 @@
-//! Sessions, state machine, pipeline assembly (§6.3). One session = one
-//! pipeline over the M1 foundations: media-clock is the only position
+//! Sessions, state machine, pipeline assembly. One session = one
+//! pipeline: media-clock is the only position
 //! source, the Bank sits between demux and decode, every stage exports
 //! counters, and the leased FramePool carries decoded frames to the
 //! present pass.
@@ -74,7 +74,7 @@ pub enum ErrorCategory {
     Internal = 6,
 }
 
-/// Structured error (§7): stable code, category, human detail. The code
+/// Structured error: stable code, category, human detail. The code
 /// scheme is category * 100 + a per-category sub-code.
 #[derive(Debug)]
 pub struct EngineError {
@@ -199,7 +199,7 @@ pub struct SessionShared {
     pub(crate) stop: AtomicBool,
 }
 
-/// Liveness (§6.11). Every transport bar bare http(s) settles this
+/// Liveness. Every transport bar bare http(s) settles this
 /// itself — RTSP/WHEP/RIST force Live, HLS takes it from the playlist,
 /// a resolver states it — so the descriptor field exists for the one
 /// case left: a plain HTTP URL that is not a playlist.
@@ -216,7 +216,7 @@ pub enum SourceLiveness {
     Auto,
 }
 
-/// Decode-route preference (§6.7): a per-user machine setting, never
+/// Decode-route preference: a per-user machine setting, never
 /// world-authored. One audited enforcement point in the route factory; a
 /// rung the platform does not have is a typed refusal, never silently
 /// ignored.
@@ -228,14 +228,12 @@ pub enum DecodePreference {
     HardwareWithFallback,
     /// Hardware or typed refusal (the C player's shipped posture).
     HardwareOnly,
-    /// Software only — the §11 CPU A/B lever and a driver-workaround
+    /// Software only — the CPU A/B lever and a driver-workaround
     /// escape hatch. Subject to the software-route performance cap.
     SoftwareOnly,
 }
 
-/// What the engine needs to open a source. The full resolver-facing
-/// `SourceDescriptor` (§6.11) grows here; M2 carries the fields the
-/// vertical slice uses.
+/// What the engine needs to open a source.
 #[derive(Debug, Clone)]
 pub struct OpenRequest {
     /// `http(s)://` URL or a local file path.
@@ -251,7 +249,7 @@ pub struct OpenRequest {
     /// Explicit opt-out from the public-address gate for local fixtures
     /// and the test rig. Never set from world content.
     pub allow_local_addresses: bool,
-    /// `None` = Auto (the M1 sizing model's default).
+    /// `None` = Auto (the sizing model's default).
     pub buffer_depth_ms: Option<u32>,
     pub liveness: SourceLiveness,
     /// Which of the container's audio tracks to bind, as an index into
@@ -261,7 +259,7 @@ pub struct OpenRequest {
     /// an index remembered across a source change must not break
     /// playback.
     pub audio_track: usize,
-    /// Write the §12.4 capture-recorder CSV here on close, sampled at
+    /// Write the capture-recorder CSV here on close, sampled at
     /// 100 ms by an engine-owned thread — for hosts that cannot drive
     /// the recorder themselves (the managed ABI; bm-probe polls it
     /// in-process instead). `None` = off.
@@ -270,14 +268,14 @@ pub struct OpenRequest {
     /// A session that opens and closes repeatedly — a player going dormant
     /// and waking — otherwise leaves only the last one behind.
     pub diag_csv_append: bool,
-    /// Shared-playback divergence bound on live lanes (§8.5): the
+    /// Shared-playback divergence bound on live lanes: the
     /// furthest behind the live edge this viewer may sit, applied as a
     /// ceiling on the Bank's lag cap (and so on Auto's depth growth).
     /// Live position is never hard-synced peer-to-peer — this bound is
     /// the world author's whole instrument. `None` keeps the default
     /// lag cap.
     pub max_divergence_ms: Option<u32>,
-    /// Decode-route preference (§6.7): descriptor-stated from the user's
+    /// Decode-route preference: descriptor-stated from the user's
     /// client-persisted setting. Absent in the descriptor = the default.
     pub decode_preference: DecodePreference,
 }
@@ -332,7 +330,7 @@ impl Session {
     }
 
     /// Open over a caller-built byte source instead of one derived from the
-    /// URL — the impairment harness (§12.2) wraps sources this way. The
+    /// URL — the impairment harness wraps sources this way. The
     /// request's URL is display-only here.
     pub fn open_with_source(request: OpenRequest, source: Box<dyn ByteSource>) -> Self {
         Self::open_internal(request, Some(source))
@@ -357,7 +355,7 @@ impl Session {
             },
             ..BankConfig::default()
         };
-        // §8.5: the divergence bound rides the lag cap, which also clamps
+        // The divergence bound rides the lag cap, which also clamps
         // Auto's depth growth. An explicit depth beyond it fails typed
         // through the Bank's own validation.
         let bank_cfg = match request.max_divergence_ms {
@@ -527,8 +525,8 @@ impl Session {
         seek_px(&self.px, to);
     }
 
-    /// Feed the owner's extrapolated position as a soft sync target
-    /// (§8.4): the engine runs dead band → slew → seek-last against it.
+    /// Feed the owner's extrapolated position as a soft sync target:
+    /// the engine runs dead band → slew → seek-last against it.
     /// Negative clears the target (local user took control, owner left).
     /// The slew's application is master-dependent — see the snapshot's
     /// `sync_rate_ppm` for the audio-consumer half of the contract.
@@ -536,7 +534,7 @@ impl Session {
         sync::set_sync_target(px, position_us);
     }
 
-    /// Drain up to `max` pending caption cues (in-band CEA-608, §6.12):
+    /// Drain up to `max` pending caption cues (in-band CEA-608):
     /// each is the full displayed text as of its PTS (empty = display
     /// cleared). Surfaced on arrival — the consumer schedules display
     /// against the session position.
@@ -936,7 +934,7 @@ fn open_http_live_with(
 /// TCP; the Bank is the jitter answer either way, and the engine
 /// reconnect factory rebuilds the whole session on transport loss. The
 /// host is vetted against the address gate before the client dials, and
-/// the same gate vets the SETUP response's UDP peer address (§9.3).
+/// the same gate vets the SETUP response's UDP peer address.
 fn open_rtsp(
     px: Arc<PipelineShared>,
     url: &str,
@@ -1001,13 +999,13 @@ fn open_rtsp(
     finish_open(px, demuxer, bank_cfg, Some(factory), threads);
 }
 
-/// WHEP lane (§6.13): always live, and the Bank sits at its floor (§6.14
-/// — the depth equals the decoder cushion, so the lag target is zero).
+/// WHEP lane: always live, and the Bank sits at its floor: the depth
+/// equals the decoder cushion, so the lag target is zero.
 /// Sub-second work happens upstream: str0m's NACK recovery plus
 /// media-rtp's bounded reorder absorb network jitter, and stacking a
 /// deep Bank on top would just buy latency. An explicit depth request
 /// still wins. Reconnect re-runs the whole signalling exchange; the
-/// signalling host is vetted and pinned inside the crate (§9.3), and
+/// signalling host is vetted and pinned inside the crate, and
 /// every media-path address passes the same gate at the transmit
 /// boundary.
 fn open_whep(
@@ -1073,7 +1071,7 @@ fn open_whep(
 /// PSK-AES and serves recovered TS as a sequential byte source, so the lane
 /// takes no engine reconnect factory (librist keeps the flow alive
 /// underneath). The host is resolved and vetted against the address gate
-/// here, and librist is pinned to the vetted literal (§9.3).
+/// here, and librist is pinned to the vetted literal.
 fn open_rist(
     px: Arc<PipelineShared>,
     url: &str,
@@ -1424,7 +1422,7 @@ fn open_and_run(
     };
 
     // The router sniffs the container; extension and resolver hints are
-    // hints only (§6.6). A playlist head routes to the HLS lane.
+    // hints only. A playlist head routes to the HLS lane.
     let mut source = source;
     let mut head = [0u8; 1024];
     match read_head(&mut source, &mut head) {

@@ -1,7 +1,5 @@
-//! Seeded RNG for deterministic impairment schedules. The full impairment
-//! source (seeded delay/jitter/loss/stall wrapped around a byte source) is
-//! M3 work; the generator lands first so every schedule is replayable from a
-//! seed from day one.
+//! Seeded RNG for deterministic impairment schedules, so every schedule is
+//! replayable from its seed.
 
 /// xorshift64* — tiny, deterministic, good enough for schedule generation.
 /// Not a statistical or cryptographic RNG.

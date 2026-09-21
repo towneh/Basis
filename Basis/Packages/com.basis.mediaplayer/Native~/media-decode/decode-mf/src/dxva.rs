@@ -1,4 +1,4 @@
-//! DXVA hardware decode (§6.7, phase 1): the same sync-MFT driving
+//! DXVA hardware decode: the same sync-MFT driving
 //! model as `video_mft`, bound to a D3D11 device through the DXGI device
 //! manager, so the decoder allocates NV12 texture-array slices GPU-side
 //! and output never touches system memory. Frames leave as
@@ -240,8 +240,8 @@ pub fn probe_hardware(codec: HwCodec, width: u32, height: u32) -> bool {
 
 /// The measured resolution ceiling for the hardware route: the highest
 /// rung of a 1080p → 4K → 8K ladder the GPU offers a decoder
-/// configuration at (§6.11 — honest numbers for the resolver to rank
-/// on). `None` = no hardware route for the codec at all.
+/// configuration at, so the resolver ranks routes on measured numbers.
+/// `None` = no hardware route for the codec at all.
 pub fn probe_hardware_ceiling(codec: HwCodec) -> Option<(u32, u32)> {
     if hw_disabled() || mf_startup().is_err() {
         return None;

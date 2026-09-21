@@ -1,5 +1,5 @@
-//! Matroska/WebM demuxer (§6.6): `matroska-demuxer` walks the EBML;
-//! this wrapper maps tracks onto the §6.7 codec table, converts stored
+//! Matroska/WebM demuxer: `matroska-demuxer` walks the EBML;
+//! this wrapper maps tracks onto the codec table, converts stored
 //! H.264 to Annex B, and serves the pull model. Codecs without a decode
 //! adapter still announce — refusal is the decode layer's typed call,
 //! not a demux failure.
@@ -184,7 +184,7 @@ struct SelectedAudio {
     /// CodecDelay in µs: block timestamps include it, playback time
     /// subtracts it (Matroska stores Opus pre-skip this way), so priming
     /// samples arrive with negative pts and the engine's origin drop
-    /// consumes them (§6.9).
+    /// consumes them.
     delay_us: i64,
 }
 

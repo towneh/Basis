@@ -1,5 +1,5 @@
 //! The shared async-callback plumbing under both adapters: MediaCodec's
-//! callbacks land on the codec's own internal thread (§6.3 — adapter-
+//! callbacks land on the codec's own internal thread (adapter-
 //! specific decode threads); they only ever push indices into this state
 //! and notify. The engine's decode thread consumes through the trait
 //! surface. Queue depths are the codec's own (input buffers granted by

@@ -1,4 +1,4 @@
-//! Android MediaCodec decode adapters (§6.7), async-callback driven.
+//! Android MediaCodec decode adapters, async-callback driven.
 //!
 //! Video decodes into an `AImageReader` surface (format PRIVATE,
 //! GPU_SAMPLED_IMAGE usage) and surfaces frames as opaque

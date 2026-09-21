@@ -1,7 +1,7 @@
-//! Opus decode on libopus via the `opus` crate (§6.7: in-process on every
+//! Opus decode on libopus via the `opus` crate (in-process on every
 //! platform, one behaviour — retires the reverse-engineered MF Opus path).
 //!
-//! Pre-skip is a timestamp concern resolved before the ring (§6.9): the
+//! Pre-skip is a timestamp concern resolved before the ring: the
 //! demuxer shifts pts by the codec delay so priming samples arrive with
 //! negative pts and the engine's origin drop removes them. The decoder
 //! itself is stateless about it.

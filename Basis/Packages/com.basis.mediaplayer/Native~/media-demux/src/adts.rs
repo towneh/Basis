@@ -1,4 +1,4 @@
-//! Raw ADTS (.aac) file demuxer (§6.6): walks ADTS frames, strips the
+//! Raw ADTS (.aac) file demuxer: walks ADTS frames, strips the
 //! 7/9-byte headers and reconstructs the 2-byte AudioSpecificConfig so the
 //! platform AAC decoder gets exactly what the MP4 lane feeds it (raw
 //! frames, payload type 0). The same channel screen applies: explicitly

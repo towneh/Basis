@@ -1,4 +1,4 @@
-//! Diagnostics and observability (spec §10).
+//! Diagnostics and observability.
 //!
 //! The rule: a pipeline stage is not done until its input rate, its
 //! occupancy and its output rate are exported. Every stage publishes
@@ -144,7 +144,7 @@ macro_rules! diag_err {
     ($($arg:tt)*) => { $crate::log_at($crate::Level::Error, &format!($($arg)*)) };
 }
 
-/// Every stage of the one pipeline shape (§6.2).
+/// Every stage of the one pipeline shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Stage {
@@ -258,7 +258,7 @@ pub enum EventCode {
     /// than its pts timeline claims). Detail carries the
     /// cumulative trimmed count.
     AudioTrim = 15,
-    /// Shared-playback soft target (§8.4): the slew rung engaged or
+    /// Shared-playback soft target: the slew rung engaged or
     /// released. Detail carries the target error and the applied rate.
     SyncSlew = 16,
     /// Shared-playback soft target: the error crossed the seek

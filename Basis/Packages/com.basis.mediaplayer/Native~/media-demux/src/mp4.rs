@@ -10,10 +10,10 @@
 //! references whatever the file's length, and a twelve-hour video costs the
 //! same to open as a three-minute one.
 //!
-//! M2 scope: one H.264 video track and one AAC audio track, interleaved in
-//! decode order. Remaining tracks are reported via [`Mp4Demuxer::take_notes`]
-//! so the engine can surface them as diagnostics rather than dropping them
-//! silently.
+//! One video track and one audio track (the one asked for, else the first)
+//! are interleaved in decode order. Remaining tracks are reported via
+//! [`Mp4Demuxer::take_notes`] so the engine can surface them as diagnostics
+//! rather than dropping them silently.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};

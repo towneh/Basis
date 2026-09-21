@@ -222,7 +222,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// <summary>The stream's channel count (0 until announced).</summary>
     public int AudioChannels => System.Threading.Volatile.Read(ref _engineChannels);
 
-    /// <summary>The engine-declared capability set (§6.11) — what this
+    /// <summary>The engine-declared capability set — what this
     /// basis_media build will decode and play. Queried once and cached;
     /// null when the plugin is unavailable or the ABI mismatched. See
     /// <see cref="BasisMediaCapabilities"/> for the raw JSON and

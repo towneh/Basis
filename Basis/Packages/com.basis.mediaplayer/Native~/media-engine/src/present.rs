@@ -1,4 +1,4 @@
-//! Render-event frame selection (§6.8): presentation due-ness is
+//! Render-event frame selection: presentation due-ness is
 //! decided *in* the Unity render event, which runs at the display cadence,
 //! with one vsync of lookahead — so the selection quantiser and the
 //! display quantiser are the same clock and the tick-vs-vsync beat cannot

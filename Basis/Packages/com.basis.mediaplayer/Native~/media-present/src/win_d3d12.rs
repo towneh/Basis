@@ -1,4 +1,4 @@
-//! Direct3D 12 handoff into Unity (§6.8): the D3D11 conversion pass is
+//! Direct3D 12 handoff into Unity: the D3D11 conversion pass is
 //! unchanged, and its output is copied into one of a few shared slots and
 //! published on a shared fence. The render event copies the newest slot
 //! whose fence value has completed into Unity's texture, recorded on

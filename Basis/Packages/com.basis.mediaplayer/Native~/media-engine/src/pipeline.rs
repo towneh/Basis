@@ -1,17 +1,15 @@
-//! Pipeline assembly (§6.3): demux, release and decode threads around the
-//! M1 foundations — the Bank between demux and decode, media-clock as the
-//! one position source, condvars instead of sleep-polls, generations
-//! across every seek.
+//! Pipeline assembly: demux, release and decode threads around the Bank,
+//! with media-clock as the one position source, condvars instead of
+//! sleep-polls, and a generation per seek.
 //!
-//! Thread map per session (M2, Windows):
+//! Threads per session:
 //!   demux    pulls the Demuxer, pushes into the Bank, executes seeks
 //!   release  drains the Bank on the 1x schedule, routes AUs to decoders
-//!   video    MF H.264 decode → FramePool → paced upload to the shared
-//!            texture (the §6.8 conversion pass rides here until the GPU
-//!            pass lands)
-//!   audio    MF AAC decode → priming drop → PcmRing
-//! The Unity render thread only ever runs the keyed-mutex copy; the Unity
-//! audio thread only ever runs the lock-free ring pull.
+//!   video    decode → FramePool
+//!   audio    decode → priming drop → PcmRing
+//! Unity's render thread selects the due frame and runs the conversion and
+//! the copy into Unity's texture; Unity's audio thread only runs the
+//! lock-free ring pull.
 
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
@@ -396,7 +394,7 @@ pub struct PipelineShared {
     /// `set_playing` site; the `State` gate alone is not enough — a
     /// present in flight can race a seek back to Playing.
     pub clock_playing: std::sync::atomic::AtomicBool,
-    /// Decode-route preference from the descriptor (§6.7): consumed by
+    /// Decode-route preference from the descriptor: consumed by
     /// the video thread's route resolution.
     pub decode_preference: crate::DecodePreference,
     /// The pts this generation began presenting at (µs; `i64::MIN` = not
@@ -450,7 +448,7 @@ pub struct PipelineShared {
     pub seek_fed: std::sync::atomic::AtomicU64,
     pub seek_taken: std::sync::atomic::AtomicU64,
     /// Caption cues scanned from the video AUs' SEI on the demux thread,
-    /// surfaced on arrival with their due PTS (§6.2/§6.12 — captions
+    /// surfaced on arrival with their due PTS (captions
     /// bypass the Bank's release schedule so the consumer gets the full
     /// pre-roll). Drop-oldest at [`CAPTION_RING`].
     pub captions: Mutex<std::collections::VecDeque<media_bitstream::CaptionCue>>,
@@ -466,11 +464,11 @@ pub struct PipelineShared {
     /// Cover art the container carried, read once at open. A property of
     /// the file rather than the stream, like the duration.
     pub artwork: Mutex<Option<media_demux::Artwork>>,
-    /// Render-event selection state (§6.8): the render thread's
+    /// Render-event selection state: the render thread's
     /// clock mirror, its vsync estimate, and the consumer-liveness stamp
     /// that hands frame selection between it and the video thread.
     pub present: PresentShared,
-    /// Shared-playback soft sync target (§8.4): the last reported owner
+    /// Shared-playback soft sync target: the last reported owner
     /// position, extrapolated at 1x between reports.
     pub(crate) sync: crate::sync::SyncShared,
     /// The sync ladder's wanted rate offset from 1x, ppm. On audio-master
@@ -480,7 +478,7 @@ pub struct PipelineShared {
     pub sync_rate_ppm: std::sync::atomic::AtomicI64,
     /// Bank liveness, mirrored lock-free once the opener installs the
     /// session's real Bank (a playlist can override the request's stated
-    /// liveness). Live lanes ignore sync targets (§8.5).
+    /// liveness). Live lanes ignore sync targets.
     pub live: std::sync::atomic::AtomicBool,
     /// Split-source coordination (`OpenRequest::audio_url`). Absent on the
     /// ordinary one-source session, and every split-only branch is behind
@@ -977,7 +975,7 @@ pub enum MediaMsg {
 /// session as before.
 pub type DemuxFactory = Box<dyn FnMut() -> Result<Box<dyn Demuxer>, EngineError> + Send>;
 
-/// Reconnect posture (§6.10): engine-owned, instrumented, logs by default.
+/// Reconnect posture: engine-owned, instrumented, logs by default.
 const RECONNECT_ATTEMPTS: u32 = 6;
 const RECONNECT_BASE: Duration = Duration::from_millis(500);
 const RECONNECT_CAP: Duration = Duration::from_secs(8);
@@ -1606,7 +1604,7 @@ const PARKED_POLL: Duration = Duration::from_millis(4);
 /// One decode channel's parked tail: messages the channel had no room for,
 /// delivered in order before anything newer is popped for this target.
 /// While non-empty the target's whole track is gated in the Bank, so
-/// per-track order is exact; the other track keeps routing (§6.3 — the
+/// per-track order is exact; the other track keeps routing (the
 /// per-track-aware release).
 #[derive(Default)]
 struct ParkedTarget {
@@ -2041,7 +2039,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         // selection error.
         px.present.mirror_clock(wall, now, playing);
         // While a render consumer is live, the render event owns frame
-        // selection (§6.8 — due-ness and display share the vsync
+        // selection (due-ness and display share the vsync
         // quantiser); this thread presents only for consumers that issue
         // no render events (headless sessions, a non-rendering app).
         if playing
@@ -2161,7 +2159,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     }
                     Err(e) => {
                         // Refused video mutes the picture, audio plays on
-                        // (§6.7: absence is a diagnostic, not a mystery) —
+                        // (absence is a diagnostic, not a mystery) —
                         // and Ended becomes the audio thread's call.
                         px.diag.event(
                             px.wall.now(),
@@ -2177,7 +2175,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 px.shared.width.store(display_width, Ordering::Relaxed);
                 px.shared.height.store(display_height, Ordering::Relaxed);
                 // The output target carries the coded size; the consumer
-                // crops to display size when it samples (M0 contract).
+                // crops to display size when it samples.
                 // SAFETY: `decode_device` is the hardware route's own
                 // device pointer. The decoder that owns it was moved into
                 // `decoder` above, which outlives this call.
@@ -2614,7 +2612,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             }
         }
 
-        // Position is the clock's, whatever is or is not on screen (§6.4):
+        // Position is the clock's, whatever is or is not on screen:
         // captions, SEI user data and shared playback are timed against it,
         // and a picture that stops must not stop them. A parked clock reads
         // where it was parked, so a pause or a seek landing holds position

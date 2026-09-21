@@ -878,7 +878,7 @@ fn seek_during_eos_drain_settles_without_a_snap() {
     session.close();
 }
 
-/// In-band CEA-608 (§6.12): the authored caption fixture's scripted cue
+/// In-band CEA-608: the authored caption fixture's scripted cue
 /// sequence surfaces through the caption lane — text (including special +
 /// extended characters and the two-row roll-up), clears, and 2 s spacing
 /// keyed to the video PTS. The script is tools/gen-caption-fixture.py's.
@@ -1158,7 +1158,7 @@ fn diag_csv_written_on_close() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// §8.4's ladder over a playing A/V session (audio master): a target
+/// The sync ladder over a playing A/V session (audio master): a target
 /// inside the dead band asks for nothing, a target ahead engages the
 /// +2% slew (surfaced for the managed audio pull), and a target past the
 /// seek threshold seeks — the last rung, never the first.

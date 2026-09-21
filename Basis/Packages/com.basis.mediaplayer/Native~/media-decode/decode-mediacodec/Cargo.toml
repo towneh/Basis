@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 media-decode = { path = ".." }
 
-# The MediaCodecList ceilings probe (§6.11) goes through JNI — the NDK has
+# The MediaCodecList ceilings probe goes through JNI — the NDK has
 # no native codec-capabilities API. Only reachable when the host process
 # hands over its JavaVM (Unity does, via JNI_OnLoad); absent that, probes
 # degrade to presence-only.

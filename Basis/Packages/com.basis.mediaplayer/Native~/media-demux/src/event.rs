@@ -1,4 +1,4 @@
-//! The one typed event path every demuxer emits (spec §6.2). Everything
+//! The one typed event path every demuxer emits. Everything
 //! downstream — Bank, decoders, metadata surface — consumes these; every
 //! event carries a generation so stale data cannot cross a seek boundary.
 

@@ -1,4 +1,4 @@
-//! Adapter fixture rows (§12.1's L8 discipline, software edition): each
+//! Adapter fixture rows for the software decoders: each
 //! decoder is driven with the AUs its real demuxer produces from the
 //! committed sine fixture, and the PCM out is checked for count and
 //! content, not just absence of errors.

@@ -1,5 +1,5 @@
 //! The shared sync-MFT driver for the video decoders: NV12 output
-//! negotiation (matrix/range re-read on every stream change, §6.8), the
+//! negotiation (matrix/range re-read on every stream change), the
 //! fresh-sample-per-call output contract, strided copies and the
 //! drain/flush protocol are identical across codecs — only the input type
 //! configured by the adapter differs.
@@ -25,7 +25,7 @@ use crate::mf;
 use std::mem::ManuallyDrop;
 
 /// Probe for a registered sync video decoder MFT taking `subtype` input
-/// (§6.7: how the Store-extension decoders are found — their absence is a
+/// (how the Store-extension decoders are found — their absence is a
 /// typed error the engine reports, never a mystery).
 pub(crate) fn create_decoder_for(
     subtype: &windows::core::GUID,
@@ -80,7 +80,7 @@ pub(crate) fn create_decoder_for(
 
 /// Matrix/range from an MFT's output media type. The MFT states them
 /// from the bitstream's own colour description; absent attributes stay
-/// Unspecified rather than being guessed here (§6.8).
+/// Unspecified rather than being guessed here.
 pub(crate) fn parse_output_color(
     ty: &windows::Win32::Media::MediaFoundation::IMFMediaType,
 ) -> ColorInfo {

@@ -1,4 +1,4 @@
-//! The leased FramePool (§6.8): a small fixed pool of decoder-format
+//! The leased FramePool: a small fixed pool of decoder-format
 //! frames between decode and present. The decode side blocks (bounded,
 //! stop-aware) when the pool is exhausted; the present side never blocks —
 //! it takes the newest due frame or nothing. Waiting is one-directional by
@@ -110,8 +110,8 @@ impl FramePool {
 
     /// Decode side: publish one frame if a slot is free; a full pool hands
     /// the frame back as backpressure — the caller holds it and keeps
-    /// presenting; it never blocks, because on M2's folded thread the
-    /// presenter is the only thing that frees slots.
+    /// presenting; it never blocks, because the thread publishing may be the
+    /// presenter that frees the slots.
     pub fn try_publish(&self, frame: VideoFrame, generation: u64) -> Result<(), VideoFrame> {
         let mut state = self.state.lock().expect("pool lock");
         let Some(slot_index) = state.slots.iter().position(|s| s.state == SlotState::Free) else {
@@ -141,7 +141,7 @@ impl FramePool {
     }
 
     /// `take_due` for the render thread: a try-lock, so a publish in flight
-    /// on the video thread costs a re-present, never a wait (§6.3 — the
+    /// on the video thread costs a re-present, never a wait (the
     /// render thread never blocks on a media-path lock).
     pub fn try_take_due(&self, now: MediaTime, clock: MediaTime) -> Option<Lease> {
         let state = self.state.try_lock().ok()?;

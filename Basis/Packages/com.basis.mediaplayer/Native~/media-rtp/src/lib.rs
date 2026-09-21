@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Sans-IO RTP receive substrate (§6.13): sequence unwrap, bounded
+//! Sans-IO RTP receive substrate: sequence unwrap, bounded
 //! reorder, RFC 3550 jitter/loss accounting, sender-report tracking and
 //! receiver-report composition. Shared by the RTSP-UDP lane today and
 //! the WHEP lane later, so nothing here knows about sockets, retina or

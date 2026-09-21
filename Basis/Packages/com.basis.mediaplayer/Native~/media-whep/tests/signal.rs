@@ -1,6 +1,6 @@
-//! WHEP signalling rows over a virtual server (§12.1): both answer
+//! WHEP signalling rows over a virtual server: both answer
 //! flows, PATCH discipline, redirects, Link ice-server surfacing,
-//! teardown DELETE, and the §9.3 candidate gate at the transmit
+//! teardown DELETE, and the candidate gate at the transmit
 //! boundary. The server is a hand-rolled HTTP loop with a real str0m
 //! instance answering the SDP, so the negotiation the client accepts is
 //! genuine; no media network beyond loopback is touched.
@@ -426,7 +426,7 @@ fn a_signalling_transport_failure_names_its_cause() {
     );
 }
 
-/// §9.3: a candidate address the gate refuses never receives a packet —
+/// A candidate address the gate refuses never receives a packet —
 /// the check sits at the transmit boundary, so the connectivity check
 /// itself is what gets suppressed. The mirror case proves the machinery
 /// would have sent to the address had the gate permitted it.

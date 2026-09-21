@@ -1,4 +1,4 @@
-//! RIST receive transport (§6.6/§6.14): librist behind FFI, Main Profile,
+//! RIST receive transport: librist behind FFI, Main Profile,
 //! plain + PSK-AES, serving recovered MPEG-TS as a `ByteSource`.
 //!
 //! The native dependency sits behind the `librist` cargo feature. With it off

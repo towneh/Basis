@@ -1,4 +1,4 @@
-//! Platform video sink (§6.8): the video thread's half of presentation.
+//! Platform video sink: the video thread's half of presentation.
 //! Frame *selection* normally lives in the Unity render event (see
 //! `present.rs` — due-ness at display cadence with a vsync of lookahead);
 //! this sink configures the output target and carries the tick-paced

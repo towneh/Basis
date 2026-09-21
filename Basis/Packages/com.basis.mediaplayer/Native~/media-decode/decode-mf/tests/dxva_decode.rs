@@ -4,7 +4,7 @@
 //! frame — the decode analogue of the GPU-pass-vs-reference oracle, and
 //! it catches slice/aperture/stride mistakes cold. Rows skip loudly
 //! where this machine's GPU has no profile for the codec (that absence
-//! is exactly what the engine reports as a diagnostic, §6.7).
+//! is exactly what the engine reports as a diagnostic).
 //!
 //! Also pinned here: the ported C-player contracts a unit can reach —
 //! the sizeless-HEVC refusal (before the MFT is ever configured), the

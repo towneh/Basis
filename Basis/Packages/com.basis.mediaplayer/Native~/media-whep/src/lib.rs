@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! WHEP receive session as a [`Demuxer`] (§6.13): the sub-second lane.
+//! WHEP receive session as a [`Demuxer`]: the sub-second lane.
 //! Hand-rolled WHEP signalling over media-io's vetted-and-pinned HTTP
 //! discipline; `str0m` (sans-IO) runs ICE/DTLS/SRTP/RTCP on our socket
 //! and hands decrypted RTP to media-rtp's reorder layer, retina's H.264
@@ -11,7 +11,7 @@
 //! work — host candidates ride in the offer), `Link rel="ice-server"`
 //! parsing, and `DELETE` on teardown.
 //!
-//! §9.3: the signalling URLs go through the same gate-vetted pinned
+//! The signalling URLs go through the same gate-vetted pinned
 //! connects as every HTTP lane; every media-path address str0m wants to
 //! reach (ICE candidates, however learned) is checked against the same
 //! gate at the transmit boundary before anything is sent.
@@ -310,8 +310,8 @@ impl Demuxer for WhepDemuxer {
     }
 }
 
-/// RTP mode (str0m hands over packets, our layers own buffering per
-/// §6.14) offering exactly what this engine decodes today: H.264 video
+/// RTP mode (str0m hands over packets, our layers own the buffering)
+/// offering exactly what this engine decodes today: H.264 video
 /// and Opus audio. Codecs the engine would refuse at the decode factory
 /// are cleaner refused at negotiation — a server whose stream is VP8
 /// answers with nothing playable instead of feeding undecodable RTP.

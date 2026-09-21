@@ -1,4 +1,4 @@
-//! Network and I/O layer (§6.10): every socket the engine opens, opened
+//! Network and I/O layer: every socket the engine opens, opened
 //! here. Byte sources implement the demux layer's [`ByteSource`] seam;
 //! SSRF policy is *bind what you resolve* — resolve once, vet every
 //! address, connect to the vetted IPs with Host/SNI carried separately,
@@ -30,7 +30,7 @@ pub use runtime::io_runtime_handle;
 use std::fmt;
 use std::time::Duration;
 
-/// Edge caps drawn from the session budget (§9.2).
+/// Edge caps drawn from the session budget.
 #[derive(Debug, Clone)]
 pub struct IoLimits {
     pub max_redirects: u32,
@@ -71,7 +71,7 @@ impl Default for IoLimits {
     }
 }
 
-/// Structured error surface (§7): a typo, a 404, a TLS failure, a blocked
+/// Structured error surface: a typo, a 404, a TLS failure, a blocked
 /// address and a cap hit are distinguishable in a field report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoErrorKind {

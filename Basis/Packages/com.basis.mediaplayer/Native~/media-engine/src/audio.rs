@@ -1,4 +1,4 @@
-//! Per-session PCM output (§6.9): a lock-free SPSC ring of interleaved f32
+//! Per-session PCM output: a lock-free SPSC ring of interleaved f32
 //! frames written by the audio decode thread and drained by the Unity audio
 //! thread through the ABI, PTS-annotated at chunk granularity. The consumer
 //! side never takes a lock on the pull path; the playhead derives from the

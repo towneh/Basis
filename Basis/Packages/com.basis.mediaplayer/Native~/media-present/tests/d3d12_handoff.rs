@@ -1,4 +1,4 @@
-//! The Direct3D 12 handoff (§6.8) against a headless stand-in for Unity's
+//! The Direct3D 12 handoff against a headless stand-in for Unity's
 //! renderer: frames reach a D3D12 texture through the shared slots and
 //! fence, a slot is never converted over while a recorded copy still reads
 //! it, and a mismatched destination is refused rather than copied into.

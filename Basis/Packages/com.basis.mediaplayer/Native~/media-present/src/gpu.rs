@@ -1,4 +1,4 @@
-//! The §6.8 conversion pass: one D3D11 pixel-shader draw turning the
+//! The conversion pass: one D3D11 pixel-shader draw turning the
 //! decoder's NV12 frame into the shared BGRA texture, with matrix/range
 //! taken from the frame's stated [`ColorInfo`].
 //!

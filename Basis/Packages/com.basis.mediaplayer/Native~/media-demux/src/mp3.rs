@@ -1,4 +1,4 @@
-//! Raw MP3 file demuxer (§6.6): ID3v2 skip, then an MPEG audio frame walk
+//! Raw MP3 file demuxer: ID3v2 skip, then an MPEG audio frame walk
 //! — each AU is one Layer III frame, length computed from its header, pts
 //! from accumulated samples. A leading Xing/Info/VBRI frame is metadata,
 //! not audio: it is parsed for the duration and seek table, then dropped.

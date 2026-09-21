@@ -1,4 +1,4 @@
-//! The gated release (§6.3 per-track-aware routing): a blocked track's
+//! The gated release (per-track-aware routing): a blocked track's
 //! events are skipped in place — order intact, Eos a barrier — while the
 //! other track keeps releasing, and the release cursor stays with the
 //! laggard so banked()/lag grade exactly as an ungated release would.

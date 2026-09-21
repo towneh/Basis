@@ -168,7 +168,7 @@ fn presentation_anchor_continues_the_schedule_without_a_pause() {
     assert_eq!(pop_all(&mut bank, due + quantum), 1);
 }
 
-/// A target-zero lane (the §6.14 shallow posture: depth = cushion) never
+/// A target-zero lane (the shallow posture: depth = cushion) never
 /// holds — the gate opens on the first arrival and release tracks the
 /// edge, so the sub-second join is untouched.
 #[test]

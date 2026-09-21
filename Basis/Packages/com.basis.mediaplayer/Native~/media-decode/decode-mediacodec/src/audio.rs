@@ -1,4 +1,4 @@
-//! Audio through MediaCodec (§6.7: AAC and MP3 decode on the platform,
+//! Audio through MediaCodec (AAC and MP3 decode on the platform,
 //! never bundled). No surface — PCM comes back through the codec's output
 //! buffers, converted to interleaved f32 for the ring. Float output is
 //! requested at configure; the output format's stated encoding decides

@@ -1,4 +1,4 @@
-//! The byte-source seam between the I/O domain and the demuxers (§6.2).
+//! The byte-source seam between the I/O domain and the demuxers.
 //!
 //! Demuxers pull; sources serve positioned reads. Network implementations
 //! live in `media-io`; this crate defines the trait plus the in-memory
@@ -15,7 +15,7 @@ pub type SourceError = Box<dyn std::error::Error + Send + Sync>;
 /// response alive and only re-requests on a real seek).
 pub trait ByteSource: Send {
     /// Total size in bytes, when the source knows it (VOD). Progressive MP4
-    /// demuxing requires a known length; live sources arrive at M3 with a
+    /// demuxing requires a known length; live sources take a
     /// sequential path.
     fn size(&mut self) -> Result<Option<u64>, SourceError>;
 
@@ -236,7 +236,7 @@ impl SeqReader {
 
 /// `Read + Seek` adapter over a [`ByteSource`] for the metadata parse, with
 /// a read cache sized so a box walk costs few positioned reads, and a byte
-/// budget so a hostile header cannot pull unbounded metadata (§6.6 caps).
+/// budget so a hostile header cannot pull unbounded metadata.
 pub(crate) struct SourceReader<'a> {
     src: &'a mut dyn ByteSource,
     len: u64,

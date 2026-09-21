@@ -1,5 +1,4 @@
-//! Vulkan initialisation interception (§6.8, the M0-validated primary
-//! path): hook Unity's `vkGetInstanceProcAddr` chain so device creation
+//! Vulkan initialisation interception: hook Unity's `vkGetInstanceProcAddr` chain so device creation
 //! is guaranteed to enable the AHardwareBuffer-import extensions and the
 //! `samplerYcbcrConversion` feature. Unity's OpenXR path already asks for
 //! all of it on Quest; the hook makes that a contract instead of an
@@ -64,7 +63,7 @@ static VULKAN_IFACE: Mutex<usize> = Mutex::new(0);
 
 /// Entry from `UnityPluginLoad` (media-ffi forwards). Must run before
 /// graphics initialisation — the plugin has to be preloaded
-/// (`PluginImporter.isPreloaded`, the M0 lesson).
+/// (`PluginImporter.isPreloaded`).
 ///
 /// # Safety
 /// `interfaces` must be the live `IUnityInterfaces*` Unity passed.
@@ -138,8 +137,8 @@ unsafe fn device_event(event_type: c_int) {
     }
     // SAFETY: Unity-owned vtables, valid for the process lifetime; the
     // initialize event with the Vulkan renderer is the documented point
-    // where Instance() becomes valid (the renderer==Null first fire is
-    // the M0 segfault trap).
+    // where Instance() becomes valid (calling it on the first fire, with
+    // renderer==Null, segfaults).
     unsafe {
         let (Some(get_renderer), Some(instance)) = ((*gfx).get_renderer, (*v2).instance) else {
             return;

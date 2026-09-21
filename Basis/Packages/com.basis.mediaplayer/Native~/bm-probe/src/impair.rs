@@ -1,5 +1,5 @@
 //! `impair`: run a live source through a deterministic impairment schedule
-//! (§12.2) and grade the Bank against the sizing model. A phase-0 profile
+//! and grade the Bank against the sizing model. A phase-0 profile
 //! replays the recorded delivery gaps of the VRCDN investigation on top of
 //! any lane — a local TS file (paced to 1x) or a real live URL — and the
 //! run passes when the session survives and the measured stall stays
@@ -202,8 +202,7 @@ pub fn run(options: &Options) -> ExitCode {
     // instant-recovery assumption doesn't hold (TCP slow-start after each
     // idle window, bounded socket buffers), so the model comparison is
     // reported for judgment and survival is the gate — real-network
-    // validation is the release-gate layer, not a model-conformance one
-    // (§12.2).
+    // validation is the release-gate layer, not a model-conformance one.
     let flowing_secs =
         (elapsed.as_secs_f64() * (1.0 - analytic.min(1.0)) - depth.as_micros() as f64 / 1e6 - 3.0)
             .max(0.0);

@@ -1,5 +1,5 @@
 //! Demux layer: the typed `StreamEvent` path, the pull-based `Demuxer`
-//! trait, the byte-source seam (§6.2), the streaming MP4 demuxer and the
+//! trait, the byte-source seam, the streaming MP4 demuxer and the
 //! MPEG-TS demuxer (ported from the C player).
 
 #![forbid(unsafe_code)]
@@ -40,7 +40,7 @@ pub use wav::WavDemuxer;
 use media_clock::Generation;
 
 /// Containers the router recognises. Sniffing decides; extension and
-/// resolver hints are hints only (§6.6).
+/// resolver hints are hints only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerKind {
     Mp4,
@@ -174,7 +174,7 @@ pub enum DemuxError {
     Source(SourceError),
     Parse(String),
     Unsupported(&'static str),
-    /// A parse-time cap tripped (§6.6): typed refusal, never exhaustion.
+    /// A parse-time cap tripped: typed refusal, never exhaustion.
     Cap(&'static str),
 }
 

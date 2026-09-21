@@ -1,6 +1,6 @@
-//! Test harness pieces (spec §12): the phase-0 capture fixtures and the
+//! Test harness pieces: the phase-0 capture fixtures and the
 //! arrival-schedule synthesis the Bank's sizing tests replay, the seeded
-//! RNG, and the deterministic impairment source (§12.2) that wraps any
+//! RNG, and the deterministic impairment source that wraps any
 //! byte source in a recorded or synthetic delivery-gap schedule.
 
 #![forbid(unsafe_code)]

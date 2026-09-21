@@ -1,4 +1,4 @@
-//! Frame handoff into Unity (§6.8), per graphics API:
+//! Frame handoff into Unity, per graphics API:
 //!
 //! - **Windows / D3D11** (`win`): the decode thread converts NV12 into a
 //!   shared BGRA texture with one GPU pass; the Unity render thread opens

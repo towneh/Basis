@@ -4,7 +4,7 @@
 //! owns receive — reorder, jitter/loss accounting and RTCP receiver
 //! reports, which retina's own UDP path lacks (servers kill RR-less
 //! sessions as dead). The SETUP response's `source` address is vetted
-//! before any packet goes out (§9.3): it is server-controlled and need
+//! before any packet goes out: it is server-controlled and need
 //! not match the RTSP host.
 
 use std::collections::VecDeque;

@@ -1,4 +1,4 @@
-//! The §6.11 capability contract: the serialisation shape is pinned
+//! The capability contract: the serialisation shape is pinned
 //! byte-exact (the blob is a versioned ABI surface — field renames are
 //! breaking), and the built set is checked against what this build
 //! actually routes.

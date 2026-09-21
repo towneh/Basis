@@ -1,4 +1,4 @@
-//! Property rows (§12.1): schedule in → release schedule out. Arbitrary
+//! Property rows: schedule in → release schedule out. Arbitrary
 //! bounded-displacement reorder with loss and duplicates must come out
 //! strictly ordered with the accounting identity intact.
 

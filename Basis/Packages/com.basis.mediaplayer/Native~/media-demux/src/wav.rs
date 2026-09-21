@@ -1,4 +1,4 @@
-//! RIFF/WAVE demuxer (§6.6): walks the chunk list for `fmt ` and `data`,
+//! RIFF/WAVE demuxer: walks the chunk list for `fmt ` and `data`,
 //! announces the PCM format, then serves the data chunk as ~20 ms blocks of
 //! whole interleaved frames with a sample-counted timeline. Conversion to
 //! the ring's float samples is the PCM adapter's job, as it is for the

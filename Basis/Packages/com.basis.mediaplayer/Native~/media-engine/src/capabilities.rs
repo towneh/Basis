@@ -1,4 +1,4 @@
-//! The engine-declared capability set (§6.11): one queryable snapshot of
+//! The engine-declared capability set: one queryable snapshot of
 //! what this build will decode and play, consumed by the resolver's
 //! format selection and the managed layer. Every entry is a will-decode
 //! claim for the primary route the engine would actually take — probed
@@ -94,7 +94,7 @@ fn transport(scheme: &str) -> TransportCap {
     }
 }
 
-/// Windows video routes (§6.7): hardware DXVA entries carry the
+/// Windows video routes: hardware DXVA entries carry the
 /// two-leg probe's measured resolution ceiling (fps unstated — DXVA has
 /// no rate ceiling to measure); the CPU rungs stay listed as the
 /// fallback routes, stating the software policy ceiling. Both routes may
@@ -242,7 +242,7 @@ pub fn capabilities() -> CapabilitySet {
 
 impl CapabilitySet {
     /// The one serialisation the contract ships: the versioned JSON blob
-    /// that crosses the ABI (§7's UTF-8 serialised-blob posture).
+    /// that crosses the ABI (UTF-8 serialised-blob posture).
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("capability set serialises")
     }

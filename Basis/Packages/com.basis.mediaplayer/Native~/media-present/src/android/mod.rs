@@ -1,4 +1,4 @@
-//! Android / Vulkan present path (§6.8, the M0-validated primary path):
+//! Android / Vulkan present path:
 //! Vulkan-init interception guarantees the device extensions and YCbCr
 //! feature; the decoder's `AHardwareBuffer` imports into Unity's own
 //! `VkDevice`; one compute pass converts into Unity's RGBA RenderTexture

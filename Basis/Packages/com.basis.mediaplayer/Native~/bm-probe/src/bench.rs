@@ -1,4 +1,4 @@
-//! `bench`: the §11 budgets measured mechanically (§12.4) —
+//! `bench`: the performance budgets measured mechanically —
 //! startup-to-first-frame and seek-to-settled for one lane, repeated and
 //! aggregated, so tuning happens against numbers instead of impressions.
 

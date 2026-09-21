@@ -1,5 +1,5 @@
 //! `play`: a timed headless run through the full engine pipeline — the
-//! capture recorder as a first-class artefact (§12.4), plus the headless
+//! capture recorder as a first-class artefact, plus the headless
 //! audio lane the C harness never had.
 
 use std::io::Write as _;

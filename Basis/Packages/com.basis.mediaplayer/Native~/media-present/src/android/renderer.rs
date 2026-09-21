@@ -1,10 +1,10 @@
-//! The per-session render pass (§6.8): import the decoder's
+//! The per-session render pass: import the decoder's
 //! `AHardwareBuffer` into Unity's `VkDevice` and run one compute dispatch
 //! converting into Unity's RGBA RenderTexture, recorded on Unity's
 //! current command buffer inside the render event. The driver's
 //! per-buffer suggested `VkSamplerYcbcrConversion` does the matrix/range
-//! work (read per buffer — decoder buffers carry their own dataspace, the
-//! M0 lesson); GPU lifetime rides Unity's frame counters
+//! work (read per buffer — decoder buffers carry their own
+//! dataspace); GPU lifetime rides Unity's frame counters
 //! (`safeFrameNumber`), so nothing is destroyed while a submitted command
 //! buffer might still read it.
 
@@ -349,7 +349,7 @@ impl SessionRenderer {
 
         // SAFETY: Unity vtable + Vulkan recording below run on the render
         // thread against live handles; barriers/descriptors follow the
-        // §6.8 contract described inline.
+        // contract described inline.
         unsafe {
             let (Some(ensure_outside_render_pass), Some(access_texture), Some(recording_state)) = (
                 (*ctx.vulkan_iface).ensure_outside_render_pass,
@@ -866,7 +866,7 @@ fn import_buffer(
     conv_gen: u64,
 ) -> Result<Imported, String> {
     let external = fmt_props.format == vk::Format::UNDEFINED;
-    // SAFETY: the M0-validated import sequence — external-format image,
+    // SAFETY: the import sequence is external-format image,
     // dedicated allocation importing the AHB (which takes its own AHB
     // reference), bind, then a view carrying the conversion. All results
     // checked; partial objects destroyed on error.

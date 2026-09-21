@@ -2,7 +2,7 @@
 //! platform decoder MFTs headless: pins the probe + sync-driving contract
 //! against the real Store-extension decoders. If an extension is not
 //! installed the row skips loudly — that absence is exactly what the
-//! engine reports as a diagnostic (§6.7), not a driving bug.
+//! engine reports as a diagnostic, not a driving bug.
 
 #![cfg(windows)]
 

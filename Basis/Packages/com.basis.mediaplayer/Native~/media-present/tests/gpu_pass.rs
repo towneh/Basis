@@ -1,4 +1,4 @@
-//! The §6.8 conversion pass validated against the CPU reference: synthetic
+//! The conversion pass validated against the CPU reference: synthetic
 //! sweeps across every stated matrix/range, continuity with the integer
 //! maths the CPU path shipped with, and real decoded fixture frames
 //! through the full producer→consumer handoff.

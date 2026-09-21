@@ -1,7 +1,7 @@
 //! Video through MediaCodec into an `AImageReader` surface: output stays
 //! in the decoder's opaque layout (UBWC on Adreno) and frames surface as
-//! `AHardwareBuffer` handles for the Vulkan present pass to import
-//! (§6.7/§6.8). Release discipline is strict: a codec output buffer is
+//! `AHardwareBuffer` handles for the Vulkan present pass to import.
+//! Release discipline is strict: a codec output buffer is
 //! only rendered to the surface when the reader has a slot for it, and
 //! every acquired image keeps the reader alive until the handle drops.
 
@@ -120,8 +120,8 @@ pub struct McVideoDecoder {
 }
 
 impl McVideoDecoder {
-    /// `live` opts into the codec's low-latency paths (§6.7:
-    /// `KEY_LOW_LATENCY` plus the QTI vendor key; decoders ignore keys
+    /// `live` opts into the codec's low-latency paths
+    /// (`KEY_LOW_LATENCY` plus the QTI vendor key; decoders ignore keys
     /// they don't know).
     pub fn new(
         mime: VideoMime,

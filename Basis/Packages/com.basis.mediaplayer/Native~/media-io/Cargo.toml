@@ -13,8 +13,7 @@ bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 url = "2"
 
-# TLS provider decision (§5.5, resolved at M3): rustls stays on ring. The
-# spec's aws-lc-rs lean was re-examined when the async stack landed:
+# TLS provider: rustls on ring rather than aws-lc-rs, because
 # aws-lc-sys needs CMake + NASM on MSVC hosts (a real toolchain tax on
 # every contributor), ring is already vetted in-tree with a clean licence
 # (no OpenSSL-advertising clause, so no THIRD_PARTY_NOTICES burden), and

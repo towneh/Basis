@@ -1,4 +1,4 @@
-//! The deterministic impairment source (§12.2): seeded delay/gap schedules
+//! The deterministic impairment source: seeded delay/gap schedules
 //! wrapped around any [`ByteSource`] — the lost shim, rebuilt where it
 //! belongs. A wrapped source stalls its reads inside each gap window and
 //! delivers normally between them; composition with [`PacedSource`] turns
