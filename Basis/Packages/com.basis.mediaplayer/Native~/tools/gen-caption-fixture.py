@@ -6,7 +6,8 @@ No public stream carries CEA-608 reliably, so the fixture is authored: a
 injected into scripted access units. The cue script below is the ground
 truth the engine tests assert against.
 
-Needs ffmpeg + ffprobe on PATH. Run from the repo root:
+Needs ffmpeg + ffprobe on PATH. Run from Native~ (the fixture paths are
+relative to it):
 
     python tools/gen-caption-fixture.py
 

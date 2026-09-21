@@ -1,7 +1,6 @@
-# Build the Android engine and stage the stripped .so into the package
-# Runtime/Plugins, where every project referencing com.basis.mediaplayer
-# picks it up (the Android twin of the x86_64 dll copy in TESTING.md).
-# Run from the workspace root (Native~) after any engine change:
+# Build the Android engine and copy the stripped .so into the package's
+# Runtime/Plugins/Android/arm64-v8a, where every project using
+# com.basis.mediaplayer picks it up. Run from Native~ after any engine change:
 #
 #   .\tools\stage-android-plugin.ps1
 

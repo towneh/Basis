@@ -1,8 +1,9 @@
 #!/bin/sh
-# Local CI: the gate a hosted pipeline will eventually mirror. Run before
-# committing; everything here must pass clean.
+# The engine gate on Linux. Run before committing; everything here must pass.
+# Steps whose tool is missing print SKIPPED and do not fail the run.
 #
-#   ./tools/ci.sh          # fmt, clippy, tests, deny, vet
+#   ./tools/ci.sh          # fmt, clippy, tests, the RIST build, deny, vet,
+#                          # and the headless playback checks
 #   ./tools/ci.sh --fuzz   # additionally build the fuzz targets (needs
 #                          # nightly + cargo-fuzz)
 set -eu
@@ -34,17 +35,14 @@ if command -v ffprobe >/dev/null 2>&1; then
 else
     echo "SKIPPED: conformance — ffprobe not on PATH"
 fi
-# The software-decode lane (§12.4): the in-process floors (rav1d + Opus)
-# through the full headless pipeline — the row every platform can run,
-# including GPU-less CI hosts.
+# Software decode: rav1d and Opus through the whole headless pipeline, which
+# any host can run, GPU or not.
 echo "== software decode (AV1+Opus headless)"
 cargo run -q -p bm-probe -- play fixtures/mkv/av1-opus.webm --duration 8
-# The impairment lane (§12.2): the worst phase-0 jitter profile replayed
-# through the full engine over a 1x-paced fixture, graded against the
-# sizing model — bounded to keep the per-commit gate quick; TESTING.md
-# carries the full-length rows. The fixture is H.264+AAC, so the row
-# needs the platform decoders — headless hosts skip it (the Windows
-# ci.ps1 gate carries it per-commit).
+# Impairment: the worst recorded network-delay profile replayed through the
+# whole engine over a fixture paced at 1x, graded against the buffer sizing
+# model. Kept short here; TESTING.md has the full-length runs. The fixture is
+# H.264 and AAC, so a host without those decoders skips it.
 if cargo run -q -p bm-probe -- caps --compact | grep -q '"h264"'; then
     echo "== impairment (phase-0 replay)"
     cargo run -q -p bm-probe -- impair fixtures/h264-aac-320x180-30s.ts \

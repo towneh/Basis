@@ -1,5 +1,8 @@
-# Paced HTTP-TS server: streams a .ts file at ~1x (byte-rate derived from
-# its duration) with no Content-Length, looping the file, like a live edge.
+# Paced HTTP-TS server: serves a .ts file at about 1x (the byte rate taken
+# from its duration) with no Content-Length, like a live edge, and ends the
+# response when the file runs out.
+#
+# Usage: live-ts-server.py <file.ts> <duration_s> <port>
 import socket
 import sys
 import threading

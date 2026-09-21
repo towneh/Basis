@@ -1,7 +1,8 @@
-# Local CI: the gate a hosted pipeline will eventually mirror. Run before
-# committing; everything here must pass clean.
+# The engine gate on Windows. Run before committing; everything here must pass.
+# Steps whose tool is missing print SKIPPED and do not fail the run.
 #
-#   .\tools\ci.ps1          # fmt, clippy, tests, deny, vet
+#   .\tools\ci.ps1          # fmt, clippy, tests, the RIST and Android builds,
+#                           # deny, vet, and the headless playback checks
 #   .\tools\ci.ps1 -Fuzz    # additionally build the fuzz targets (needs
 #                           # nightly + cargo-fuzz; Linux/WSL only)
 
@@ -30,7 +31,7 @@ if (Test-Path "third_party/librist/win-x64/rist.lib") {
 } else {
     Write-Host "SKIPPED: rist feature — librist not staged (tools/build-librist.ps1)" -ForegroundColor Yellow
 }
-# Android lane (M5): the aarch64 graph must keep compiling per commit.
+# Android: the aarch64 graph must keep compiling on every commit.
 # Needs the rust target plus an NDK (android-env.ps1 finds Unity's);
 # skipped loudly when either is absent. Runs in a child shell so the
 # toolchain env does not leak into later steps.
@@ -67,10 +68,9 @@ if (Get-Command ffprobe -ErrorAction SilentlyContinue) {
 } else {
     Write-Host "SKIPPED: conformance — ffprobe not on PATH" -ForegroundColor Yellow
 }
-# The impairment lane (§12.2): the worst phase-0 jitter profile replayed
-# through the full engine over a 1x-paced fixture, graded against the
-# sizing model — bounded to keep the per-commit gate quick; TESTING.md
-# carries the full-length rows.
+# Impairment: the worst recorded network-delay profile replayed through the
+# whole engine over a fixture paced at 1x, graded against the buffer sizing
+# model. Kept short here; TESTING.md has the full-length runs.
 Step "impairment (phase-0 replay)" {
     cargo run -q -p bm-probe -- impair fixtures/h264-aac-320x180-30s.ts `
         --profile ts-rtt300-loss005 --duration 25 --depth-ms 3000

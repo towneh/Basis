@@ -2,10 +2,10 @@
 //! the 2026-08 live-buffering investigation, committed as fixtures so the
 //! measured sizing table is an executable test, not a memory.
 //!
-//! Each fixture is derived from a C-player diagnostics capture by
-//! `tools/extract-phase0.py`: a starve of duration D happened after the
-//! player's jitter buffer had drained, so the underlying delivery gap is
-//! D + buffer. `analytic_stall_fraction` reproduces the investigation's
+//! Each fixture was derived from a diagnostics capture of the earlier C
+//! player, named in the fixture's header: a starve of duration D happened
+//! after the player's jitter buffer had drained, so the underlying delivery
+//! gap is D + buffer. `analytic_stall_fraction` reproduces the investigation's
 //! sizing model — residual stall assuming the buffer refills between gaps —
 //! which is the table the Bank replay is measured against.
 
