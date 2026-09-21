@@ -71,8 +71,8 @@ public static class BasisMediaCapabilities
 
 // Field names mirror the JSON contract 1:1 (JsonUtility matches by
 // exact name). Identifier strings are documented on bm_capabilities
-// in the native crate; unknown strings are future additions — skip
-// them rather than failing.
+// in the native crate. Unknown strings are later additions: skip them
+// rather than failing.
 [Serializable]
 public class BmCapabilitySet
 {
@@ -89,7 +89,7 @@ public class BmVideoCap
 {
     public string codec;
     /// <summary>"hardware" | "software". Software routes state no
-    /// ceilings (0 = best effort) — rank them conservatively.</summary>
+    /// ceilings (0 = best effort), so rank them conservatively.</summary>
     public string route;
     public uint max_width;
     public uint max_height;

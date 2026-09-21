@@ -166,15 +166,15 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
 
         _tabGroup = PanelTabGroup.CreateNew(panel.Descriptor.ContentParent, LayoutDirection.Vertical);
         _navColumn = _tabGroup.ExtrasContainer;
-        // The extras container hangs below the tab list, which puts "which player" after the
-        // tabs that only act on it — the tabs read as the first choice when they are not one.
-        // The picker goes in the column that holds the tab list instead, above it.
+        // The extras container hangs below the tab list, which would put "which player" after
+        // the tabs that only act on it. The picker goes in the column that holds the tab list
+        // instead, above it.
         _tabColumn = _navColumn.parent as RectTransform;
         _pageContents.Clear();
 
         // The label-carrying entry prefab reserves 500 units for its control beside the title,
         // which does not fit the navigation column at all. The no-title variant drops that
-        // reservation — the same one the Library panel uses in this container.
+        // reservation; the Library panel uses the same one in this container.
         _selector = PanelDropdown.CreateNew(PanelDropdown.DropdownStyles.EntryNoLabel, PickerColumn);
         _selector.Descriptor.SetSize(new Vector2(60, 80));
         _selector.transform.SetSiblingIndex(0);
@@ -244,8 +244,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     /// <summary>
     /// The shared scroll-view prefab ships a bare, zero-anchored viewport with no mask, so
     /// content taller than the page draws straight past its bounds (Page-style panels have no
-    /// panel-level mask to catch it). Bound the viewport to the scroll rect and mask it — the
-    /// standard scroll-view construction — so a tab clips and scrolls like the settings pages.
+    /// panel-level mask to catch it). Bound the viewport to the scroll rect and mask it, as a
+    /// standard scroll view does, so a tab clips and scrolls like the settings pages.
     /// </summary>
     private static void ClampScrollViewport(RectTransform content)
     {
@@ -268,7 +268,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     /// <summary>
     /// Card prefabs keep an icon slot and a control slot beside their labels, both sized for the
     /// full-width page. Together they are wider than the navigation column, so the layout falls
-    /// back to minimums and hands the labels a width of zero — which renders their text one
+    /// back to minimums and hands the labels a width of zero, rendering their text one
     /// character per line. Drop the icon, and on the cards that carry no control, the slot too.
     /// </summary>
     private static void FitToNavColumn(PanelElementDescriptor element, bool releaseControlSlot)
@@ -283,7 +283,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     }
 
     /// <summary>
-    /// Column the player picker is filed under — the one holding the tab list, so the picker can
+    /// Column the player picker is filed under: the one holding the tab list, so the picker can
     /// sit above it. Falls back to the extras container if the tab group prefab ever stops
     /// nesting the two, which only costs the ordering.
     /// </summary>
@@ -298,7 +298,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     /// <summary>
     /// Reflows a page after rows inside it were shown or hidden. Rebuilding the group on its own
     /// leaves every card above it at its stale height, and the page root carries no layout
-    /// controller at all — so the pass has to walk out from what changed to the scroll content.
+    /// controller at all, so the pass has to walk out from what changed to the scroll content.
     /// </summary>
     private void RebuildPage(PanelElementDescriptor group)
     {
@@ -324,8 +324,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     }
 
     /// <summary>
-    /// Shows or hides a tab button. A tab the user is standing on can be taken away — losing
-    /// control of a player closes Playback — so the selection moves to the first one left.
+    /// Shows or hides a tab button. A tab the user is standing on can be taken away (losing
+    /// control of a player closes Playback), so the selection moves to the first one left.
     /// </summary>
     private void SetTabVisible(int index, bool visible)
     {
@@ -469,12 +469,12 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             else _activePlayer.Close();
         };
 
-        // Timeline scrubber — visible only for media with a seekable
+        // Timeline scrubber, visible only for media with a seekable
         // timeline (Duration > 0). The slider has no drag events, so the
         // seek is issued once the handle rests (debounced in RefreshSeekBar,
-        // which also keeps its hands off the knob while a drag is pending).
-        // Playback drives it through SliderComponent.value — the same path
-        // dragging uses — with _drivingSeekSlider distinguishing our writes
+        // which also leaves the knob alone while a drag is pending).
+        // Playback drives it through SliderComponent.value, the same path
+        // dragging uses, with _drivingSeekSlider distinguishing our writes
         // from the user's.
         _seekSlider = PanelSlider.CreateNew(content);
         _seekSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(
@@ -492,8 +492,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
 
         // Resync everyone onto this client's timeline. A control action, so it lives in
         // the control group, which the Playback tab hides wholesale when this client
-        // cannot control the player — the same gate as the transport buttons and the
-        // seek slider above. Pressing it acquires control first.
+        // cannot control the player (the same gate as the transport buttons and the
+        // seek slider above). Pressing it acquires control first.
         _resyncEveryoneRow = PanelElementDescriptor.BuildActionRow(content, "MediaPlayerResyncEveryone");
         PanelButton resyncAllBtn = PanelButton.CreateNew(_resyncEveryoneRow);
         resyncAllBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.resyncEveryone"));
@@ -568,9 +568,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         _audioTrackDropdown.gameObject.SetActive(false);
 
         // Language selector for out-of-band subtitle tracks. Hidden unless
-        // the loaded media actually offers tracks AND captions are on — the
-        // panel stays clutter-free for everything else. Row 0 returns to
-        // the in-band default.
+        // the loaded media actually offers tracks AND captions are on.
+        // Row 0 returns to the in-band default.
         _subtitleDropdown = PanelDropdown.CreateNewEntry(content);
         _subtitleDropdown.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.subtitles"));
         _subtitleDropdown.OnValueChanged = _ =>
@@ -628,9 +627,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         // machine: one scene can hold a source next door, where the point is
         // the latency a shallow buffer buys, and one from the far side of the
         // world that only plays smoothly with depth behind it. Built after the
-        // toggle so it sits under it, and hidden until it is on — the default
-        // is right for almost everyone and a number in milliseconds is not a
-        // thing to put in front of them uninvited.
+        // toggle so it sits under it, and hidden until the toggle is on, since
+        // the default is right for almost everyone.
         _bufferDepthSlider = PanelSlider.CreateNew(content);
         _bufferDepthSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(
             BasisLocalization.Get("mediaPlayer.bufferDepth"), 0f, 4000f, true, 0, ValueDisplayMode.Raw));
@@ -863,7 +861,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     }
 
     // Anyone Can Control is network-synced policy, so the gate can flip while
-    // the panel is open — repaint the tab instead of waiting for a reopen.
+    // the panel is open; repaint the tab instead of waiting for a reopen.
     private void RefreshControlGating()
     {
         if (_tabGroup == null || _activePlayer == null) return;
@@ -1047,7 +1045,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             if (Time.unscaledTime - _seekPendingAt < SeekDebounceSeconds) return; /* still dragging */
             _seekPendingAt = -1f;
             double targetS = Mathf.Clamp(_seekPendingPct, 0f, 100f) / 100.0 * durS;
-            // Capture where we're seeking FROM before the seek applies — the
+            // Capture where we're seeking FROM before the seek applies: the
             // networking path is asynchronous, so the reported position keeps
             // reading the pre-seek playhead until it lands.
             double fromS = _activePlayer.PositionSeconds;
@@ -1068,8 +1066,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             // Landed once the reported position is nearer the target than the
             // pre-seek playhead. A plain "within N seconds of target" test can't
             // tell a not-yet-applied seek from a landed one when the jump is
-            // shorter than N, which released the hold early and bounced the bar
-            // back to the old position on small seeks.
+            // shorter than N, and would bounce the bar back to the old position
+            // on small seeks.
             bool landed = System.Math.Abs(posS - _seekAwaitPosS) <= System.Math.Abs(posS - _seekAwaitFromS);
             if (!landed && Time.unscaledTime < _seekAwaitUntil)
             {
@@ -1096,7 +1094,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
 
     // TMP's <noparse> is not nestable: an embedded </noparse> in player- or
     // remote-supplied text (titles ride the networking layer) terminates the
-    // block and the remainder parses as rich text again — markup injection into
+    // block and the remainder parses as rich text again, injecting markup into
     // the Status line. Breaking every '<' with a zero-width space renders
     // identically and keeps any tag inert.
     private static readonly string BrokenAngleBracket = "<" + (char)0x200B; /* '<' + zero-width space */
@@ -1111,7 +1109,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         return h > 0 ? $"{h}:{m:00}:{s:00}" : $"{m}:{s:00}";
     }
 
-    // Builds the always-visible status line for the selected player: a colored
+    // Builds the always-visible status line for the selected player: a coloured
     // state word, a resolution detail, and the error code when present.
     // Markup is code-assembled (trusted) but any player-supplied text (titles)
     // is wrapped in <noparse> so its characters aren't read as tags.
@@ -1155,7 +1153,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
                 .Append(" / ").Append(FormatTime(durSec)).Append("</color>");
 
         // What's playing, per whatever resolved the load. Player-supplied text is
-        // sanitized AND wrapped in <noparse>.
+        // sanitised AND wrapped in <noparse>.
         if (!string.IsNullOrEmpty(_metaTitle))
             _statusBuilder.Append("\n<b><noparse>").Append(SanitizeForMarkup(_metaTitle)).Append("</noparse></b>");
         if (!string.IsNullOrEmpty(_metaUploader))
@@ -1174,7 +1172,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         if (string.Equals(_lastStatusMarkup, markup)) return;
         _lastStatusMarkup = markup;
         _statusGroup.SetRichDescription(markup);
-        // The card grows and shrinks with the line count — a title arriving, an error clearing —
+        // The card grows and shrinks with the line count (a title arriving, an error clearing),
         // so the column it sits in has to be measured again or the rows below it keep the gap.
         RebuildNavColumn(_statusGroup);
     }

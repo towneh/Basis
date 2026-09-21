@@ -4,8 +4,7 @@ using System.Collections.Generic;
 /// <summary>
 /// What a resolver turns a page URL into: the stream (or pair of streams) to
 /// open, plus what it learned along the way. Everything past the URLs is
-/// display material and costs nothing extra — a resolver already has it from
-/// the extraction it just ran.
+/// display material the resolver already has from its extraction.
 /// </summary>
 public sealed class BasisResolvedMedia
 {

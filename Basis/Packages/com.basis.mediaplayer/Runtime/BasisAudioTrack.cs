@@ -25,9 +25,9 @@ public sealed class BasisAudioTrack
     public int SampleRate;
 
     /// <summary>What a picker should show. Prefers the track's own name,
-    /// then its language, and always carries the position — three unnamed
-    /// stereo tracks from a screen recording would otherwise render as
-    /// three identical rows.</summary>
+    /// then its language. An unnamed track carries its position, so three
+    /// unnamed stereo tracks from a screen recording do not render as three
+    /// identical rows.</summary>
     public string DisplayName
     {
         get

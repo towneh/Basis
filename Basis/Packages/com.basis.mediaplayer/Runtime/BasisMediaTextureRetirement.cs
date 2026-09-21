@@ -11,16 +11,15 @@ using UnityEngine.Rendering;
 /// On Vulkan the plugin builds an image view over Unity's VkImage and cannot
 /// destroy it at close time, because Unity may still have command buffers in
 /// flight; <c>bm_session_close</c> parks it for a later render event instead.
-/// Releasing the RenderTexture in the same breath destroys the image while that
-/// view still exists. So the texture outlives the close — and the wait only
-/// means something because of the collect event, since the parked objects are
-/// destroyed by a render event and a closed session issues none of its own.
+/// Releasing the RenderTexture at the same time would destroy the image while
+/// that view still exists, so the texture outlives the close. The parked
+/// objects are destroyed by a render event and a closed session issues none of
+/// its own, which is why this issues the collect event while it waits.
 ///
-/// The queue holds its textures until the events have been issued, so an app
-/// that stops rendering holds them until it renders again. That is the same
-/// bound the plugin's own parking has and is preferred to the alternative:
-/// releasing on a timer would destroy exactly the image the wait exists to
-/// protect.
+/// Textures are held until the events have been issued, so an app that stops
+/// rendering holds them until it renders again. That is the same bound the
+/// plugin's own parking has; releasing on a timer instead would destroy the
+/// very image the wait protects.
 ///
 /// Android only. The D3D11 path rebuilds its consumer on registration and has
 /// no equivalent requirement.
@@ -51,7 +50,7 @@ internal static class BasisMediaTextureRetirement
 
     /// <summary>
     /// Take over <paramref name="texture"/> if it is one the plugin has built
-    /// views over. Anything else — cover art, a Texture2D — is left to its
+    /// views over. Anything else (cover art, a Texture2D) is left to its
     /// owner.
     /// </summary>
     internal static void Retire(Texture texture)
@@ -59,7 +58,7 @@ internal static class BasisMediaTextureRetirement
         // Every player is destroyed on the way out, and each one closes as it
         // goes: retiring then would build the driver GameObject during the
         // quit, which Unity refuses outright. Nothing needs releasing at that
-        // point either — the process is taking the device with it.
+        // point either: the process is taking the device with it.
         if (quitting) return;
         if (!(texture is RenderTexture target)) return;
 

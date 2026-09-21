@@ -8,10 +8,9 @@ using UnityEngine.UIElements;
 
 /// <summary>
 /// Live readout of one player, walking the pipeline in the order it runs:
-/// source, decode, bank and present, clock, audio, captions, engine. The
-/// point is to make a bad run legible while it is happening — which stage
-/// stopped, or which rate is not what it should be — rather than after the
-/// fact from a capture.
+/// source, decode, bank and present, clock, audio, captions, engine. It makes
+/// a bad run legible while it is happening (which stage stopped, or which
+/// rate is off) rather than after the fact from a capture.
 /// </summary>
 public class BasisMediaPlayerDebugWindow : EditorWindow
 {

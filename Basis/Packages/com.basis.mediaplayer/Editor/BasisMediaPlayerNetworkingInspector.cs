@@ -13,7 +13,7 @@ public class BasisMediaPlayerNetworkingInspector : Editor
     private VisualElement _root;
     private Label _canControl, _hasPlayer, _editHint;
     // The two cards that only do anything in Play Mode. Left visible they
-    // read as authored settings — the URL box especially, sitting a
+    // read as authored settings, the URL box especially, since it sits a
     // component away from the player's own URL field.
     private VisualElement _urlCard, _actionsCard;
 

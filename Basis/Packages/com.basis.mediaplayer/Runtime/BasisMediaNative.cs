@@ -36,7 +36,7 @@ public static class BasisMediaNative
     public static extern unsafe int bm_session_read_audio(ulong handle, float* buffer, uint maxSamples);
 
     /// <summary>
-    /// Report the audio sink's estimated output latency (µs) — the chain
+    /// Report the audio sink's estimated output latency (µs): the chain
     /// between the pull and the speaker. The engine shifts the audio
     /// master clock back by it so video paces to the audible position.
     /// Send when the estimate changes; clamped engine-side to 0..500 ms.
@@ -57,9 +57,8 @@ public static class BasisMediaNative
 
     /// <summary>
     /// Drain the engine's process-wide free-text log, oldest first; returns
-    /// the count written. No handle: it answers before the first session
-    /// opens and after the last one closes, which is where most of what it
-    /// carries is said. Records beyond <paramref name="capacity"/> stay
+    /// the count written. No handle: most of what it carries is said before
+    /// the first session opens or after the last one closes. Records beyond <paramref name="capacity"/> stay
     /// queued, so call again until a call comes back short.
     /// <paramref name="evicted"/> may be null; it receives the running count
     /// of lines the ring dropped to make room, which describes holes at the
@@ -106,7 +105,7 @@ public static class BasisMediaNative
 
     /// <summary>
     /// Copy the cover art and its MIME type out. The bytes are the
-    /// container's own — JPEG or PNG as stored — so the caller decodes
+    /// container's own (JPEG or PNG as stored) and the caller decodes
     /// them; nothing in the engine parses an image. A buffer shorter than
     /// the reported length is refused rather than half-filled.
     /// </summary>
@@ -131,9 +130,9 @@ public static class BasisMediaNative
     internal const int RenderEventCollect = 2;
 }
 
-/// <summary>What kind of source this is. Every transport bar bare
-/// http(s) settles this itself — RTSP/WHEP/RIST are always live, an HLS
-/// playlist says so, a resolver states it — so this is an override for
+/// <summary>What kind of source this is. Every transport except bare
+/// http(s) settles this itself (RTSP/WHEP/RIST are always live, an HLS
+/// playlist says so, a resolver states it), so this is an override for
 /// the one case left: a plain HTTP URL that is not a playlist.</summary>
 public enum BmLiveness
 {
@@ -147,9 +146,9 @@ public enum BmLiveness
     Live = 2,
 }
 
-/// <summary>Decode-route preference : a per-user machine
-/// setting, applied to every session the client opens — never a
-/// world-author control. A rung the platform does not have is a typed
+/// <summary>Decode-route preference: a per-user machine setting,
+/// applied to every session the client opens, never a world-author
+/// control. A rung the platform does not have is a typed
 /// refusal (Quest has no software rung for H.264/HEVC/VP9).</summary>
 public enum BmDecodePreference
 {
@@ -158,8 +157,8 @@ public enum BmDecodePreference
     HardwareWithFallback = 0,
     /// <summary>Hardware or typed refusal.</summary>
     HardwareOnly = 1,
-    /// <summary>Software only — also the CPU A/B measurement lever and
-    /// a driver-workaround escape hatch.</summary>
+    /// <summary>Software only. Also useful for CPU A/B measurement and as
+    /// a workaround for a faulty driver.</summary>
     SoftwareOnly = 2,
 }
 
@@ -214,13 +213,12 @@ public enum BmEventCode : uint
     AudioTrim = 15,
     SyncSlew = 16,
     SyncSeek = 17,
-    /// <summary>A free-text engine diagnostic. Detail is the whole line —
-    /// this is the channel that works before a session exists and after it
-    /// closes, so it carries no more structure than the words.</summary>
+    /// <summary>A free-text engine diagnostic. Detail is the whole line,
+    /// with no further structure.</summary>
     Log = 18,
     /// <summary>The video decoder fell too far behind the clock and video is
     /// being discarded up to the next keyframe so it can rejoin the sound,
-    /// which is unaffected. The signal that this source is more than the
+    /// which is unaffected. It signals that this source is more than the
     /// device can decode.</summary>
     LateVideoSkip = 19,
 }
@@ -267,7 +265,7 @@ public struct BmSnapshot
     public uint AudioSampleRate;
     public uint AudioChannels;
     /// <summary>
-    /// Presented video pts minus the audio playhead, microseconds — the
+    /// Presented video pts minus the audio playhead, microseconds: the
     /// engine's own account of its A/V alignment. <c>int.MinValue</c>
     /// while either side is unknown. Diagnostic: nothing steers on it.
     /// </summary>
@@ -310,14 +308,13 @@ public unsafe struct BmEvent
 public unsafe struct BmLogRecord
 {
     /// <summary>Microseconds since the plugin's first diagnostic in this
-    /// process. <b>Not</b> a session clock — <see cref="BmEvent.WallUs"/>
-    /// counts from its own session's start, so the two have different
-    /// origins and must not be subtracted from one another.</summary>
+    /// process. <b>Not</b> a session clock: <see cref="BmEvent.WallUs"/>
+    /// counts from its own session's start, so the two must not be
+    /// subtracted from one another.</summary>
     public long WallUs;
 
-    /// <summary>0 for a line that belongs to no session, which is every
-    /// line today: the channel exists for what is said with no handle
-    /// open.</summary>
+    /// <summary>0 for a line that belongs to no session. The engine
+    /// currently writes 0 on every line.</summary>
     public ulong Session;
 
     public uint Level;
@@ -330,7 +327,7 @@ public unsafe struct BmLogRecord
 /// <summary>
 /// One in-band CEA-608 caption cue: the full displayed text as of
 /// PtsUs (UTF-8, rows joined with '\n'; TextLen 0 = display cleared).
-/// Cues arrive ahead of presentation — display when the session
+/// Cues arrive ahead of presentation; display each when the session
 /// position reaches PtsUs.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -341,7 +338,7 @@ public unsafe struct BmCaption
     public fixed byte Text[256];
     /// <summary>
     /// Names the four bytes PtsUs's alignment adds after Text. Not part of
-    /// the contract — always 0. The struct is 272 bytes either way.
+    /// the contract; always 0. The struct is 272 bytes either way.
     /// </summary>
     public uint Reserved;
 }
@@ -350,7 +347,7 @@ public unsafe struct BmCaption
 /// One SEI user_data_unregistered message, surfaced with its UUID and left
 /// unparsed. The payload lands in the caller's byte buffer at Offset for
 /// Len; this record only points at it. Messages arrive ahead of
-/// presentation — act on one when the session position reaches PtsUs.
+/// presentation; act on one when the session position reaches PtsUs.
 /// 32 bytes, no padding.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -364,8 +361,8 @@ public unsafe struct BmUserData
 
 /// <summary>
 /// One selectable audio track. Language is the container's ISO 639 code
-/// and Label its track name; either can be absent — a recording that puts
-/// a microphone on its own track usually states neither — so a picker has
+/// and Label its track name. Either can be absent (a recording that puts
+/// a microphone on its own track usually states neither), so a picker has
 /// to be able to tell rows apart by position alone.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]

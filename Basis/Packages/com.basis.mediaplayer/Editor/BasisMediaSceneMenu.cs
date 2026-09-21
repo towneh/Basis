@@ -14,7 +14,7 @@ using UnityEngine.SceneManagement;
 ///
 /// <b>Insert Player</b> is the authoring path: the same prefab dropped into a
 /// scene someone is building, exactly as it ships. No capture, no diagnostics
-/// component and no source — a world's player is not an instrument, and a
+/// component and no source: a world's player is not an instrument, and a
 /// fixture path from this machine would not resolve on anyone else's.
 ///
 /// Both instantiate the shipped prefabs, so what either drops in the scene is
@@ -59,9 +59,9 @@ public static class BasisMediaSceneMenu
     /// <summary>
     /// The shared-playback rows: one networked player, and deliberately no
     /// source. Every other test scene pre-fills a local fixture, and a local
-    /// path is the one thing that cannot work here — it loads on the owner and
-    /// fails on the follower, which reads as a sync defect rather than as a
-    /// file the second machine does not have. Both prefabs carry the networking
+    /// path cannot work here: it loads on the owner and fails on the follower,
+    /// which reads as a sync defect rather than as a file the second machine
+    /// does not have. Both prefabs carry the networking
     /// component, so the player itself needs nothing added.
     /// </summary>
     [MenuItem("Basis/Tools/Media Player/Test Scene/Shared Playback (two clients)", false, 104)]
@@ -74,7 +74,7 @@ public static class BasisMediaSceneMenu
     static void InsertMultiChannel() => Insert(SurroundPrefab);
 
     /// <summary>
-    /// Replaces the open scene with a pass-ready one. Nothing is saved — the
+    /// Replaces the open scene with a pass-ready one. Nothing is saved: the
     /// scene is left dirty for you to keep or discard, and every object is
     /// registered for undo.
     /// </summary>
@@ -189,13 +189,12 @@ public static class BasisMediaSceneMenu
     /// <summary>
     /// Turn both captures on: the engine's own view of the session, and the
     /// per-frame one recording what the engine cannot see from the inside.
-    /// A pass is worth far more with them than without, and nobody remembers
-    /// to switch them on before the run that turns out to be interesting.
+    /// Nobody remembers to switch them on before the run that turns out to be
+    /// interesting.
     ///
     /// The diagnostics component is added here rather than carried on the
-    /// prefab, which ships without one deliberately — it is a development
-    /// instrument, not part of a media player. That is also why the insert
-    /// path above leaves it off.
+    /// prefab because it is a development instrument, not part of a media
+    /// player. That is also why the insert path above leaves it off.
     ///
     /// Both default to a single fixed filename under persistentDataPath, so
     /// several players in one scene would write over each other. `ordinal`
@@ -206,7 +205,7 @@ public static class BasisMediaSceneMenu
     {
         player.engineCapture = true;
         player.engineCaptureFileName = ordinal > 0 ? $"BasisMediaEngine-{ordinal}.csv" : "";
-        // Sessions cycle in these scenes — dormancy, waking, re-opens — and
+        // Sessions cycle in these scenes (dormancy, waking, re-opens) and
         // each one writes on close, so replacing would leave only the last.
         player.engineCaptureAppend = true;
 
@@ -239,9 +238,9 @@ public static class BasisMediaSceneMenu
     /// <summary>
     /// A lettered clip per player: a minute each of one letter, one colour,
     /// one genre of music and a running timecode. They make the session-cap
-    /// rows readable — which player is dormant is a glance rather than a
-    /// deduction, whether one resumed where it would have been is legible off
-    /// the timecode, and flapping is audible without looking at anything.
+    /// rows readable: which player is dormant is visible at a glance, whether
+    /// one resumed where it would have been is legible off the timecode, and
+    /// flapping is audible without looking at anything.
     ///
     /// Shipped under `Native~/fixtures/captest`, so the pass needs no setup.
     /// Missing ones are skipped, so a partial set still helps.
@@ -261,8 +260,8 @@ public static class BasisMediaSceneMenu
     }
 
     /// <summary>The engine's A/V fixture where the package sits in a checkout
-    /// carrying it; empty otherwise. Local file, so a pass needs no network
-    /// and no test rig standing up.</summary>
+    /// carrying it; empty otherwise. A local file, so a pass needs no network
+    /// and no stream server.</summary>
     static string DefaultFixtureUrl()
     {
         string dir = FixtureDirectory();

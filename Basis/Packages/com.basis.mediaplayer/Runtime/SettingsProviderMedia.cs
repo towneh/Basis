@@ -93,7 +93,7 @@ public static class SettingsProviderMedia
     }
 
     /// <summary>Platform plus how many video routes the engine actually probed as
-    /// hardware — the figure that says whether "hardware only" can play anything here.</summary>
+    /// hardware, which says whether "hardware only" can play anything here.</summary>
     static string DescribeEngine()
     {
         BmCapabilitySet caps = BasisMediaCapabilities.Set;

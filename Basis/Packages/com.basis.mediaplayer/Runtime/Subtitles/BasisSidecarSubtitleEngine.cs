@@ -8,7 +8,7 @@ using UrlSecurity = Basis.Scripts.Common.BasisUrlSecurity;
 // this position" for the player's per-frame tick. Owned by BasisMediaPlayer;
 // not a MonoBehaviour. The lookup is stateless against playback (a binary
 // search over the sorted cue list every call), so seeks, stop then play and
-// loops need no reset — only the change-detection index persists between
+// loops need no reset. Only the change-detection index persists between
 // calls.
 internal sealed class BasisSidecarSubtitleEngine
 {

@@ -5,8 +5,8 @@ using UnityEngine;
 /// <summary>
 /// Where a capture is allowed to be written.
 ///
-/// Both captures — the managed per-frame one and the engine's own — take a
-/// filename rather than a path, and both resolve it under
+/// Both captures (the managed per-frame one and the engine's own) take a
+/// filename rather than a path and resolve it under
 /// <c>Application.persistentDataPath</c>. Anything escaping that root is
 /// refused: these fields sit on a component, so a world could author one, and
 /// an unchecked path names any file the process can write.

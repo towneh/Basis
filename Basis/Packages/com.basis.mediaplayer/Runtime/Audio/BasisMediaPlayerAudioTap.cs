@@ -12,8 +12,8 @@ using UnityEngine;
 ///
 /// Spatialisation is preserved: this is a filter component on the
 /// AudioSource's GameObject, so with the source's Spatialize +
-/// SpatializePostEffects enabled, Unity runs it BEFORE the spatialiser —
-/// Steam Audio (HRTF, occlusion, transmission) and Unity 3D then process the
+/// SpatializePostEffects enabled, Unity runs it BEFORE the spatialiser, and
+/// Steam Audio (HRTF, occlusion, transmission) or Unity 3D then process the
 /// audio it generates exactly as they would a clip's. The source still plays
 /// a short silent looping clip to keep its DSP chain active; this overwrites
 /// that silence each block.
@@ -169,9 +169,9 @@ public sealed class BasisMediaPlayerAudioTap : MonoBehaviour
         if (!active || s == null || r == null || t == null || channels < 1)
         {
             // Silence it rather than leaving the block alone. Upstream is the
-            // silent keepalive clip today, so passing it through is silent by
-            // luck; this component's contract is to overwrite the block, and a
-            // block it declines to write should be silent by construction.
+            // silent keepalive clip, so passing it through would be silent by
+            // luck; a block this component declines to write should be silent
+            // by construction.
             Array.Clear(data, 0, data.Length);
             return;
         }

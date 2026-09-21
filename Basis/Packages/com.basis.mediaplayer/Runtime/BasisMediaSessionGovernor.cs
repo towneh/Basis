@@ -5,15 +5,15 @@ using UnityEngine;
 /// <summary>
 /// Caps how many media players decode at once on this machine.
 ///
-/// A world's media-player count stopped being a world author's decision once
-/// props could carry one: anyone can spawn more, and every open session costs
+/// Props can carry media players, so the number in a world is not the world
+/// author's to decide: anyone can spawn more, and every open session costs
 /// this viewer stream bandwidth, memory and decode work whether or not they are
 /// looking at it. A handful of autoplaying prop players will exhaust a
 /// standalone headset's link and frame budget on their own.
 ///
 /// The nearest few players stay running and the rest go dormant. Dormant means
-/// the session is closed rather than paused — a paused session still holds its
-/// buffer, frame pool and decoder — with the URL and playback position
+/// the session is closed rather than paused (a paused session still holds its
+/// buffer, frame pool and decoder), with the URL and playback position
 /// remembered, so re-activating costs an ordinary join and lands where the
 /// player would have been.
 ///
@@ -137,9 +137,9 @@ public static class BasisMediaSessionGovernor
         {
             // Eligible immediately. The dwell exists to stop a player that just
             // moved from moving straight back, and a player we have never seen
-            // has not moved — dating it from now would let every session in a
-            // scene open at once and stay open for the first few seconds, which
-            // is the moment the cap is most needed.
+            // has not moved. Dating it from now would let every session in a
+            // scene open at once and stay open for the first few seconds, when
+            // the cap is most needed.
             entry = new Entry { Player = player, SettledAt = float.NegativeInfinity };
             entries[player] = entry;
         }
@@ -249,8 +249,8 @@ public static class BasisMediaSessionGovernor
 
     /// <summary>True distance rather than the squared form, because the swap
     /// margin is expressed as a fraction of one and squaring would silently
-    /// change what that fraction means. A handful of players once a second does
-    /// not care about the square root.</summary>
+    /// change what that fraction means. The square root is negligible for a
+    /// handful of players once a second.</summary>
     static float DistanceTo(Entry entry, Vector3 listener)
     {
         if (entry.Player == null) return float.MaxValue;
@@ -329,9 +329,8 @@ public static class BasisMediaSessionGovernor
             if (state == BmState.Opening || state == BmState.Buffering) continue;
             entry.AwaitingResume = false;
             if (state != BmState.Playing && state != BmState.Paused) continue;
-            // Under shared playback the owner's position is the truth and
-            // arrives on the next heartbeat, so seeking locally would fight
-            // it. Carrying the component is not the same as being in a
+            // Seeking a shared-playback player locally would fight the owner.
+            // Carrying the component is not the same as being in a
             // session, though: offline, or before a NetworkID is assigned,
             // there is no owner to defer to and nothing else will place this
             // player. HasNetworkID is the same test the component applies to

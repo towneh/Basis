@@ -2,10 +2,9 @@
 /// A decoded-audio producer the managed audio stack can pull from: one
 /// interleaved float ring, consumed once, on the audio thread.
 ///
-/// The engine is the only implementation that ships, but nothing in the
-/// audio stack depends on it — the splitter, the taps and the per-channel
-/// outputs are written against this and nothing else, which is what lets
-/// them be exercised without a session open.
+/// The engine is the only implementation that ships. The splitter, the taps
+/// and the per-channel outputs are written against this interface alone, so
+/// they can be exercised without a session open.
 /// </summary>
 public interface IBasisPcmSource
 {

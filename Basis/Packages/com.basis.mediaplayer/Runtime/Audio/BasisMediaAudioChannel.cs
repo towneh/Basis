@@ -6,7 +6,7 @@ using UnityEngine;
 /// GameObject as the AudioSource. Channel selections take a single decoded
 /// channel; Stereo plays a stereo downmix of the whole stream.
 ///
-/// What each channel carries depends on the stream's layout — e.g. a 5.1
+/// What each channel carries depends on the stream's layout. A 5.1
 /// stream decodes in WAVE order (1 Front Left, 2 Front Right, 3 Front
 /// Centre, 4 LFE, 5 Back Left, 6 Back Right), while a custom mix can use
 /// them as arbitrary content lanes.

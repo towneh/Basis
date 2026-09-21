@@ -46,7 +46,7 @@ public sealed class BasisMediaSmokeBands
 
     /// <summary>Whether a failing hold share fails the run. Off by
     /// default because an editor play session does not present on a
-    /// stable display cadence — the number is worth reporting there, but
+    /// stable display cadence. The number is worth reporting there, but
     /// only a build or a device can be held to it.</summary>
     public bool EnforceHoldShare;
 }
@@ -134,8 +134,8 @@ public static class BasisMediaSmokeGrader
             }
         }
 
-        // The per-speaker columns arrived with the managed audio stack; a
-        // capture from before it still grades on everything else.
+        // A capture without the per-speaker columns still grades on
+        // everything else.
         report.HasOutputColumns = column.ContainsKey("out_consumed") && column.ContainsKey("out_bound");
 
         var holds = new Dictionary<int, int>();
@@ -297,8 +297,7 @@ public static class BasisMediaSmokeGrader
     /// The far side of the ring. The pull band above says the engine was
     /// drained at the stream rate; these say a speaker was actually fed at
     /// the device rate, and that what reached it was not silence. A run can
-    /// pass every other band with no sound at all, which is exactly the
-    /// failure a person would notice first.
+    /// pass every other band with no sound at all.
     /// </summary>
     static void JudgeOutputs(BasisMediaSmokeReport report, BasisMediaSmokeBands bands)
     {

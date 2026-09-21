@@ -14,8 +14,8 @@ using UnityEngine.Rendering;
 /// <see cref="IBasisPcmSource"/>.
 ///
 /// It draws nothing on its own. The video texture reaches the world through
-/// an output sink — <see cref="BasisVideoMaterialOutput"/> for a renderer,
-/// <see cref="BasisVideoDisplay"/> for a uGUI RawImage — which own aspect,
+/// an output sink (<see cref="BasisVideoMaterialOutput"/> for a renderer,
+/// <see cref="BasisVideoDisplay"/> for a uGUI RawImage), which owns aspect,
 /// projection, stereo eye and the frame-origin correction.
 ///
 /// It makes no sound on its own. Audio belongs to
@@ -25,8 +25,8 @@ using UnityEngine.Rendering;
 /// session decodes audio that nothing consumes.
 /// </summary>
 // Ahead of every default-order MonoBehaviour, so anything that reads the poll's
-// snapshot without being one of the registered consumers below — a component in
-// another package, a test harness's own Update — still sees this frame's values
+// snapshot without being one of the registered consumers below (a component in
+// another package, a test harness's own Update) still sees this frame's values
 // rather than the previous frame's.
 [DefaultExecutionOrder(-100)]
 [AddComponentMenu("Basis/Basis Media Player")]
@@ -36,11 +36,9 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     public string url;
 
     // The audio-only half of a split pair, set by Open(url, audioUrl) and
-    // by the resolver — never authored. Adaptive ladders serve every rung
+    // by the resolver, never authored. Adaptive ladders serve every rung
     // above their muxed fallback as a video-only stream plus this one, so
-    // it only ever means something a resolver has just worked out. Not
-    // serialized and not public: there is no version of "type an audio URL
-    // next to the video URL" that is a thing to ask of anyone, and an
+    // it only comes from a resolver. Not serialised and not public: an
     // authored value would take effect with nothing on screen to show it.
     // What is actually open is on ActiveAudioStreamUrl.
     string audioUrl;
@@ -222,7 +220,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// <summary>The stream's channel count (0 until announced).</summary>
     public int AudioChannels => System.Threading.Volatile.Read(ref _engineChannels);
 
-    /// <summary>The engine-declared capability set — what this
+    /// <summary>The engine-declared capability set: what this
     /// basis_media build will decode and play. Queried once and cached;
     /// null when the plugin is unavailable or the ABI mismatched. See
     /// <see cref="BasisMediaCapabilities"/> for the raw JSON and
@@ -231,22 +229,19 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     /// <summary>Decode-route preference applied to every descriptor this
     /// component builds at open (takes effect on the next open).
-    /// Deliberately a static, not a serialised inspector field: it is the
-    /// user's machine setting, persisted client-side by the settings UI,
-    /// never world content — and never subject to prefab-serialisation
-    /// drift.</summary>
+    /// A static rather than a serialised inspector field: it is the user's
+    /// machine setting, persisted client-side by the settings UI, never world
+    /// content.</summary>
     public static BmDecodePreference DecodePreference = BmDecodePreference.HardwareWithFallback;
 
     /// <summary>Jitter buffer depth for players that have not been tuned
     /// individually, in milliseconds; 0 = Auto, which sizes itself from the
     /// delivery delays it observes and is right for almost everyone.
     ///
-    /// A static for the same reason as <see cref="DecodePreference"/>, and a
-    /// stronger one: what this trades off is the viewer's own connection
-    /// against how soon they see a frame, and a world author cannot see that
-    /// connection. Audio-leading start and the divergence bound stay authored
-    /// — one is a property of the content, the other of the shared
-    /// experience.</summary>
+    /// A static for the same reason as <see cref="DecodePreference"/>: it
+    /// trades the viewer's own connection against how soon they see a frame,
+    /// and a world author cannot see that connection. The divergence bound
+    /// stays authored because it belongs to the shared experience.</summary>
     public static int DefaultBufferDepthMs;
 
     /// <summary>This player's own depth, when the viewer has tuned it away
@@ -261,10 +256,9 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// that source, which no other client shares and no world can know.
     /// Read when a session opens, so <see cref="ReopenAtPosition"/> is what
     /// makes a change take effect on one already running.</summary>
-    /// <remarks><see cref="NonSerializedAttribute"/> states what the comment above
-    /// already says. Unity cannot serialise a nullable either way, so the attribute
-    /// changes no behaviour — it stops the serialization analyzer reporting a field
-    /// that is skipped on purpose, and keeps a real one from hiding among those.</remarks>
+    /// <remarks>Unity cannot serialise a nullable either way, so
+    /// <see cref="NonSerializedAttribute"/> changes no behaviour. It stops the
+    /// serialisation analyser reporting a field that is skipped on purpose.</remarks>
     [NonSerialized] public int? BufferDepthOverrideMs;
 
     /// <summary>The depth this player actually opens with.</summary>
@@ -332,7 +326,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// hands these over unparsed: <paramref name="payload"/> is whatever
     /// followed the 16-byte UUID inside the `user_data_unregistered`
     /// message, and the handler decides what it means. It is borrowed for
-    /// the call — copy what outlives it.
+    /// the call; copy what outlives it.
     /// </summary>
     public delegate void UserDataHandler(long ptsUs, Guid uuid, ReadOnlySpan<byte> payload);
 
@@ -350,7 +344,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     public event UserDataHandler UserDataReceived;
 
     /// <summary>Out-of-band subtitle tracks offered for this source. The
-    /// media carries none of these — a resolver or other enrichment source
+    /// media carries none of these; a resolver or other enrichment source
     /// supplies them through <see cref="SetSubtitleTracks"/>.</summary>
     public System.Collections.Generic.IReadOnlyList<BasisSubtitleTrack> SubtitleTracks => _subtitleTracks;
 
@@ -375,8 +369,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     double _reopenResumeAt = -1d;
 
     /// <summary>The audio tracks this source offers, in container order.
-    /// Empty when there is nothing to choose between — one track, or a
-    /// container that does not enumerate them — so a picker can simply
+    /// Empty when there is nothing to choose between (one track, or a
+    /// container that does not enumerate them), so a picker can simply
     /// hide itself on an empty list.</summary>
     public System.Collections.Generic.IReadOnlyList<BasisAudioTrack> AudioTracks => _audioTracks;
 
@@ -391,9 +385,9 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// <summary>Play a different audio track. The engine binds its audio
     /// track when the container is opened, so this re-opens the session
     /// and returns to the current position rather than switching in
-    /// place — a short re-buffer, in exchange for no new class of race
-    /// against a live Bank. Ignored if the index is already selected or
-    /// out of range.</summary>
+    /// place: a short re-buffer, in exchange for no race against a running
+    /// session. Ignored if the index is already selected or out of
+    /// range.</summary>
     public void SelectAudioTrack(int index)
     {
         if (index < 0 || index >= _audioTracks.Count || index == _audioTrackIndex)
@@ -411,7 +405,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// a live source rejoins the edge because it has nothing to return to.
     /// Re-opens the stream the session is already on rather than routing
     /// through the resolver again, and does not go through the networking
-    /// component — this is one viewer's own session, and nobody else's
+    /// component: this is one viewer's own session, and nobody else's
     /// playback should move because of it.</summary>
     public void ReopenAtPosition()
     {
@@ -451,8 +445,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// <summary>Selects a sidecar track by <see cref="SubtitleTracks"/>
     /// index, or -1 to return to in-band captions. The track is fetched
     /// once, and the URL is checked against the client's URL security
-    /// first; on failure the
-    /// selection reverts to -1.</summary>
+    /// first; on failure the selection reverts to -1.</summary>
     public void SelectSubtitleTrack(int index)
     {
         if (index < 0 || index >= _subtitleTracks.Count)
@@ -589,8 +582,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// Open whatever the user actually typed or a world author authored,
     /// steering page URLs (a YouTube or Twitch watch page) through any
     /// installed resolver. A directly-playable URL opens straight
-    /// through, and with no resolver installed every URL does — the same
-    /// behaviour as having no integration at all.
+    /// through, and with no resolver installed every URL does.
     /// </summary>
     public void OpenUserUrl(string sourceUrl)
     {
@@ -665,8 +657,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// cannot overwrite a load the user started after it.</summary>
     public int LoadGeneration { get; private set; }
 
-    /// <summary>Report a load that failed before the engine ever saw it —
-    /// a resolver that could not extract a page URL. The engine's own
+    /// <summary>Report a load that failed before the engine ever saw it,
+    /// such as a resolver that could not extract a page URL. The engine's own
     /// failures arrive through the snapshot instead.</summary>
     public void ReportLoadError(Exception error)
     {
@@ -860,7 +852,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// Feed the shared-playback owner's position (seconds) as a soft
     /// sync target. The engine corrects with dead band → gentle rate
     /// slew → seek only past a large threshold, and extrapolates the
-    /// target at 1x between calls — one call per received heartbeat
+    /// target at 1x between calls, so one call per received heartbeat
     /// is enough. Live sources ignore targets (divergence is bounded
     /// by <see cref="maxDivergenceMs"/> instead).
     /// </summary>
@@ -901,15 +893,13 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         }
         State = BmState.Idle;
         // The per-session engine readings describe a session that no longer
-        // exists. Left alone they survive into the next one: the open path
-        // clears them only after `bm_session_open` succeeds, so a close, or an
-        // open that fails or is refused before that point, leaves the previous
-        // session's values readable — and the diagnostics recorder writes them
-        // into its capture for an idle player, which is a poisoned column
-        // rather than a cosmetic wart. Clearing them here covers the open path
-        // too, since `Open` closes first; the one path that deliberately does
-        // not reach here is a moderation-blocked open, which returns before
-        // `Close` and leaves a still-playing session's readings alone.
+        // exists. The open path clears them only after `bm_session_open`
+        // succeeds, so without this a close, or an open that fails before that
+        // point, would leave the previous session's values for the diagnostics
+        // recorder to write into its capture for an idle player. `Open` closes
+        // first, so this covers it too. A moderation-blocked open returns
+        // before `Close` and deliberately leaves a still-playing session's
+        // readings alone.
         System.Threading.Volatile.Write(ref _engineChannels, 0);
         System.Threading.Volatile.Write(ref _engineSampleRate, 0);
         System.Threading.Volatile.Write(ref _syncRatePpm, 0);
@@ -950,16 +940,16 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     ///
     /// On Vulkan the plugin holds an image view over the texture it was
     /// registered with and can only destroy it from a later render event, so
-    /// the image has to stay alive past the call that ends the registration —
-    /// a close or a replacement alike — and the retirement queue is what holds
-    /// it. Elsewhere the plugin owns nothing that outlives the session, so the
+    /// the image has to stay alive past the call that ends the registration
+    /// (a close or a replacement alike), and the retirement queue holds it.
+    /// Elsewhere the plugin owns nothing that outlives the session, so the
     /// texture is destroyed here; Unity releases the graphics resource through
     /// the render command queue, which orders it after the events already
     /// issued for it.
     ///
-    /// The replacement case cannot arise today, since the texture is only
-    /// created where there is none. Routing it through here anyway is what
-    /// covers a future resolution change by construction rather than by memory.
+    /// The texture is currently only created where there is none, so nothing
+    /// replaces a live one yet. Routing every change through here keeps a
+    /// replacement safe when one is added.
     /// </summary>
     void SetOutputTexture(Texture texture)
     {
@@ -997,8 +987,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         // itself from inside its own tick, which drops it from this list.
         for (int i = 0; i < _consumers.Count; i++)
         {
-            // One consumer throwing used to cost only its own Update; from
-            // here it would take the rest of the tick with it.
+            // Contained, so one consumer throwing cannot take the rest of
+            // the tick with it.
             try
             {
                 _consumers[i].MediaTick();
@@ -1054,7 +1044,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         // A/V output-latency compensation: the engine masters the clock
         // on the pull playhead, but audible audio leaves the speaker one
         // DSP output chain later. Report the sink's estimate so video
-        // paces to the audible position. Android only — the desktop
+        // paces to the audible position. Android only: the desktop
         // offset is inside the sync noise floor. With no sink there is no
         // audio master to compensate.
         long latencyUs = _audio != null ? _audio.EstimatedOutputLatencyUs : 0;
@@ -1191,15 +1181,14 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     /// Events per drain call. A frame that opens a session or loses a
     /// transport produces a burst, and what the engine holds beyond one
-    /// batch has to be asked for again — so the drain loops rather than
-    /// leaving a backlog to arrive a frame late or not at all.
+    /// batch has to be asked for again, so the drain loops.
     const int EventDrainBatch = 64;
 
     /// Ceiling on one tick's drain. The engine's log holds 1024, and every
     /// record costs a UTF-8 decode and a Console line, so a full queue taken
-    /// in one frame is a visible hitch. Nothing is lost by stopping short —
-    /// the drain leaves what it cannot carry — so the rest arrives over the
-    /// next few ticks instead of all at once.
+    /// in one frame is a visible hitch. Nothing is lost by stopping short:
+    /// the drain leaves what it cannot carry, and the rest arrives over the
+    /// next few ticks.
     const int EventDrainPerTick = 256;
 
     unsafe void DrainEvents()
@@ -1227,14 +1216,6 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         } while (count == EventDrainBatch && drained < EventDrainPerTick);
     }
 
-    // Cues arrive ahead of presentation stamped with their due PTS; hold
-    // them until the playback position reaches each one, so captions stay
-    // in lockstep with the frame they belong to regardless of the decode
-    // buffer's lead.
-    // The engine learns the track list when it opens the container, which
-    // is after the session handle exists — so this polls until the list
-    // arrives, then stops. Cheap: one integer call per frame until the
-    // container is parsed, none afterwards.
     /// <summary>Fetch the container's cover art once the session has opened.
     /// The engine hands over the stored JPEG/PNG bytes; Unity decodes them,
     /// which is why no image parser lives in native code.</summary>
@@ -1289,6 +1270,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         }
     }
 
+    // The engine learns the track list when it opens the container, which
+    // is after the session handle exists, so this polls until the list
+    // arrives, then stops: one integer call per frame until the container
+    // is parsed, none afterwards.
     unsafe void RefreshAudioTracks()
     {
         if (_audioTracksRead) return;
@@ -1329,6 +1314,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         AudioTrackChanged?.Invoke(_audioTrackIndex);
     }
 
+    // Cues arrive ahead of presentation stamped with their due PTS; hold
+    // them until the playback position reaches each one, so captions stay
+    // in lockstep with the frame they belong to regardless of the decode
+    // buffer's lead.
     unsafe void DrainCaptions(long positionUs)
     {
         var cues = stackalloc BmCaption[8];
@@ -1446,7 +1435,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     /// <summary>
     /// A UUID as the wire carries it (RFC 4122, big-endian fields) as a
-    /// <see cref="Guid"/> whose text form matches — so
+    /// <see cref="Guid"/> whose text form matches, so
     /// <c>Guid.Parse("b1f0a7d4-...")</c> compares equal to the UUID an
     /// encoder wrote as those bytes. <c>new Guid(byte[])</c> would not: it
     /// reads the first three fields little-endian. Exactly 16 bytes.
@@ -1471,8 +1460,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     // ---- IBasisPcmSource: the decoded ring, offered to the audio stack ----
     //
-    // Everything above the ring - de-interleaving, per-speaker routing,
-    // downmixing, device rate conversion, spatialisation - belongs to
+    // Everything above the ring (de-interleaving, per-speaker routing,
+    // downmixing, device rate conversion, spatialisation) belongs to
     // BasisMediaPlayerAudio and its per-output taps. The engine's side of the
     // boundary is one interleaved stream at the stream's own rate.
 

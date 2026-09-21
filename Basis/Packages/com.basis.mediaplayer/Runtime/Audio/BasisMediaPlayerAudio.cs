@@ -8,13 +8,13 @@ using UnityEngine;
 ///
 /// List the AudioSources in Outputs, each carrying a
 /// <see cref="BasisMediaAudioChannel"/> that declares which decoded channel(s)
-/// it plays — a single channel 1-8, or a stereo downmix of the whole stream.
+/// it plays: a single channel 1-8, or a stereo downmix of the whole stream.
 /// Stereo content uses one Output set to Stereo; a 5.1 / 7.1 mix uses one
 /// Output per channel, positioned speaker-by-speaker.
 ///
 /// Decoded audio arrives interleaved from the engine's PCM ring
 /// (<see cref="NativePcmSource"/>); a <see cref="BasisMultiChannelPcmSplitter"/>
-/// broadcasts it so every output reads independently — the same channel can
+/// broadcasts it so every output reads independently, and the same channel can
 /// feed two AudioSources in different places. The package owns playback; the
 /// consumer owns positioning.
 /// </summary>
@@ -58,9 +58,8 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
     /// main volume: these outputs are ordinary AudioSources with no mixer
     /// group, so they reach the AudioListener, and the main volume slider is
     /// applied there already (SMModuleAudio.ApplyMainVolume sets
-    /// AudioListener.volume). Multiplying here as well attenuated media by the
-    /// square of it, and made the moment the saved settings loaded audible as
-    /// a step down in loudness.</summary>
+    /// AudioListener.volume). Multiplying here as well would attenuate media
+    /// by the square of it.</summary>
     public float EffectiveVolumeGain => Mute ? 0f : Mathf.Clamp(VolumeGain, 0f, 2f);
 
     // Read-only metrics for BasisMediaPlayerDiagnostics, so the capture covers
@@ -139,13 +138,13 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
     // AudioClip a little ahead of that AudioSource's own playhead, topped up
     // from Update.
     //
-    // A streaming clip (AudioClip.Create with a PCM callback) is the obvious
-    // way to do this and is the wrong one: Unity keeps its own buffer between
-    // the callback and the speaker, it runs about a second whatever length the
-    // clip is declared, and it isn't reachable from the callback. That puts an
-    // analyser a second behind the audio everyone can hear. Writing the clip's
-    // samples directly puts the delay back under our control -- it becomes the
-    // lead we write at, plus the output buffer.
+    // A streaming clip (AudioClip.Create with a PCM callback) does not work
+    // here: Unity keeps its own buffer between the callback and the speaker,
+    // it runs about a second whatever length the clip is declared, and it
+    // isn't reachable from the callback. That would put an analyser a second
+    // behind the audio everyone can hear. Writing the clip's samples directly
+    // keeps the delay under our control: the lead we write at, plus the
+    // output buffer.
     //
     // Chunks are a fixed size and the clip an exact multiple of it, so a write
     // never straddles the loop point and never needs to allocate.
@@ -219,7 +218,7 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
             for (int guard = 0; gap < leadFrames && guard < lengthFrames / ChunkFrames; guard++)
             {
                 Array.Clear(scratch, 0, scratch.Length);
-                // Never block behind the DSP thread's hold of the splitter gate —
+                // Never block behind the DSP thread's hold of the splitter gate:
                 // a contended frame retries next Pump and the overtake check above
                 // absorbs the worst case.
                 if (!splitter.TryReadMixed(reader, scratch, ChunkFrames, channels, taps,
@@ -251,8 +250,7 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
 
     // Main-thread mirrors the audio thread reads. Unity's audio settings and
     // the source's trim are both main-thread reads, and doing either inside a
-    // DSP callback under IL2CPP is exactly the class of thing that fails
-    // silently.
+    // DSP callback under IL2CPP can fail silently.
     private volatile int dspOutputRate = 48000;
     private volatile int pullRateOffsetPpm;
 
@@ -270,8 +268,8 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
         pendingFormatChannels = channels;
     }
 
-    /// <summary>Drop everything the window is holding — the audio behind it
-    /// belongs to a timeline that no longer exists (a seek, a restart).
+    /// <summary>Drop everything the window is holding, when the audio behind
+    /// it belongs to a timeline that no longer exists (a seek, a restart).
     /// </summary>
     public void ResetSyncAnchor()
     {
@@ -301,9 +299,7 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
     }
 
     /// <summary>
-    /// Refresh the main-thread mirrors the audio thread reads. Unity's audio
-    /// settings are a main-thread read, and doing one inside a DSP callback
-    /// under IL2CPP is exactly the class of thing that fails silently.
+    /// Refresh the main-thread mirrors the audio thread reads.
     ///
     /// Called from <see cref="PlayAll"/> as well as per frame: the outputs are
     /// started from OnEnable, and the first Update is a frame too late. Until
@@ -377,7 +373,7 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
         AudioSource[] outputs = Outputs;
         if (nativePcmSource == null || outputs == null || outputs.Length == 0) { splitter = null; return; }
 
-        // Don't build from the serialized format guess — wait for the engine's
+        // Don't build from the serialised format guess; wait for the engine's
         // real format. SetExpectedFormat flips formatKnown and queues the
         // rebuild once it reports.
         if (!formatKnown) { splitter = null; return; }
@@ -422,7 +418,7 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
                 if (monoChannel < 0 || monoChannel >= channels)
                 {
                     // Selected channel isn't present in this stream (e.g. a 5.1
-                    // output on a stereo stream) — leave this AudioSource
+                    // output on a stereo stream). Leave this AudioSource
                     // silent rather than doubling another channel onto it.
                     src.Stop();
                     src.clip = null;
@@ -434,12 +430,11 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
 
             var b = new Binding { Source = src, Splitter = splitter, OutChannels = outChannels, Taps = taps };
             bool analysis = sel != null && sel.AnalysisFeed;
-            // The metrics are documented as audio-thread figures from the
-            // primary output, and an analysis feed is written from Update,
-            // ahead of its own playhead, so it can't stand in for one -- it
-            // would report bursts of audio that hasn't played yet. A set with
-            // nothing but analysis outputs reports no metrics, which is the
-            // honest answer: nothing is consuming on the audio thread.
+            // The metrics are audio-thread figures from the primary output.
+            // An analysis feed is written from Update, ahead of its own
+            // playhead, so it would report bursts of audio that hasn't played
+            // yet. A set with nothing but analysis outputs reports no metrics,
+            // since nothing is consuming on the audio thread.
             b.Primary = !primaryAssigned && !analysis;
             if (b.Primary) primaryAssigned = true;
             bool primary = b.Primary;
@@ -452,8 +447,8 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
                 // the spectrum calls behind it) only reflects clip playback:
                 // audio a script writes in OnAudioFilterRead reaches the
                 // listener but never enters the buffer those read. Analysers
-                // that sample an AudioSource -- AudioLink among them --
-                // therefore see silence from the tap. An output flagged for
+                // that sample an AudioSource (AudioLink among them) therefore
+                // see silence from the tap. An output flagged for
                 // analysis plays a clip this component writes instead, which
                 // Unity does read back. It runs its configured delay behind the
                 // tap-driven outputs, which is why it isn't the default.
@@ -617,9 +612,9 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
     // Peak / RMS / consumed-frame metrics from the primary output's mixed
     // block, invoked by the primary tap. Runs on the audio thread. Counts
     // sample-frames, not interleaved floats, so the metric is the same whether
-    // the primary output is mono or stereo — and it counts OUTPUT frames, at
-    // the device rate, because what it measures is whether a speaker kept
-    // being fed.
+    // the primary output is mono or stereo. It counts OUTPUT frames at the
+    // device rate, because what it measures is whether a speaker kept being
+    // fed.
     private void TrackPrimaryMetrics(float[] data, int outChannels)
     {
         int n = data.Length;

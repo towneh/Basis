@@ -4,12 +4,10 @@ using UnityEngine;
 /// Builds the two authored audio arrangements in code: the stereo one output
 /// case, and the eight positioned speakers a 5.1 / 7.1 mix wants.
 ///
-/// The shipped prefabs are the reference for both — same GameObject names,
-/// same component set per output, same speaker layout — so a rig assembled
-/// here and a rig assembled by hand from a prefab are the same thing to a
-/// world author. The scene-setup menu items and the developer A/B rig all
-/// come through here rather than each spelling the arrangement out, which is
-/// what stops them drifting apart.
+/// The shipped prefabs are the reference for both (same GameObject names,
+/// component set per output and speaker layout), so a rig built here matches
+/// one built by hand from a prefab. The scene-setup menu items and the
+/// developer A/B rig all build through here to keep them from drifting apart.
 /// </summary>
 public static class BasisMediaAudioRig
 {

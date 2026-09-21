@@ -17,7 +17,7 @@ using UnityEngine;
 /// <see cref="BasisMediaPlayer.SetSyncTarget"/>, which corrects through a dead
 /// band, then a bounded rate slew, then a seek as the last resort, and
 /// extrapolates the target at 1x between beats. Live sources take no target at
-/// all — they have no shared timeline to land on, and divergence is bounded by
+/// all: they have no shared timeline to land on, and divergence is bounded by
 /// the player's own maxDivergenceMs instead.
 /// </summary>
 [DisallowMultipleComponent]
@@ -102,7 +102,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private BasisMediaPlayer mediaPlayer;
     private string currentSyncedUrl = string.Empty;
 
-    /// <summary>The URL shared with peers for the current source — the input/page URL, not the per-client resolved stream.</summary>
+    /// <summary>The URL shared with peers for the current source: the input/page URL, not the per-client resolved stream.</summary>
     public string SyncedUrl => currentSyncedUrl;
     private bool sendOnNetworkReady;
     private bool sendOnNetworkReadyFreshLoad;
@@ -113,9 +113,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private bool syncedUrlFromSetUrl;
     private float heartbeatTimer;
 
-    // Local playback state, sampled each frame: this player reports a state enum
-    // rather than raising started/paused events, so transitions are detected here
-    // and broadcast from the same place the C component's event handlers did.
+    // Local playback state, sampled each frame: the player reports a state enum
+    // rather than raising started/paused events, so transitions are detected here.
     private BmState lastObservedState = BmState.Idle;
     private int lastObservedLoadGeneration;
     private bool announcedThisLoad;
@@ -159,11 +158,10 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     // Suppress the one ready-settle broadcast the reopened self-resync load would otherwise
     // send. ObserveLocalPlayback runs before the stash is applied in the same tick, so that
     // broadcast would carry a playhead still near zero and drag still-resolving peers back to
-    // the start — the opposite of the resync. The room already has our real state and
-    // position from the broadcast ResyncEveryone sent up front, and the heartbeat keeps it
-    // fresh, so the settle broadcast is pure harm here. Survives the LoadGeneration-change
-    // reset of announcedThisLoad (the page-URL path bumps the generation asynchronously), so
-    // it is a separate flag rather than pre-setting announcedThisLoad.
+    // the start. The room already has our real state and position from ResyncEveryone's
+    // up-front broadcast, and the heartbeat keeps it fresh. A separate flag rather than
+    // pre-setting announcedThisLoad, because it has to survive the LoadGeneration-change
+    // reset of that flag (the page-URL path bumps the generation asynchronously).
     private bool suppressResyncSettleBroadcast;
 
     // Ask-the-room local resync (ResyncLocal): a RequestState has gone out and we are waiting
@@ -177,7 +175,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private long lastOwnerWallTicks = -1;
     private bool syncTargetActive;
 
-    // Main-thread scratch — Unity callbacks are serial so these don't need locking.
+    // Main-thread scratch; Unity callbacks are serial so these don't need locking.
     private readonly ushort[] singleRecipient = new ushort[1];
     private readonly byte[] seekScratch = new byte[SeekPayloadSize];
     private readonly byte[] positionScratch = new byte[PositionPayloadSize];
@@ -296,16 +294,15 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
     // Owner position heartbeat: a small latest-wins ping (Sequenced, like the
     // framework's other position streams) so receivers keep a fresh target for
-    // the engine ladder. Only while playing seekable media — live sources have
+    // the engine ladder. Only while playing seekable media: live sources have
     // no timeline to correct against.
     private void BroadcastHeartbeat()
     {
         if (PositionHeartbeatSeconds <= 0f) return;
         if (!HasNetworkID || !IsDrivingOwner) return;
         // A stash waiting to land (a self-resync reload in flight) means the playhead below
-        // is the reopened load's near-zero one, not our real position — the same value the
-        // settle broadcast is suppressed for. Broadcasting it would drag resolving peers to
-        // the start.
+        // is the reopened load's near-zero one, not our real position. Broadcasting it would
+        // drag resolving peers to the start.
         if (pendingRemoteApply) return;
         if (GetLocalState() != SyncedPlaybackState.Playing) return;
         if (mediaPlayer.DurationSeconds <= 0d) return;
@@ -429,8 +426,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
 
         // Holding nothing of our own, ask the room instead of only the owner. An owner
-        // that holds the object through the join-time grant cannot answer - it is not a
-        // driving owner and has no url - and an ownerless object has nobody to target at
+        // that holds the object through the join-time grant cannot answer (it is not a
+        // driving owner and has no url), and an ownerless object has nobody to target at
         // all, so a targeted request is silence in both cases. Custodians answer a
         // broadcast only while they still read the object as ownerless, so a real
         // controlling owner keeps answering on its own and this adds no duplicate.
@@ -495,7 +492,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         syncedUrlFromSetUrl = true;
 
         // FullState is the only message carrying a URL, so it goes out up front rather than
-        // waiting for the session to come up — peers that never see a broadcast never learn
+        // waiting for the session to come up: peers that never see a broadcast never learn
         // what to load. It also hides resolution latency: a page URL costs each client
         // seconds of yt-dlp work, and announcing immediately lets peers resolve in parallel
         // with us. Opening a session starts it playing, the later ready broadcast settles
@@ -542,10 +539,6 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         ReloadSelfInPlace();
     }
 
-    // Re-open what this client is showing without losing our place, so the initiator's own
-    // screen is fixed by the same press that fixes the room. The stash is applied once the
-    // re-opened session is running (ApplyPendingRemoteStateWhenReady); selfResyncApply lets
-    // that run despite this client being the driving owner.
     /// <summary>Re-align this client and nobody else. Asks the room for the current state and
     /// reloads onto the answer; if nobody answers within <see cref="ResyncAnswerTimeoutSeconds"/>
     /// it reloads what it already holds. Takes no ownership and needs no permission, so a
@@ -567,7 +560,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
 
         // Networked and not the owner: ask the room, even with no synced url yet (a late joiner
-        // or a directly-opened player) — that is exactly when the answer is most useful.
+        // or a directly-opened player), which is when the answer is most useful.
         // currentSyncedUrl is left untouched so this client does not briefly answer a joiner as
         // a custodian with an adopted local url; a silent room is handled by TickForcedResync.
 
@@ -588,6 +581,10 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         pendingRemoteErrorAtRequest = mediaPlayer.State == BmState.Error;
     }
 
+    // Re-open what this client is showing without losing our place, so the initiator's own
+    // screen is fixed by the same press that fixes the room. The stash is applied once the
+    // re-opened session is running (ApplyPendingRemoteStateWhenReady); selfResyncApply lets
+    // that run despite this client being the driving owner.
     private void ReloadSelfInPlace()
     {
         if (mediaPlayer == null)
@@ -795,8 +792,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
                 // The asker owns itself through the join-time grant, so the owner answer
                 // above is the asker and nobody replies. Custodians answer it exactly as
-                // they answer a joiner in OnPlayerJoined - the grant is unicast, so this
-                // side still reads the object as ownerless - and duplicates collapse on
+                // they answer a joiner in OnPlayerJoined (the grant is unicast, so this
+                // side still reads the object as ownerless), and duplicates collapse on
                 // the asker because every copy carries the same url and load nonce.
                 if (!IsOwnedLocallyOnClient && !pendingRemoteApply && !string.IsNullOrEmpty(currentSyncedUrl) && !HasPresentOwner())
                 {
@@ -1053,9 +1050,9 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
                     return;
                 }
 
-                // A page URL (YouTube/Twitch/…) is resolved per-client: resolved CDN URLs
-                // are per-client and expiring, so they can't be shared. Route it through
-                // the router so this client resolves the page URL itself. Both that and
+                // Resolved CDN URLs are per-client and expiring, so a page URL
+                // (YouTube/Twitch/…) goes through the router and this client resolves
+                // it itself. Both that and
                 // the engine's own open are asynchronous, and the session starts playing
                 // as soon as it is up, so the owner's position/pause snapshot is stashed
                 // and applied once playback is actually running (aged by the elapsed
@@ -1282,8 +1279,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     }
 
     /// <summary>
-    /// Watches the player's own state for the transitions the C component took
-    /// from started/paused/ready events, and broadcasts them when we are the owner.
+    /// Watches the player's own state for ready, pause and resume transitions,
+    /// and broadcasts them when we are the owner.
     /// </summary>
     private void ObserveLocalPlayback()
     {
@@ -1304,7 +1301,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
 
         // First frame this load actually reached playback: settle peers on the real
-        // URL, state and position, the way the C component's ready handler did.
+        // URL, state and position.
         if (!announcedThisLoad && (state == BmState.Playing || state == BmState.Paused))
         {
             announcedThisLoad = true;
@@ -1344,9 +1341,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private void AdoptActiveUrlIfUnset()
     {
         // currentSyncedUrl is the URL we share. When SetUrl drove this load it's the
-        // input/page URL peers must resolve themselves — keep it (overwriting with the
-        // resolved CDN URL would broadcast a per-client/expiring URL that works for no
-        // one else). When the load bypassed SetUrl (a world script opening the player
+        // input/page URL peers must resolve themselves, so keep it: the resolved CDN URL
+        // is per-client and expiring and works for no one else. When the load bypassed SetUrl (a world script opening the player
         // directly), adopt what it opened so we don't keep broadcasting a stale URL.
         if (!syncedUrlFromSetUrl)
         {
@@ -1490,9 +1486,9 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         // Opening a session starts it playing, so a load we are announcing ahead of
         // time is always announced as playing.
         // A pending stash means the live state and position belong to a session that is
-        // still reopening (a self-resync). Late-join and state-request answers must carry the
-        // stashed snapshot, the same near-zero playhead the settle broadcast and heartbeat are
-        // suppressed for, or a client that joins or asks inside the reload window lands at zero.
+        // still reopening (a self-resync), with a near-zero playhead. Late-join and
+        // state-request answers carry the stashed snapshot instead, or a client that joins or
+        // asks inside the reload window lands at zero.
         bool useStash = !freshLoad && pendingRemoteApply;
         fullStateScratch[1] = (byte)(freshLoad ? SyncedPlaybackState.Playing
             : useStash ? pendingRemoteState : GetLocalState());

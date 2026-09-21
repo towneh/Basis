@@ -8,8 +8,8 @@ using UnityEngine;
 /// can be registered at once; the router tries them in descending <see cref="Priority"/>
 /// order (registration order breaks ties) until one takes ownership of the load. A
 /// resolver that declines lets the router fall through to the next one, and finally to a
-/// direct load. Resolvers route only — they never gate host trust (that is the
-/// client's URL security and the engine's own vetting).
+/// direct load. Resolvers route only. They never gate host trust, which is the
+/// job of the client's URL security and the engine's own vetting.
 /// </summary>
 public interface IBasisVideoResolver
 {
@@ -24,7 +24,7 @@ public interface IBasisVideoResolver
 
     /// <summary>
     /// Takes ownership of loading <paramref name="url"/> into <paramref name="player"/>
-    /// — resolving a page URL to its stream(s) and opening them, possibly async — and
+    /// (resolving a page URL to its stream(s) and opening them, possibly async) and
     /// returns true; or returns false to let the router try the next resolver, then a
     /// direct load.
     /// </summary>
@@ -41,10 +41,10 @@ public interface IBasisVideoResolver
 /// <c>RuntimeInitializeOnLoadMethod</c>). Callers with a raw URL hand it to
 /// <see cref="TryResolveAndLoad"/>, which walks the registered resolvers in priority order
 /// until one takes ownership; if none do, the caller opens the URL directly. With nothing
-/// registered every URL opens directly — identical to having no integration at all.
+/// registered every URL opens directly.
 ///
 /// Not thread-safe. Register, Unregister and TryResolveAndLoad all run on Unity's main
-/// thread — the resolver list is unsynchronised, so registering while a resolve is
+/// thread: the resolver list is unsynchronised, and registering while a resolve is
 /// iterating would corrupt it.
 /// </summary>
 public static class BasisMediaUrlRouter
@@ -84,8 +84,7 @@ public static class BasisMediaUrlRouter
             IBasisVideoResolver resolver = Resolvers[i];
             // Resolvers are external integrations. Contain a throwing one so a single bad
             // resolver can't break lower-priority resolvers or the direct-open fallback; a
-            // failed attempt is treated as "declined" and routing continues. Not a hot
-            // path — this runs on a user-initiated load.
+            // failed attempt is treated as "declined" and routing continues.
             try
             {
                 if (resolver.CanResolve(url) && resolver.TryResolve(player, url)) return true;
@@ -104,9 +103,8 @@ public static class BasisMediaUrlRouter
     /// any non-HTTP scheme (a transport like rtsp/rist/whep, or a local file), or an
     /// http(s) URL whose path ends in a container extension this engine demuxes. An
     /// http(s) URL with no media extension is a page URL (a YouTube/Twitch watch page)
-    /// and needs a resolver. This is the single source of truth for the
-    /// direct-vs-resolve steering; resolvers and callers both consult it. It classifies
-    /// only — it never blocks.
+    /// and needs a resolver. Resolvers and callers both consult this for the
+    /// direct-vs-resolve decision. It classifies only and never blocks.
     /// </summary>
     public static bool IsDirectlyPlayable(string url)
     {
@@ -114,9 +112,9 @@ public static class BasisMediaUrlRouter
 
         bool isHttp = url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
                    || url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
-        if (!isHttp) return true; // transport scheme or local file — opened directly
+        if (!isHttp) return true; // transport scheme or local file, opened directly
 
-        // Match against the URI path only — a host that happens to end in a media
+        // Match against the URI path only: a host that happens to end in a media
         // extension (https://example.mkv) is not a media URL. The manual
         // query/fragment strip is the fallback for anything System.Uri can't parse.
         string path;
@@ -138,11 +136,10 @@ public static class BasisMediaUrlRouter
         return false;
     }
 
-    // Containers the engine demuxes from a plain byte stream. No .mpd — there is no
-    // DASH demuxer, so a raw manifest goes through a resolver. No .wav — no LPCM
-    // adapter. .opus but not .ogg: the Ogg demuxer handles Opus, and .opus is Opus by
-    // convention, while .ogg is a generic container that may carry codecs the engine
-    // does not decode.
+    // Containers the engine demuxes from a plain byte stream. No .mpd: there is no
+    // DASH demuxer, so a raw manifest goes through a resolver. No .wav: no LPCM
+    // adapter. .opus but not .ogg: .opus is Opus by convention, while .ogg is a
+    // generic container that may carry codecs the engine does not decode.
     private static readonly string[] DirectExtensions =
     {
         ".mp4", ".m4v", ".m4a", ".m4s",
@@ -153,7 +150,7 @@ public static class BasisMediaUrlRouter
     };
 
     /// <summary>
-    /// A log-safe form of <paramref name="url"/> — the scheme, host and path with the query and
+    /// A log-safe form of <paramref name="url"/>: the scheme, host and path with the query and
     /// fragment dropped, since those can carry signed tokens or private identifiers that
     /// shouldn't reach logs. Returns the input unchanged when it has no query/fragment, and a
     /// placeholder for null/blank.
@@ -165,7 +162,7 @@ public static class BasisMediaUrlRouter
         int cut = trimmed.IndexOfAny(PathEnd); // '?' or '#'
         string withoutQuery = cut >= 0 ? trimmed.Substring(0, cut) : trimmed;
 
-        // Strip userinfo (user:pass@host) too — those are credentials. Rebuild from the
+        // Strip userinfo (user:pass@host) too, since it holds credentials. Rebuild from the
         // parsed parts only when it's present, so ordinary URLs keep their exact form.
         if (Uri.TryCreate(withoutQuery, UriKind.Absolute, out Uri uri) && !string.IsNullOrEmpty(uri.UserInfo))
         {
@@ -181,8 +178,8 @@ public static class BasisMediaUrlRouter
 
     /// <summary>
     /// The scheme to default a scheme-less <paramref name="authority"/> ("host[:port][/path…]")
-    /// to: "http" when the host is an IP literal or a local name — localhost, a single-label
-    /// host, or a .localhost/.local/.lan/.internal/.home.arpa suffix — and "https" otherwise.
+    /// to: "http" when the host is an IP literal or a local name (localhost, a single-label
+    /// host, or a .localhost/.local/.lan/.internal/.home.arpa suffix), and "https" otherwise.
     /// Those targets are LAN boxes and dev servers that rarely serve TLS, whereas a public
     /// domain name should never be defaulted down to cleartext.
     /// </summary>
@@ -245,7 +242,7 @@ public static class BasisMediaUrlRouter
         if (trimmed.StartsWith("//", StringComparison.Ordinal))          // protocol-relative ("//host/…")
             return SchemeFor(trimmed.Substring(2)) + ":" + trimmed;
         if (trimmed[0] == '/' || trimmed[0] == '\\') return trimmed;      // unix / UNC / rooted path
-        if (trimmed.Length >= 2 && char.IsLetter(trimmed[0]) && trimmed[1] == ':') return trimmed; // windows drive path — letter-prefixed so "[::1]/…" isn't caught
+        if (trimmed.Length >= 2 && char.IsLetter(trimmed[0]) && trimmed[1] == ':') return trimmed; // windows drive path; letter-prefixed so "[::1]/…" isn't caught
         return SchemeFor(trimmed) + "://" + trimmed;
     }
 }

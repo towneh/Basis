@@ -3,19 +3,18 @@ using UnityEngine;
 using UnityEngine.UI;
 
 // Optional caption presenter for BasisMediaPlayer. Parent this under your video
-// surface and it draws the active CEA-608 cue on a TextMeshPro element — composited
-// as a separate layer, so the video texture is never touched (it survives the
-// external-texture rebind on size change / XR loader swap, and consumers keep full
-// control of styling and placement).
+// surface and it draws the active CEA-608 cue on a TextMeshPro element, composited
+// as a separate layer. The video texture is never touched, so the overlay survives
+// the external-texture rebind on size change or XR loader swap, and consumers keep
+// full control of styling and placement.
 //
-// It is a pure presenter: the engine parses the captions and the player releases
-// each cue when playback reaches it, so this only mirrors text and visibility.
-// Visibility and styling follow the viewer's own preferences — the player's, where
-// they have decided it for that one, and the stored defaults otherwise — never
-// anything the world authored.
+// It only mirrors text and visibility: the engine parses the captions and the
+// player releases each cue when playback reaches it. Visibility and styling follow
+// the viewer's own preferences (per player where they have set one, the stored
+// defaults otherwise), never anything the world authored.
 //
-// Readability is the TMP element's job — white text with a black outline (or a
-// background graphic assigned below) is the usual treatment over arbitrary video.
+// Readability is the TMP element's job. White text with a black outline, or a
+// background graphic assigned below, is the usual treatment over arbitrary video.
 [AddComponentMenu("Basis/Basis Media Caption Overlay")]
 public sealed class BasisMediaCaptionOverlay : MonoBehaviour
 {

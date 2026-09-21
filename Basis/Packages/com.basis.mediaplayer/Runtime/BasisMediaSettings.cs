@@ -36,10 +36,9 @@ public static class BasisMediaSettings
     public static BasisSettingsBinding<int> MaxActivePlayers =
         new("mediaplayermaxactive", new BasisPlatformDefault<int>(3) { android = 2 });
 
-    /// <summary>Whether closed captions are drawn. A per-viewer preference: it
-    /// changes nothing about playback or sync, only whether an overlay draws the
-    /// cues the engine is already producing, so it belongs to the viewer rather
-    /// than to the world.</summary>
+    /// <summary>Whether closed captions are drawn. Per viewer: it changes
+    /// nothing about playback or sync, only whether an overlay draws the cues
+    /// the engine already produces.</summary>
     public static BasisSettingsBinding<bool> CaptionsEnabled =
         new("mediaplayercaptionsenabled", new BasisPlatformDefault<bool>(false));
 
@@ -96,9 +95,8 @@ public static class BasisMediaSettings
     }
 
     /// <summary>Take the new default and re-bank the sessions running against
-    /// it. Players the viewer has tuned individually keep their own figure —
-    /// moving the default is not a reason to undo that — and players holding
-    /// no session pick it up when they next open.
+    /// it. Players the viewer has tuned individually keep their own figure,
+    /// and players holding no session pick it up when they next open.
     ///
     /// Not the load path: <see cref="EnsureLoaded"/> applies the stored
     /// value without this, since nothing is playing yet.</summary>

@@ -10,16 +10,16 @@ using UnityEngine;
 ///
 /// The engine writes its own capture CSV (the player's
 /// <see cref="BasisMediaPlayer.engineCapture"/>), sampled on its own
-/// thread, and that is the authority on everything inside the pipeline —
+/// thread, and that is the authority on everything inside the pipeline:
 /// bank depth, stage counters, decode and release. What it cannot observe
 /// is the other side of the boundary: how often Unity actually rendered,
 /// how long each presented frame was held on screen, whether the audio
 /// pull kept up with the stream rate, and what the device's DSP chain was
-/// doing. That is the layer judder and A/V drift live in, and it is the
-/// layer this file captures.
+/// doing. Judder and A/V drift show up in that layer, which this file
+/// captures.
 ///
-/// Both files share a time base — the engine's capture and this one are
-/// read side by side.
+/// Both files share a time base, so the two captures can be read side by
+/// side.
 /// </summary>
 [RequireComponent(typeof(BasisMediaPlayer))]
 public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTickConsumer
@@ -227,8 +227,8 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
         long pulled = _player.AudioFramesPulled;
 
         // How many Unity frames the last presented frame stayed on screen.
-        // A steady cadence is the whole point: on a 72 Hz display a 24 fps
-        // source should read 3, 3, 3, and a stray 2 or 4 is the judder.
+        // On a 72 Hz display a 24 fps source should read 3, 3, 3; a stray
+        // 2 or 4 is judder.
         ulong presentedDelta = presented - _lastPresented;
         int held = _framesSincePresent;
         if (presentedDelta > 0) _framesSincePresent = 1;
@@ -279,8 +279,8 @@ public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTick
         Append(_audio != null ? _audio.EstimatedOutputLatencyUs : 0);
         // The engine's own A/V figure, beside the host's view of the same
         // moment. out_latency_us is what the engine was told to compensate
-        // for; this is what it believes it achieved. They disagreeing is
-        // the interesting case.
+        // for; this is what it believes it achieved. A disagreement between
+        // the two is what to look for.
         Append(_player.AvOffsetUs, last: true);
 
         _lastPresented = presented;

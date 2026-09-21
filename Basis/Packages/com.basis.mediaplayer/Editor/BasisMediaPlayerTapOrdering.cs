@@ -8,8 +8,8 @@ using UnityEngine.UIElements;
 /// <summary>
 /// An output plays through a <see cref="BasisMediaPlayerAudioTap"/>, which
 /// generates the stream into the AudioSource's DSP block. Unity runs filters
-/// in component order, so a tap below them — or missing, and added at runtime,
-/// which appends — leaves every filter above it processing silence. Shared by
+/// in component order, so a tap below them (or a missing one, which is appended
+/// when added at runtime) leaves every filter above it processing silence. Shared by
 /// the audio and tap inspectors, which both offer to put the tap back on top.
 /// </summary>
 internal static class BasisMediaPlayerTapOrdering

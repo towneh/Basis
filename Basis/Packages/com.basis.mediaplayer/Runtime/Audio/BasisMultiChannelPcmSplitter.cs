@@ -52,8 +52,7 @@ public sealed class BasisMultiChannelPcmSplitter
 
     // The source can return a partial interleaved frame (its ring drains
     // sample by sample), so the sub-frame remainder is carried to the next
-    // pull. This keeps de-interleaving frame-exact — dropping it would shift
-    // every channel.
+    // pull. Dropping it would shift every channel.
     private readonly float[] carry;
     private int carryLen;
 
@@ -89,8 +88,8 @@ public sealed class BasisMultiChannelPcmSplitter
     ///
     /// <paramref name="sourceStep"/> is source frames per output frame:
     /// the tap renders straight into DSP blocks, so both the device rate
-    /// conversion (Quest runs the DSP at 24 kHz against 48 kHz sources —
-    /// served 1:1 that plays at half speed) and the shared-playback rate
+    /// conversion (Quest runs the DSP at 24 kHz against 48 kHz sources,
+    /// which served 1:1 would play at half speed) and the shared-playback rate
     /// trim happen here. The cursor and its sub-sample remainder live on the
     /// reader, so changing the step between calls slews the pull without
     /// resetting the interpolation. Non-unity steps use linear
@@ -111,7 +110,7 @@ public sealed class BasisMultiChannelPcmSplitter
     }
 
     // Non-blocking variant for main-thread callers. The blocking form can park the
-    // main thread behind the audio thread's hold of the gate — a priority inversion
+    // main thread behind the audio thread's hold of the gate, a priority inversion
     // whose length the DSP callback dictates. Returns false, producing nothing, when
     // the gate is contended; the caller just tries again next frame.
     public bool TryReadMixed(Reader reader, float[] dst, int frames, int outChannels, Tap[] taps, float gain, out int produced, double sourceStep = 1.0)

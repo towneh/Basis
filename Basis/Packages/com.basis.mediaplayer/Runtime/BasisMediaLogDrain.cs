@@ -10,9 +10,9 @@ using UnityEngine;
 /// ring once per frame and fanned out to the Console and to an in-memory
 /// tail.
 ///
-/// This is the channel that answers before a session handle exists and
-/// after it closes — a transport refusal, a WHEP negotiation step, the
-/// Vulkan probe's cause — so it is process-level rather than per-player.
+/// It carries what happens before a session handle exists and after it
+/// closes (a transport refusal, a WHEP negotiation step, the Vulkan probe's
+/// cause), so it is process-level rather than per-player.
 /// The ring behind it is one queue for the whole plugin: every player
 /// pumps this from its own tick and the first through each frame takes the
 /// whole queue, so three players in a scene still print each line once.
@@ -121,7 +121,7 @@ public static class BasisMediaLogDrain
     }
 
     /// A subscriber is third-party code on a public event, and one throwing
-    /// from inside the drain would take the rest of the batch with it — the
+    /// from inside the drain would take the rest of the batch with it: the
     /// Console lines, the tail, and every later subscriber. Those records
     /// have already left the native ring, so nothing could fetch them
     /// again. Each handler is invoked on its own and costs only itself.
@@ -156,8 +156,8 @@ public static class BasisMediaLogDrain
         if (total <= _evictedSeen) return;
         ulong lost = total - _evictedSeen;
         _evictedSeen = total;
-        // Evicted, so the hole is at the start of what follows rather than
-        // at the end — the ring drops its oldest to keep taking new lines.
+        // The ring drops its oldest to keep taking new lines, so the hole is
+        // at the start of what follows rather than at the end.
         BasisDebug.LogWarning(
             $"[BasisMedia] engine log ring overran: {lost} earlier line(s) lost, {total} this run",
             BasisDebug.LogTag.Video);
