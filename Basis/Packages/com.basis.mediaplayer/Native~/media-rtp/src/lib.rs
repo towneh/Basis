@@ -2,14 +2,14 @@
 
 //! Sans-IO RTP receive substrate: sequence unwrap, bounded
 //! reorder, RFC 3550 jitter/loss accounting, sender-report tracking and
-//! receiver-report composition. Shared by the RTSP-UDP lane today and
-//! the WHEP lane later, so nothing here knows about sockets, retina or
-//! any transport: the caller feeds datagrams and an explicit `now`
-//! (monotonic microseconds as [`MediaTime`]) and polls for in-order
-//! packets, outbound RTCP and the next wake deadline.
+//! receiver-report composition. Shared by the RTSP-UDP and WHEP lanes,
+//! so nothing here knows about sockets, retina or any transport: the
+//! caller feeds datagrams and an explicit `now` (monotonic microseconds
+//! as [`MediaTime`]) and polls for in-order packets, outbound RTCP and
+//! the next wake deadline.
 //!
-//! One [`RtpReceiver`] per RTP stream (one media sender per stream —
-//! the RTSP and WHEP shapes). The remote source is pinned to the first
+//! One [`RtpReceiver`] per RTP stream (one media sender per stream, as
+//! RTSP and WHEP both have it). The remote source is pinned to the first
 //! RTP packet's SSRC, not to any advertised value: advertised SSRCs are
 //! placeholder-prone (all-zero on some edges) while the stream itself
 //! is authoritative.
@@ -29,13 +29,11 @@ pub use reports::SenderInfo;
 /// The unit count is an *extended* timestamp difference, so it carries no
 /// ceiling of its own: a sender chooses the 32-bit wire values, each one
 /// can move the unwrapped total by up to 2^31, and nothing bounds where
-/// the running total ends up. Scaling by 1 000 000 in i64 therefore
-/// overflows after a few thousand hostile packets — silently, since
-/// release builds run without overflow checks, leaving an arbitrary
-/// signed value as a presentation timestamp or an alignment anchor.
-///
-/// Widening first makes the multiply exact, and clamping the result keeps
-/// the narrowing honest instead of letting it truncate.
+/// the running total ends up. Scaling by 1 000 000 in i64 would overflow
+/// after a few thousand hostile packets, silently in release builds,
+/// leaving an arbitrary value as a presentation timestamp or alignment
+/// anchor. Widening makes the multiply exact, and clamping keeps the
+/// narrowing from truncating.
 pub fn units_to_us(units: i64, clock_rate: NonZeroU32) -> i64 {
     (i128::from(units) * 1_000_000 / i128::from(clock_rate.get()))
         .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
@@ -48,8 +46,8 @@ pub fn units_to_us(units: i64, clock_rate: NonZeroU32) -> i64 {
 /// wrapping, so its extremes are exactly the values that a float
 /// conversion rounds and an `as u64` truncates. The offset is built
 /// widened and clamped instead, from the magnitude, so the sign is a
-/// branch rather than something a cast has to carry — negating the
-/// magnitude would itself overflow at `i64::MIN`.
+/// branch rather than something a cast has to carry (negation would
+/// itself overflow at `i64::MIN`).
 pub fn ntp_at_zero(sr_ntp: u64, elapsed_us: i64) -> u64 {
     let ticks = (i128::from(elapsed_us.unsigned_abs()) << 32) / 1_000_000;
     let offset = ticks.min(i128::from(u64::MAX)) as u64;

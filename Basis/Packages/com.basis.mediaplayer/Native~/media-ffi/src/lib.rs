@@ -11,7 +11,7 @@
 //! `CommandBuffer.IssuePluginEventAndData(bm_render_event_func(), 1,
 //! handle-as-pointer)` once per frame. The render event opens the shared
 //! handle on Unity's device on first use and then only ever runs a
-//! keyed-mutex acquire + `CopyResource` — it never waits on a media-path
+//! keyed-mutex acquire + `CopyResource`; it never waits on a media-path
 //! lock.
 //!
 //! Graphics contract (D3D12, normative): the same texture and the same
@@ -84,26 +84,22 @@ pub struct BmSnapshot {
     pub bank_holding: u32,
     pub audio_sample_rate: u32,
     pub audio_channels: u32,
-    /// Presented video pts minus the audio playhead, µs — the engine's own
+    /// Presented video pts minus the audio playhead, µs: the engine's own
     /// account of its A/V alignment. `i32::MIN` while either side is
-    /// unknown. Diagnostic: nothing in the engine steers on it. Took the
-    /// reserved slot at this offset, so the struct is unchanged at 88
-    /// bytes and every other field keeps its place.
+    /// unknown. Diagnostic only; nothing in the engine steers on it.
     pub av_offset_us: i32,
     /// Shared-playback sync: the ladder's wanted rate offset from
     /// 1x, ppm, after a `bm_session_set_sync_target` call. On lanes with
-    /// an audio track the managed audio pull MUST apply it — consume
+    /// an audio track the managed audio pull MUST apply it, consuming
     /// source frames at `1 + ppm/1e6` times the stream rate through the
-    /// resampler — or the slew rung silently does nothing and every
+    /// resampler, or the slew rung silently does nothing and every
     /// correction waits for the seek rung. 0 = no correction wanted.
     pub sync_rate_ppm: i32,
     /// Events the session's log refused because its cap was already full,
-    /// cumulative. Non-zero means the narrative has holes in it and a
-    /// reader must not treat the drained sequence as complete. Saturates
-    /// rather than wrapping: the engine counts in `u64` and this took the
-    /// snapshot's second reserved slot, so the struct is unchanged at 88
-    /// bytes and every other field keeps its place. A stale plugin writes
-    /// 0 here, which reads as "nothing lost".
+    /// cumulative. Non-zero means the drained sequence has holes and must
+    /// not be treated as complete. Saturates rather than wrapping, since
+    /// the engine counts in `u64`. A plugin built before this field existed
+    /// writes 0 here, which reads as "nothing lost".
     pub events_dropped: u32,
 }
 
@@ -170,8 +166,8 @@ pub struct BmEvent {
 }
 
 /// Twice the event detail's ceiling: a free-text line is a sentence
-/// rather than a field, and the ones worth having — a WHEP negotiation
-/// step, a transport refusal with its `source()` chain walked — run long.
+/// rather than a field, and the useful ones (a WHEP negotiation step, a
+/// transport refusal with its `source()` chain walked) run long.
 pub const BM_LOG_DETAIL_CAP: usize = 224;
 
 /// One process-log line, in the same shape a session event has.
@@ -180,9 +176,8 @@ pub const BM_LOG_DETAIL_CAP: usize = 224;
 /// and after it closes, and 0 means exactly that.
 ///
 /// `wall_us` is microseconds since the engine's first diagnostic in this
-/// process, which is **not** a session's clock — `BmEvent::wall_us` counts
-/// from that session's start. The two origins differ; do not subtract one
-/// from the other.
+/// process, which is **not** a session's clock: `BmEvent::wall_us` counts
+/// from that session's start. Do not subtract one from the other.
 #[repr(C)]
 pub struct BmLogRecord {
     pub wall_us: i64,
@@ -197,8 +192,7 @@ pub struct BmLogRecord {
     pub detail: [u8; BM_LOG_DETAIL_CAP],
 }
 
-/// The C player's cue-text ceiling; a full 4-row pop-on screen fits well
-/// under it.
+/// Cue-text ceiling; a full 4-row pop-on screen fits well under it.
 pub const BM_CAPTION_TEXT_CAP: usize = 256;
 
 /// One caption cue (in-band CEA-608): the full displayed text as of
@@ -211,8 +205,8 @@ pub struct BmCaption {
     pub text_len: u32,
     pub text: [u8; BM_CAPTION_TEXT_CAP],
     /// Names the four bytes the `i64`'s alignment adds after `text`, so
-    /// they are written rather than left holding whatever the stack slot
-    /// did. Not part of the contract — always 0.
+    /// they are written rather than left holding stack garbage. Not part
+    /// of the contract; always 0.
     pub reserved: u32,
 }
 
@@ -237,8 +231,8 @@ pub struct BmUserData {
 struct Descriptor {
     url: String,
     /// A separate audio-only source played against `url`, which is then
-    /// treated as video-only — how adaptive ladders serve anything above
-    /// their muxed fallback rung. Both legs are cuts of the same content,
+    /// treated as video-only. Adaptive ladders serve everything above
+    /// their muxed fallback rung this way. Both legs are cuts of the same content,
     /// so their timelines already agree. On-demand HTTP(S) and local
     /// files only. Absent = one source carrying everything.
     #[serde(default)]
@@ -379,10 +373,10 @@ impl Consumer {
 
 /// How many times one shared handle's consumer open is attempted before
 /// the slot gives up on it. A failure here is typically the handle
-/// racing a presenter rebuild, which the next attempt sees through;
-/// caching the first outright left a session that never presented again,
-/// since a new handle is only published when the presenter is rebuilt.
-/// The bound is what keeps a genuinely dead handle from calling `open`
+/// racing a presenter rebuild, which the next attempt sees through.
+/// Giving up on the first failure would leave a session that never
+/// presents again, since a new handle is only published when the
+/// presenter is rebuilt. The bound stops a dead handle calling `open`
 /// once per render event for the rest of the session.
 #[cfg(windows)]
 const MAX_CONSUMER_OPENS: u32 = 8;
@@ -465,7 +459,7 @@ pub extern "C" fn bm_abi_version() -> u32 {
 
 /// Engine capability set (normative): writes one UTF-8 JSON blob
 /// describing what this build will decode and play, and returns its byte
-/// length. Engine-level, not per-session — call any time after
+/// length. Engine-level, not per-session: call any time after
 /// `bm_abi_version`. Call with (`NULL`, 0) to size, allocate, call again;
 /// when `cap` is smaller than the blob nothing is written and the required
 /// length still returns. Negative = error.
@@ -486,7 +480,7 @@ pub extern "C" fn bm_abi_version() -> u32 {
 ///   for the primary route the engine would actually take. Hardware
 ///   routes state measured ceilings where the platform exposes them
 ///   (Android `MediaCodecList` figures); software routes state none
-///   (0 = best effort — rank them conservatively).
+///   (0 = best effort; rank them conservatively).
 /// - audio codec: "aac", "mp3", "opus", "flac" (later: "pcm").
 ///   `max_channels` is the adapter's real screen.
 /// - transport scheme: "file", "http", "https", "rtsp", "rtspt", "rist"
@@ -496,8 +490,8 @@ pub extern "C" fn bm_abi_version() -> u32 {
 ///
 /// Snapshot semantics: the blob describes the moment it was built. A
 /// capability-relevant runtime change surfaces as the
-/// `DecodeFallbackHwToSw` diagnostics event (code 3 in the event drain) —
-/// treat it as the advisory to query again; each call re-probes.
+/// `DecodeFallbackHwToSw` diagnostics event (code 3 in the event drain);
+/// treat it as the advisory to query again. Each call re-probes.
 ///
 /// # Safety
 /// `out_buf` must be `NULL` or point to `cap` writable bytes.
@@ -843,7 +837,7 @@ pub unsafe extern "C" fn bm_session_drain_events(handle: u64, out: *mut BmEvent,
 /// Process-level: there is no handle, and it answers before the first
 /// session opens and after the last one closes, which is where the lines
 /// worth having mostly are. `out_dropped`, when non-NULL, receives the
-/// cumulative count of lines the ring evicted to make room — non-zero
+/// cumulative count of lines the ring evicted to make room. Non-zero
 /// means what follows has holes at its start, not at its end.
 ///
 /// # Safety
@@ -1053,7 +1047,7 @@ pub extern "C" fn bm_session_artwork_len(handle: u64) -> i32 {
 
 /// Copy the cover art into `out` and its MIME type into `mime`, returning
 /// the bytes written (0 = no art, negative = error). The bytes are the
-/// container's own — JPEG or PNG as it stored them — and the caller
+/// container's own (JPEG or PNG as it stored them) and the caller
 /// decodes them; nothing in the engine parses an image.
 ///
 /// A buffer shorter than [`bm_session_artwork_len`] reports
@@ -1175,39 +1169,36 @@ fn copy_utf8(text: Option<&str>, buf: &mut [u8]) -> u32 {
 /// # Safety
 /// Calls for one session must not overlap: the Android render event
 /// pairs the pointer with a counter this brackets, and the bracket is a
-/// single-writer construction — two registrations in flight at once can
-/// leave the counter even across a pointer store and hand the renderer a
-/// mismatched pair, which is the pairing it exists to refuse. Unity
-/// registers from the main thread, so this costs a caller nothing it was
-/// not already doing.
+/// single-writer construction. Two registrations in flight at once can
+/// leave the counter even across a pointer store and hand the renderer
+/// the mismatched pair it exists to refuse. Unity registers from the
+/// main thread, so this costs a caller nothing.
 ///
 /// `texture` must be the live native texture owned by Unity's device
 /// (`ID3D11Texture2D*` on D3D11, `ID3D12Resource*` on D3D12, `VkImage` on
-/// Vulkan). The plugin builds
-/// its own objects over it — a shared-texture consumer on D3D11, an image
-/// view on Vulkan — and cannot destroy them until it can prove the GPU is
-/// done with them, which takes render events. So on Vulkan the texture
-/// must stay alive for a few render events past `bm_session_close`, not
-/// be released alongside it: destroying the image while views over it
-/// still exist is what the object-lifetime rules forbid.
+/// Vulkan). The plugin builds its own objects over it (a shared-texture
+/// consumer on D3D11, an image view on Vulkan) and cannot destroy them
+/// until it can prove the GPU is done with them, which takes render
+/// events. So on Vulkan the texture must stay alive for a few render
+/// events past `bm_session_close`, not be released alongside it:
+/// destroying the image while views over it still exist breaks Vulkan's
+/// object-lifetime rules.
 ///
-/// A texture this call *replaces* is under the same requirement, and for
-/// a second reason: a render event already in flight may have taken the
-/// previous pointer before this call and reach its own render after it
-/// returns. The counter pairs a pointer with the registration it belongs
-/// to, which is what stops a stale view being used against a new image;
-/// it does not extend any image's life. So the caller holds a replaced
-/// texture for a few render events too, exactly as it holds a closed
-/// one.
+/// A texture this call *replaces* is under the same requirement, for a
+/// second reason too: a render event already in flight may have taken
+/// the previous pointer before this call and reach its own render after
+/// it returns. The counter stops a stale view being used against a new
+/// image; it does not extend any image's life. So the caller holds a
+/// replaced texture for a few render events, exactly as it holds a
+/// closed one.
 ///
-/// Neither is enforced here. Enforcing would mean the plugin gating the
-/// caller's own release on GPU completion, which is a contract the
-/// managed side has to keep rather than one this boundary can impose.
-/// What the boundary does provide is the means: the objects are destroyed
-/// by a render event, and a closed session has no render events of its
-/// own, so the caller issues `BM_EVENT_COLLECT` for the frames it holds
-/// the retired texture. Releasing without it destroys the image under a
-/// live view no matter how long the wait was.
+/// Neither is enforced here: that would mean the plugin gating the
+/// caller's own release on GPU completion, so it is a contract the
+/// managed side keeps. The boundary provides the means. The objects are
+/// destroyed by a render event, and a closed session has no render events
+/// of its own, so the caller issues `BM_EVENT_COLLECT` for the frames it
+/// holds the retired texture. Releasing without it destroys the image
+/// under a live view however long the wait was.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bm_session_set_output_texture(handle: u64, texture: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
@@ -1219,10 +1210,9 @@ pub unsafe extern "C" fn bm_session_set_output_texture(handle: u64, texture: *mu
         // odd while it is in flight, even and advanced once it lands. A
         // reader that overlaps any part of the write then sees an odd
         // counter or a changed one. A single bump afterwards is not
-        // enough — release/acquire only orders the pointer *before* the
-        // bump a reader observed, so a reader can take the new pointer and
-        // read the same old counter either side of it, which is exactly
-        // the pairing the counter exists to refuse.
+        // enough: release/acquire only orders the pointer *before* the
+        // bump a reader observed, so a reader could take the new pointer
+        // and read the same old counter either side of it.
         #[cfg(target_os = "android")]
         entry.texture_generation.fetch_add(1, Ordering::AcqRel);
         entry
@@ -1266,9 +1256,8 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
             // shared-texture handle for this session.
             let outcome =
                 unsafe { Consumer::open(texture as *mut c_void, shared_handle, &entry.pipeline) };
-            // The first says a session is in trouble and the last says it
-            // has stopped trying; the ones between would be a line per
-            // render event.
+            // Log only the first failure and the last attempt; the ones
+            // between would be a line per render event.
             if let Some(e) = slot.settle(shared_handle, attempt, outcome)
                 && (attempt == 1 || attempt == MAX_CONSUMER_OPENS)
             {
@@ -1307,17 +1296,18 @@ pub extern "C" fn bm_render_event_func() -> *mut c_void {
 /// A registered output texture and the registration it belongs to, read as
 /// a pair.
 ///
-/// Registration stores the pointer and then advances the generation, so
-/// reading one of each can straddle the two writes and hand the render
-/// event a new texture under the previous registration. That pairing is
-/// exactly what the present layer's view cache cannot survive: it keys a
-/// cached image view on the generation precisely because Unity may destroy
-/// an image and give a later one the same handle value, so a new image
-/// under an old generation can match a view over the destroyed one.
+/// The pointer and the generation are separate writes, so reading one of
+/// each can straddle a registration and hand the render event a new
+/// texture under the previous registration. The present layer's view
+/// cache cannot survive that: it keys a cached image view on the
+/// generation because Unity may destroy an image and give a later one the
+/// same handle value, so a new image under an old generation can match a
+/// view over the destroyed one.
 ///
-/// A pair is stable only if the generation reads the same either side of
-/// the pointer. Where it does not, the frame is skipped — the registration
-/// is mid-flight and the next render event has a settled pair.
+/// A pair is stable only if the generation is even and reads the same
+/// either side of the pointer. Otherwise the frame is skipped: the
+/// registration is mid-flight and the next render event has a settled
+/// pair.
 ///
 /// The pointer arrives as a closure rather than a second atomic so a row
 /// can drive the unstable case: the race itself is two adjacent stores
@@ -1482,10 +1472,10 @@ mod tests {
     }
 
     /// A failed consumer open is retried for the same handle, but not
-    /// forever. Caching the first failure outright meant a session whose
-    /// open lost a race against a presenter rebuild never presented
-    /// again: a fresh handle is the only thing that clears the slot, and
-    /// one is published only when the presenter is rebuilt.
+    /// forever. Without retries, a session whose open lost a race against
+    /// a presenter rebuild would never present again: only a fresh handle
+    /// clears the slot, and one is published only when the presenter is
+    /// rebuilt.
     #[cfg(windows)]
     #[test]
     fn a_failed_consumer_open_is_retried_a_bounded_number_of_times() {
@@ -1577,11 +1567,10 @@ mod tests {
         );
     }
 
-    /// The half that a single trailing bump cannot cover: the pointer store
-    /// has landed and the counter has not moved yet. Reading the counter
-    /// either side of the pointer sees no change there and would pair a new
-    /// texture with the previous registration. Bracketing the write makes
-    /// that state odd, so it is refused instead of read as settled.
+    /// The pointer store has landed and the counter has not finished
+    /// moving. Reading the counter either side of the pointer sees no
+    /// change and would pair a new texture with the previous registration;
+    /// bracketing the write makes that state odd, so it is refused.
     #[test]
     fn a_registration_in_flight_is_refused() {
         // The first of the two bumps has landed, the second has not.

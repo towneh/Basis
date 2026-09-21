@@ -1,6 +1,6 @@
-//! Whole-resource fetcher for playlist-driven lanes (HLS): every fetch is
-//! an independent, vetted, cancellable GET — each URL re-runs the resolve →
-//! vet → pinned-connect discipline — or a local file read for
+//! Whole-resource fetcher for playlist-driven lanes (HLS). Every fetch is
+//! either an independent, cancellable GET, with each URL re-running the
+//! resolve → vet → pinned-connect discipline, or a local file read for
 //! fixture playback.
 //!
 //! Which of those two a fetcher can do is fixed when it is built, from
@@ -53,9 +53,9 @@ pub struct ResourceFetcher {
 /// path between the check and the open. Closing that window needs
 /// openat-style handle-relative resolution, which is neither on stable
 /// Rust for Windows (`windows_by_handle`, rust-lang/rust#63010) nor
-/// reachable from a crate that forbids unsafe. The narrower residual is
-/// the deliberate trade: without the second screen the same attacker
-/// succeeds without having to win any race at all.
+/// reachable from a crate that forbids unsafe. The residual race is
+/// accepted: without the second screen the same attacker succeeds with
+/// no race to win.
 fn confine(root: &LocalRoot, url: &str) -> Result<PathBuf, SourceError> {
     let path = Path::new(url);
     // Strip the root and judge only what the playlist contributed: the
@@ -92,8 +92,8 @@ impl ResourceFetcher {
         }
     }
 
-    /// A fetcher for a playlist opened from disk beside `root` — the
-    /// fixture lane. http(s) URIs still fetch and are still vetted.
+    /// A fetcher for a playlist opened from disk beside `root` (the
+    /// fixture lane). http(s) URIs still fetch and are still vetted.
     /// Fails when `root` cannot be canonicalised, since a root that does
     /// not resolve is not one reads can be judged against.
     pub fn local(

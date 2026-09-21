@@ -19,7 +19,7 @@ pub struct ReceiverConfig {
     /// immediately. Bounds memory to roughly `reorder_depth` MTUs.
     pub reorder_depth: usize,
     /// How long a sequence gap holds delivery before the missing
-    /// packets are declared lost. Covers reordering only — jitter
+    /// packets are declared lost. Covers reordering only; jitter
     /// absorption belongs to the buffering layer downstream.
     pub reorder_wait: MediaTime,
     /// Receiver-report cadence once the stream is flowing.
@@ -164,7 +164,7 @@ impl RtpReceiver {
     }
 
     /// Feed one RTP datagram. Call [`Self::poll_packet`] until it
-    /// returns `None` after each acceptance — the reorder buffer is
+    /// returns `None` after each acceptance; the reorder buffer is
     /// bounded on that contract.
     pub fn on_rtp(&mut self, now: MediaTime, datagram: &[u8]) -> Result<(), PacketRejected> {
         // The webrtc-rs parser advances by the header-extension length
@@ -396,7 +396,7 @@ impl RtpReceiver {
         }
     }
 
-    /// Earliest arrival among buffered packets — any buffered packet
+    /// Earliest arrival among buffered packets: any buffered packet
     /// implies the gap ahead of it has been open since it arrived.
     fn blocked_since(&self) -> MediaTime {
         self.pending

@@ -244,7 +244,7 @@ pub async fn patch_answer(
     }
 }
 
-/// DELETE the session resource — the draft's teardown obligation. Errors
+/// DELETE the session resource: the WHEP draft's teardown obligation. Errors
 /// are reported, not retried: the server reaps dead sessions anyway.
 ///
 /// [`DELETE_TIMEOUT`] is applied twice over: once as reqwest's own
@@ -303,10 +303,10 @@ async fn sdp_body(mut response: reqwest::Response, limits: &IoLimits) -> Result<
 /// Extract `rel="ice-server"` target URIs from `Link` header values
 /// (RFC 8288 shape, parsed leniently: hostile or malformed values yield
 /// fewer entries, never an error). The engine surfaces these as
-/// diagnostics; no STUN/TURN gathering runs on them — a receive-only
+/// diagnostics only. No STUN/TURN gathering runs on them: a receive-only
 /// client that initiates every connectivity check needs no srflx
 /// candidate (the server learns our mapped address peer-reflexively),
-/// and TURN relaying is out of scope for v1.
+/// and TURN relaying is not supported.
 pub fn ice_servers_from_links<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut servers = Vec::new();
     for value in values {

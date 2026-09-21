@@ -177,9 +177,9 @@ fn a_refused_fragment_does_not_survive_into_the_next_access_unit() {
         assert!(seq < 32, "the ceiling never refused a packet");
     }
 
-    // Exactly the reported shape: the very next packet carries the marker
-    // bit and the fragment's own timestamp, which is what an unreset state
-    // machine appends to and emits. It must not carry the rejected prefix,
+    // The very next packet carries the marker bit and the fragment's own
+    // timestamp, which is what an unreset state machine appends to and
+    // emits. It must not carry the rejected prefix,
     // and because a prefix was dropped the unit completing at this marker is
     // not trustworthy either.
     seq += 1;
@@ -217,8 +217,8 @@ fn a_refused_fragment_does_not_survive_into_the_next_access_unit() {
 
 /// The same contract on a different refusal: a mid-fragment timestamp change
 /// is refused, and the prefix it was accumulating must not reach the output
-/// either. The fix is at the push boundary rather than at each refusal, so
-/// this rides the same guarantee.
+/// either. The discard happens at the push boundary rather than at each
+/// refusal, so this rides the same guarantee.
 #[test]
 fn a_prefix_refused_for_a_timestamp_change_is_also_discarded() {
     let mut d = depacketizer();

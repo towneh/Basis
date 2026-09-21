@@ -1,19 +1,19 @@
 #![forbid(unsafe_code)]
 
 //! RTSP session as a [`Demuxer`]: `retina` owns the RTSP
-//! state machine. `rtsp://` negotiates UDP first — media-rtp's reorder/
-//! RTCP-RR layer under retina's signalling (`udp` module), because
-//! retina's own UDP path has no reorder buffer and sends no receiver
-//! reports, which real servers kill sessions over — and falls back to
-//! TCP-interleaved when UDP cannot be set up or no datagrams flow.
-//! `rtspt://` pins TCP-interleaved; the Bank downstream is the jitter
-//! answer either way.
+//! state machine. `rtsp://` negotiates UDP first and falls back to
+//! TCP-interleaved when UDP cannot be set up or no datagrams flow. The
+//! UDP path runs media-rtp's reorder/RTCP-RR layer under retina's
+//! signalling (`udp` module), because retina's own UDP path has no
+//! reorder buffer and sends no receiver reports, and real servers kill
+//! sessions over missing reports. `rtspt://` pins TCP-interleaved; the
+//! Bank downstream absorbs jitter either way.
 //!
 //! A/V alignment: RTP timestamps are per-stream, so cross-stream offsets
 //! come from RTCP sender reports (NTP ↔ RTP mappings). Frames buffer
 //! briefly at start until every stream has a sender report (or a bounded
 //! wait expires, falling back to join-skew alignment), then flow with
-//! aligned timestamps — the Bank's startup hold is filling during that
+//! aligned timestamps. The Bank's startup hold is filling during that
 //! window anyway, so the join pays nothing extra.
 
 use std::collections::VecDeque;
@@ -33,8 +33,8 @@ mod udp;
 
 pub use udp::UdpPeerAllowed;
 
-/// Channel depth between the session task and the pulling demux thread —
-/// also the cap on frames buffered while waiting for sender reports.
+/// Channel depth between the session task and the pulling demux thread,
+/// and the cap on frames buffered while waiting for sender reports.
 /// Public with the shared emit path below: the WHEP lane runs the same
 /// session-task → demux-thread shape.
 pub const CHANNEL_DEPTH: usize = 512;
@@ -45,7 +45,7 @@ pub const ALIGN_WAIT: Duration = Duration::from_secs(2);
 /// the engine's reconnect path takes it from there).
 const FEED_STALL: Duration = Duration::from_secs(10);
 /// How long a played UDP session may stay silent (no RTP or RTCP on any
-/// socket) before the open falls back to TCP-interleaved — the
+/// socket) before the open falls back to TCP-interleaved: the
 /// firewall/NAT-blackhole case, invisible at SETUP time.
 const UDP_PROBE: Duration = Duration::from_secs(5);
 
@@ -144,8 +144,9 @@ impl RtspDemuxer {
         }
 
         // Describe/setup/play happen synchronously so an unreachable or
-        // 404 path fails the open itself — the engine's reconnect budget
-        // counts it instead of seeing a session that dies on first pull.
+        // 404 path fails the open itself, and the engine's reconnect
+        // budget counts it rather than seeing a session that dies on
+        // first pull.
         let ready = runtime
             .block_on(setup_session(parsed))
             .map_err(|detail| DemuxError::Source(detail.into()))?;
@@ -537,8 +538,8 @@ async fn emit_aligned(
     tx: &mpsc::Sender<Result<StreamEvent, String>>,
 ) -> Result<(), String> {
     let offset = align.get(frame.stream_id).map(|a| a.offset_us).unwrap_or(0);
-    // RTP carries presentation time only; arrival order is decode order,
-    // so dts = pts (live encoders on these lanes do not reorder).
+    // RTP carries presentation time only and arrival order is decode
+    // order, so dts is set to pts.
     let pts = MediaTime::from_micros(frame.elapsed_us.saturating_add(offset));
     let au = Au {
         track: TrackId(frame.stream_id as u32),

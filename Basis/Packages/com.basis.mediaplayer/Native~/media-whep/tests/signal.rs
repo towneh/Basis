@@ -403,10 +403,8 @@ fn error_status_fails_typed_and_gate_blocks_signalling() {
 }
 
 /// A signalling failure has to say what failed. reqwest's own `Display`
-/// stops at "error sending request for url (...)", and the refusal, the
-/// TLS alert or the resolver's answer all sit one `source()` hop below
-/// it — so naming only the outer layer leaves an operator with a
-/// diagnosis that has nothing in it.
+/// stops at "error sending request for url (...)"; the refusal, TLS alert
+/// or resolver answer is one `source()` hop below it.
 #[test]
 fn a_signalling_transport_failure_names_its_cause() {
     // A port held only long enough to be sure nothing else has it.
@@ -536,11 +534,11 @@ fn an_answer_body_at_the_cap_is_still_read_whole() {
         .map(|_| ())
         .expect_err("filler is not an SDP answer");
     // On the variant rather than the wording. The cap refuses as a
-    // `Source`, as every transport failure does, and only a body read
-    // whole reaches the SDP parser and fails as a `Parse` — so this one
-    // assertion says both that the bound is inclusive and that the row
-    // got far enough to prove it. A malformed URL is the other way to
-    // reach `Parse`, and this one was well-formed enough to be served.
+    // `Source`, as every transport failure does; only a body read whole
+    // reaches the SDP parser and fails as a `Parse`. So this one assertion
+    // shows the bound is inclusive and that the row got far enough to
+    // prove it. (A malformed URL also yields `Parse`, but this one was
+    // served.)
     assert!(
         matches!(err, media_demux::DemuxError::Parse(_)),
         "exactly the cap is read whole and reaches the parser: {err}"
@@ -733,7 +731,7 @@ fn opening_from_inside_a_runtime_is_refused_by_name() {
 #[test]
 fn feed_stall_surfaces_when_media_never_flows() {
     // Signalling succeeds but no ICE peer ever answers: the demuxer's
-    // pull surfaces a typed stall (the engine reconnect path's food).
+    // pull surfaces a typed stall for the engine's reconnect path.
     let media = std::net::UdpSocket::bind("127.0.0.1:0").expect("media sock");
     let media_addr = media.local_addr().expect("addr");
     let server = VirtualServer::start(Box::new(move |request| match request.method.as_str() {

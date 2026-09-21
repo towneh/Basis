@@ -133,11 +133,9 @@ fn a_disk_playlist_cannot_read_outside_its_directory() {
     };
 
     // Absolute, and a walk back out through the parent. Both name the
-    // same readable file; neither is inside the root — and they are
-    // caught by different screens, so each row names the one it expects.
-    // "directory" alone appears in all three refusals, and a
-    // reclassification between them would pass while the URLs had swapped
-    // which screen caught them.
+    // same readable file outside the root, and different screens catch
+    // them, so each case names the refusal it expects ("directory" alone
+    // appears in all three and would not tell them apart).
     let absolute = outside.to_str().expect("UTF-8").to_owned();
     let traversal = root
         .join("..")
@@ -171,10 +169,10 @@ fn a_disk_playlist_cannot_read_outside_its_directory() {
 }
 
 /// Remove a planted link by what it actually is. A Unix symlink needs
-/// `remove_file` — `remove_dir` refuses it with ENOTDIR and `remove_dir_all`
-/// will not follow it either — while a Windows junction needs `remove_dir`.
-/// Getting this wrong leaves the link behind, and the next run then fails
-/// to plant one, prints SKIPPED and asserts nothing.
+/// `remove_file` (`remove_dir` refuses it with ENOTDIR, and `remove_dir_all`
+/// will not follow it), while a Windows junction needs `remove_dir`. A link
+/// left behind makes the next run fail to plant one, print SKIPPED and
+/// assert nothing.
 fn remove_planted_link(link: &std::path::Path) {
     if link.symlink_metadata().is_err() {
         return;
@@ -212,9 +210,8 @@ fn plant_directory_link(link: &std::path::Path, target: &std::path::Path) -> boo
 }
 
 /// A link planted inside the playlist's directory that points outside it
-/// is refused. The lexical screen cannot see this one — every component
-/// is an ordinary name under the root — so it is the canonicalising
-/// screen that catches it, which is exactly why that screen is there.
+/// is refused. Every component is an ordinary name under the root, so the
+/// lexical screen passes it and the canonicalising screen has to catch it.
 #[test]
 fn a_link_out_of_the_root_is_refused() {
     let outside = scratch_dir().join("link-target-dir");
@@ -275,8 +272,8 @@ fn a_network_playlist_cannot_read_a_local_file() {
 
 /// The spellings a hostile playlist reaches for. None of them are
 /// `http://` or `https://`, so all of them land on the arm a
-/// network-origin fetcher does not have — including the Windows
-/// drive-relative form that reads as a URL but resolves as a path, and
+/// network-origin fetcher does not have. That includes the Windows
+/// drive-relative form, which reads as a URL but resolves as a path, and
 /// the UNC form, which would otherwise be an outbound SMB connect the
 /// address gate never sees.
 #[test]
@@ -303,8 +300,8 @@ fn a_network_playlist_refuses_every_non_http_spelling() {
 /// The other side of that seam: a fetcher rooted at the current
 /// directory serves a resource resolved against it. Cargo runs a test
 /// with the package directory as the working directory, so the
-/// manifest is a file that is certainly there and certainly inside the
-/// root — the row is about the two spellings agreeing, not the bytes.
+/// manifest is certainly there and inside the root. The row is about the
+/// two spellings agreeing, not the bytes.
 #[test]
 fn a_root_of_the_current_directory_serves_what_resolves_against_it() {
     let mut fetcher = ResourceFetcher::local(

@@ -1,7 +1,7 @@
 //! UDP transport: retina keeps the RTSP state machine (DESCRIBE/SETUP/
 //! PLAY, keepalives, TEARDOWN, socket bind + connect + firewall punch)
 //! and hands over the connected sockets and depacketizers; `media-rtp`
-//! owns receive — reorder, jitter/loss accounting and RTCP receiver
+//! owns receive: reorder, jitter/loss accounting and RTCP receiver
 //! reports, which retina's own UDP path lacks (servers kill RR-less
 //! sessions as dead). The SETUP response's `source` address is vetted
 //! before any packet goes out: it is server-controlled and need
@@ -345,15 +345,14 @@ async fn drain_stream(
         .map_err(|e| format!("rebuild rtp packet: {e}"))?;
 
         // Per-packet depacketizer refusals are loss, not session
-        // failure — this lane tolerates loss by design. The drain below
-        // is unconditional because retina can queue a completed access
-        // unit and then reject the same packet, and pushing over
-        // unpulled output panics.
+        // failure; this lane tolerates loss. The drain below is
+        // unconditional because retina can queue a completed access unit
+        // and then reject the same packet, and pushing over unpulled
+        // output panics.
         //
-        // Discarding the reason outright left a lane refusing every
-        // packet looking like a healthy one carrying none, so the first
-        // is reported and then sparsely, with the running total to tell
-        // a burst from a stream that never depacketizes at all.
+        // Refusals are logged on the first and then sparsely, with the
+        // running total, so a stream nothing can depacketize is told
+        // apart from a burst of loss.
         if let Err(e) = stream.depacketizer.push(built) {
             stream.refused += 1;
             if stream.refused == 1 || stream.refused.is_multiple_of(256) {
@@ -452,11 +451,10 @@ mod tests {
     /// that state: an FU-A start, then a timestamp change mid-fragment
     /// whose own payload is rejected (F bit set), then anything at all.
     ///
-    /// What the row proves is survival, and only that. The state it
-    /// builds is a *pending* fragment, so nothing completes and the
-    /// buffer is empty at the end by construction — asserting an access
-    /// unit came out would mean completing one, which is a different
-    /// state from the one that used to panic.
+    /// The row proves survival only. The state it builds is a *pending*
+    /// fragment, so nothing completes and the buffer is empty at the end
+    /// by construction; asserting an access unit came out would mean
+    /// completing one, which is not the state that panics.
     #[test]
     fn refused_push_still_drains_before_the_next_one() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -487,12 +485,9 @@ mod tests {
             };
 
             let fed_at = MediaTime::from_millis(0);
-            // Drained past the reorder window rather than at the instant
-            // the three were fed: `poll_packet` releases a sequential run
-            // straight away today, so draining at the same instant works
-            // by the current policy rather than by contract, and a change
-            // to it would fail this row for a reason that is not the one
-            // it exists to catch.
+            // Drained past the reorder window: `poll_packet` releasing a
+            // sequential run straight away is policy rather than contract,
+            // and a change to it should not fail this row.
             let now = fed_at
                 + ReceiverConfig::new(90_000, 1, "basis-media").reorder_wait
                 + MediaTime::from_millis(1);

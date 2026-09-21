@@ -3,16 +3,15 @@
 //! DTLS, SRTP and RTCP (receiver reports, NACK); decrypted RTP hands off
 //! to media-rtp's reorder/jitter layer, retina's depacketizers (H.264)
 //! or the trivial Opus mapping (RFC 7587: one packet, one frame), and
-//! media-rtsp's shared aligner/emit path — WHEP frames enter the engine
+//! media-rtsp's shared aligner/emit path, so WHEP frames enter the engine
 //! exactly where RTSP frames do.
 //!
-//! Where the address policy is enforced: every datagram str0m wants to send passes
-//! the engine's address gate first. Remote ICE candidates are
-//! server-controlled (SDP and trickle alike), so the check sits at the
-//! transmit boundary where it cannot be bypassed — a blocked candidate's
-//! connectivity check is never sent, which is exactly "validated before
-//! any check goes out". Inbound traffic is safe to parse from anywhere:
-//! ICE consent requires message integrity with session credentials.
+//! Address policy: every datagram str0m wants to send passes the engine's
+//! address gate first. Remote ICE candidates are server-controlled (SDP
+//! and trickle alike), so the check sits at the transmit boundary where
+//! it cannot be bypassed, and a blocked candidate's connectivity check is
+//! never sent. Inbound traffic is safe to parse from anywhere: ICE
+//! consent requires message integrity with session credentials.
 
 use media_diag::{diag_log, diag_warn};
 
@@ -40,9 +39,8 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 
 /// How many distinct blocked destinations a session will hold and name.
-/// The remote's candidate list is bounded by the signalling body cap, so
-/// this is not the only thing standing between a hostile answer and an
-/// unbounded list — it is the one that says so.
+/// The signalling body cap already bounds the remote's candidate list;
+/// this makes the bound explicit where the list is kept.
 const MAX_BLOCKED_PEERS: usize = 64;
 
 /// Record a refused destination the first time it is seen, while the
@@ -77,7 +75,7 @@ pub(crate) struct Lane {
     pub(crate) stream_id: usize,
     pub(crate) codec: LaneCodec,
     /// Negotiated payload types routing to this lane (a codec can
-    /// negotiate several — H.264 profiles).
+    /// negotiate several, e.g. H.264 profiles).
     pub(crate) pts: Vec<u8>,
     pub(crate) clock_rate: NonZeroU32,
     pub(crate) receiver: RtpReceiver,
@@ -390,16 +388,14 @@ async fn drain_lane(
                 .map_err(|e| format!("rebuild rtp packet: {e}"))?;
 
                 // Per-packet depacketizer refusals are loss, not session
-                // failure — this lane tolerates loss by design. The drain
-                // below is unconditional because retina can queue a
-                // completed access unit and then reject the same packet,
-                // and pushing over unpulled output panics.
+                // failure; this lane tolerates loss. The drain below is
+                // unconditional because retina can queue a completed
+                // access unit and then reject the same packet, and pushing
+                // over unpulled output panics.
                 //
-                // Discarding the reason outright left a lane nothing can
-                // depacketize looking like a healthy one carrying no
-                // packets, so the first is reported and then sparsely,
-                // with the running total to tell a burst from a lane that
-                // never depacketizes at all.
+                // Refusals are logged on the first and then sparsely, with
+                // the running total, so a lane nothing can depacketize is
+                // told apart from a burst of loss.
                 if let Err(e) = depacketizer.push(built) {
                     lane.refused += 1;
                     if lane.refused == 1 || lane.refused.is_multiple_of(256) {
@@ -511,11 +507,9 @@ mod tests {
         feed(&mut lane, fed_at, 1000, 9_000, &[0x7C, 0x85, 0x42]);
         feed(&mut lane, fed_at, 1001, 12_000, &[0x9C, 0x42]);
         feed(&mut lane, fed_at, 1002, 12_000, &[0x65, 0x42]);
-        // Drained past the reorder window rather than at the instant the
-        // three were fed, as the RTSP twin is: releasing a sequential run
-        // straight away is the current policy rather than a contract, and
-        // a change to it would fail this row for a reason that is not the
-        // one it exists to catch.
+        // Drained past the reorder window, as the RTSP twin is: releasing
+        // a sequential run straight away is policy rather than contract,
+        // and a change to it should not fail this row.
         let now = fed_at
             + ReceiverConfig::new(90_000, 1, "basis-media").reorder_wait
             + MediaTime::from_millis(1);

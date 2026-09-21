@@ -329,10 +329,9 @@ fn malformed_datagrams_are_counted_not_fatal() {
 
 /// A sender picks its own RTP timestamps and each packet can move the
 /// unwrapped total by up to 2^31, so the span handed to the µs conversion
-/// has no ceiling. Scaled in i64 it wraps a few thousand hostile packets
-/// in — and silently, without overflow checks — leaving an arbitrary
-/// signed value as a frame's presentation timestamp or as a stream's
-/// alignment anchor.
+/// has no ceiling. Scaled in i64 it would wrap a few thousand hostile
+/// packets in, silently in release builds, leaving an arbitrary value as
+/// a frame's presentation timestamp or a stream's alignment anchor.
 #[test]
 fn a_hostile_timestamp_span_saturates_rather_than_wrapping() {
     let rate = NonZeroU32::new(90_000).expect("nonzero");
@@ -373,14 +372,12 @@ fn the_alignment_anchor_survives_a_saturated_elapsed() {
     assert_eq!(ntp_at_zero(NTP, i64::MAX), NTP.wrapping_sub(u64::MAX));
     assert_eq!(ntp_at_zero(NTP, i64::MIN), NTP.wrapping_add(u64::MAX));
 
-    // Exact at magnitudes where scaling through a f64 no longer is. The
+    // Exact at magnitudes where scaling through an f64 no longer is. The
     // divergence is sub-nanosecond and only past ~11 days of elapsed, so
-    // this pins the helper's contract rather than standing for a defect
-    // an alignment anchor would ever have shown. Only the exact value is
-    // asserted: the two paths differ by about one ULP at this magnitude,
-    // so a row demanding they differ rests on the compiler not having
-    // contracted or widened the intermediate arithmetic. The equality
-    // catches a switch to the float path on its own.
+    // this pins the helper's contract rather than a visible defect. Only
+    // the exact value is asserted: the two paths differ by about one ULP
+    // here, and asserting that they differ would depend on how the
+    // compiler treats the intermediate arithmetic.
     let long_us = 1_000_000_000_001_i64;
     assert_eq!(
         ntp_at_zero(NTP, long_us),

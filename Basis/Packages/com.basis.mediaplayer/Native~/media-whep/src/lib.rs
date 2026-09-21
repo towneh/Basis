@@ -5,11 +5,11 @@
 //! discipline; `str0m` (sans-IO) runs ICE/DTLS/SRTP/RTCP on our socket
 //! and hands decrypted RTP to media-rtp's reorder layer, retina's H.264
 //! depacketizer / the RFC 7587 Opus mapping, and media-rtsp's shared
-//! aligner/emit path. The client obligations from the draft are built
-//! in: both the `201 + answer` and `406 + counter-offer, PATCH answer`
-//! flows, full ICE gathering before the POST (so PATCH-refusing servers
-//! work — host candidates ride in the offer), `Link rel="ice-server"`
-//! parsing, and `DELETE` on teardown.
+//! aligner/emit path. The client obligations from the WHEP draft are
+//! built in: both the `201 + answer` and `406 + counter-offer, PATCH
+//! answer` flows, full ICE gathering before the POST (host candidates
+//! ride in the offer, so PATCH-refusing servers work), `Link
+//! rel="ice-server"` parsing, and `DELETE` on teardown.
 //!
 //! The signalling URLs go through the same gate-vetted pinned
 //! connects as every HTTP lane; every media-path address str0m wants to
@@ -77,9 +77,9 @@ impl WhepDemuxer {
         // before its answer is read leaves that session with no Location
         // to DELETE, so the teardown in `Drop` has nothing to send and
         // the server holds it until its own idle timeout. That is
-        // inherent to abandoning a POST in flight — the resource exists
-        // and its name arrived nowhere — and the server-side timeout is
-        // the recovery path.
+        // inherent to abandoning a POST in flight (the resource exists
+        // and its name arrived nowhere); the server-side timeout is the
+        // recovery path.
         //
         // Signalling is driven by blocking this thread on the runtime
         // (see `drive`), which panics on a runtime worker. This is
@@ -93,13 +93,13 @@ impl WhepDemuxer {
         let endpoint = signalling_url(url).map_err(whep_err)?;
         let limits = IoLimits::default();
 
-        // The socket binds on the interface that routes to the
-        // signalling host — the media peer is normally the same box or
-        // at least the same route.
-        // Named rather than defaulted to the empty string: the scheme
-        // screen above should make a hostless URL unreachable, and
-        // resolving "" if it is not turns a URL fault into a resolver
-        // one and reports the wrong thing.
+        // The advertised candidate uses the interface that routes to the
+        // signalling host, since the media peer is normally the same box
+        // or at least the same route.
+        //
+        // A missing host is refused rather than defaulted to "": the
+        // scheme screen should make it unreachable, and resolving "" would
+        // report a URL fault as a resolver one.
         let host = endpoint
             .host_str()
             .ok_or_else(|| WhepError::Url("signalling url has no host".into()))
@@ -138,12 +138,10 @@ impl WhepDemuxer {
         .map_err(whep_err)?;
 
         // The server has created a session by now, and every failure
-        // from here returns before `Self` exists — so `Drop`, which owns
-        // the teardown, never runs and the server holds the session
-        // until its own idle timeout. Its name is known here, unlike a
-        // POST abandoned in flight, so the DELETE goes out on the way
-        // past: the same fire-and-forget call `Drop` makes, with its own
-        // bounded timeout.
+        // from here returns before `Self` exists, so `Drop` (which owns
+        // the teardown) never runs. The session's name is known, so the
+        // DELETE goes out on the way past: the same fire-and-forget call
+        // `Drop` makes, with its own bounded timeout.
         let abandon = |resource: &Url, e: DemuxError| -> DemuxError {
             let resource = resource.clone();
             let gate = Arc::clone(&gate);
@@ -238,8 +236,8 @@ impl WhepDemuxer {
         self.flow
     }
 
-    /// `Link rel="ice-server"` entries the server advertised (surfaced
-    /// as diagnostics; not used for gathering — see the crate docs).
+    /// `Link rel="ice-server"` entries the server advertised. Surfaced as
+    /// diagnostics only: gathering offers the one host candidate.
     pub fn ice_servers(&self) -> &[String] {
         &self.ice_servers
     }
@@ -311,10 +309,10 @@ impl Demuxer for WhepDemuxer {
 }
 
 /// RTP mode (str0m hands over packets, our layers own the buffering)
-/// offering exactly what this engine decodes today: H.264 video
-/// and Opus audio. Codecs the engine would refuse at the decode factory
-/// are cleaner refused at negotiation — a server whose stream is VP8
-/// answers with nothing playable instead of feeding undecodable RTP.
+/// offering exactly what this engine decodes: H.264 video and Opus
+/// audio. Codecs the decode factory would refuse are refused at
+/// negotiation instead, so a server whose stream is VP8 answers with
+/// nothing playable rather than feeding undecodable RTP.
 fn rtc_config(provider: Arc<str0m::config::CryptoProvider>) -> RtcConfig {
     RtcConfig::new()
         .set_crypto_provider(provider)
@@ -327,16 +325,15 @@ fn rtc_config(provider: Arc<str0m::config::CryptoProvider>) -> RtcConfig {
 /// Drive one signalling exchange on the I/O runtime, abandoning it as
 /// soon as the engine's teardown probe goes true.
 ///
-/// Signalling is a chain of server-chosen requests — up to six redirect
-/// hops, each at the connect and request timeouts — and the thread
+/// Signalling is a chain of server-chosen requests (up to six redirect
+/// hops, each at the connect and request timeouts), and the thread
 /// running it is one `bm_session_close` joins from the client's main
 /// thread. Without this the close waits the whole chain out.
 ///
-/// The `block_on` that makes the polling possible is also a constraint
-/// on where the open may be called from: a runtime worker thread panics
-/// on it. `WhepDemuxer::open` is public, so it screens for that itself
-/// and refuses by name — open it from a thread of its own, as the
-/// engine's opener does, and never from inside a spawned task.
+/// The `block_on` also constrains where the open may be called from: a
+/// runtime worker thread panics on it. `WhepDemuxer::open` is public, so
+/// it screens for that itself and refuses by name. Open it from a thread
+/// of its own, as the engine's opener does, never from a spawned task.
 fn drive<T>(
     runtime: &tokio::runtime::Handle,
     cancelled: &CancelProbe,
@@ -365,7 +362,7 @@ fn whep_err(e: WhepError) -> DemuxError {
     }
 }
 
-/// Bind the media socket on the wildcard address — the server's answer
+/// Bind the media socket on the wildcard address: the server's answer
 /// may carry candidates on any of its interfaces, and a socket bound to
 /// one local IP cannot transmit to destinations off that interface (the
 /// nominated pair would die silently). The *advertised* host candidate
@@ -412,7 +409,7 @@ fn add_host_candidate(rtc: &mut Rtc, local_addr: SocketAddr) -> Result<(), Demux
 /// Map the negotiated payload types onto receive lanes. H.264 may
 /// negotiate several PTs (profiles); they all route to the one video
 /// lane. A session with neither H.264 nor Opus has nothing this engine
-/// can play — refuse at open so it reads as a codec problem, not a
+/// can play; refusing at open makes it read as a codec problem, not a
 /// stall.
 fn build_lanes(rtc: &mut Rtc) -> Result<Vec<Lane>, String> {
     let mut h264_pts = Vec::new();

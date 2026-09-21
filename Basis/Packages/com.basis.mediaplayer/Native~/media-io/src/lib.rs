@@ -1,9 +1,10 @@
 //! Network and I/O layer: every socket the engine opens, opened
-//! here. Byte sources implement the demux layer's [`ByteSource`] seam;
-//! SSRF policy is *bind what you resolve* — resolve once, vet every
+//! here. Byte sources implement the demux layer's [`ByteSource`] seam.
+//!
+//! SSRF policy is *bind what you resolve*: resolve once, vet every
 //! address, connect to the vetted IPs with Host/SNI carried separately,
-//! and re-vet on every redirect. The address gate exists exactly once, in
-//! this crate; the managed layer holds policy (consent, allowlists), not
+//! and re-vet on every redirect. The address gate lives only in this
+//! crate; the managed layer holds policy (consent, allowlists), not
 //! mechanism.
 
 #![forbid(unsafe_code)]
@@ -36,12 +37,12 @@ pub struct IoLimits {
     pub max_redirects: u32,
     pub connect_timeout: Duration,
     /// Ceiling on one wait for bytes from a media source: the response
-    /// head, then each read of the body. It is the stall detector, and it
-    /// measures the link rather than the exchange, because a body is read
-    /// at playback pace and not at all while paused. A signalling request,
+    /// head, then each read of the body. It is a stall detector on the
+    /// link, not a bound on the whole exchange, because a body is read at
+    /// playback pace and not at all while paused. A signalling request,
     /// whose body is small and read at once, takes it as a total instead.
-    /// Either way it is not what makes a teardown prompt — every request
-    /// and read races the session's [`CancelToken`] for that.
+    /// Prompt teardown comes from elsewhere: every request and read races
+    /// the session's [`CancelToken`].
     pub request_timeout: Duration,
     /// Size of one ranged request. Bounds the bytes wasted by a discarded
     /// stream.
@@ -120,11 +121,11 @@ impl IoError {
 
 /// Flatten an error and its `source()` chain into one string.
 ///
-/// reqwest's `Display` names only its outermost layer — that a request
-/// could not be sent, and to where — and drops the resolve, connect or
-/// TLS error underneath it, which is the half that says what actually
-/// went wrong. Public for the transports that run their own HTTP
-/// requests over this crate's discipline (WHEP signalling).
+/// reqwest's `Display` names only its outermost layer (that a request
+/// could not be sent, and to where) and drops the resolve, connect or
+/// TLS error underneath, which is the part that says what went wrong.
+/// Public for the transports that run their own HTTP requests over this
+/// crate's discipline (WHEP signalling).
 pub fn error_chain(e: &dyn std::error::Error) -> String {
     let mut detail = e.to_string();
     let mut cause = e.source();

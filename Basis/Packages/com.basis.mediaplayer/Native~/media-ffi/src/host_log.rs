@@ -23,12 +23,11 @@ pub fn install() {
     });
 }
 
-/// `OutputDebugStringW` is what a windowed process has — DebugView and
-/// any attached debugger read it, and unlike logcat there is no tag
-/// field, so the line names itself. stderr is written as well rather
-/// than instead: a console host and `cargo test` have only that, and one
-/// duplicated line where both channels exist costs less than the silence
-/// the alternative gives wherever one does not.
+/// `OutputDebugStringW` is what a windowed process has: DebugView and any
+/// attached debugger read it. Unlike logcat there is no tag field, so the
+/// line names itself. stderr is written as well, because a console host
+/// and `cargo test` have only that; a duplicated line where both channels
+/// exist is cheaper than silence where one does not.
 #[cfg(windows)]
 fn windows_sink(line: &str) {
     let tagged = format!("[basis-media] {line}");

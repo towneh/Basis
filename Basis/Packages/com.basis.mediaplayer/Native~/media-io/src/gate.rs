@@ -1,4 +1,4 @@
-//! The address gate: the one implementation of the SSRF blocklist (L13).
+//! The address gate: the one implementation of the SSRF blocklist.
 //! Policy above it (consent, per-world allowlists) lives managed-side; the
 //! mechanism lives here and is consulted for every resolved address and
 //! every redirect hop.
@@ -77,12 +77,12 @@ impl AddressGate for AllowAllGate {
     }
 }
 
-/// Resolve a bare host and vet every returned address — the
-/// pre-connect check for transports whose clients do their own dialling
-/// (RTSP). A mixed public/private answer is the rebinding shape and is
-/// refused whole. TOCTOU note: the transport re-resolves at connect; the
-/// window is accepted for these lanes until their clients take pinned
-/// addresses.
+/// Resolve a bare host and vet every returned address: the pre-connect
+/// check for transports whose clients do their own dialling (RTSP). A
+/// mixed public/private answer is the rebinding shape and is refused
+/// whole. The transport re-resolves at connect, so a TOCTOU window
+/// remains; it is accepted for these lanes until their clients take
+/// pinned addresses.
 pub fn vet_host(host: &str, port: u16, gate: &dyn AddressGate) -> Result<(), crate::IoError> {
     resolve_vetted(host, port, gate).map(|_| ())
 }
@@ -130,9 +130,8 @@ fn literal_vetted(
     gate: &dyn AddressGate,
 ) -> Result<Option<std::net::SocketAddr>, crate::IoError> {
     // A URL's host is the serialised form, so an IPv6 literal arrives
-    // bracketed and parses as nothing. Left as it was it is not a literal
-    // at all: it goes to the resolver, which has no name to look up, so
-    // every IPv6 literal fails to open rather than being vetted here.
+    // bracketed. Unstripped it would not parse and would go to the
+    // resolver, which has no name to look up.
     let literal = host
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
@@ -218,9 +217,6 @@ mod tests {
     /// that has no name to resolve.
     #[test]
     fn a_bracketed_ipv6_literal_is_still_a_literal() {
-        // Recognised as a literal at all. Left bracketed it parses as
-        // nothing, and a host that is not a literal goes to a resolver
-        // with no name to look up.
         let addr = literal_vetted("[2606:4700:4700::1111]", 443, &AllowAllGate)
             .expect("a public literal is permitted")
             .expect("a bracketed literal is a literal");

@@ -3,11 +3,11 @@
 //!
 //! One streaming GET; an async reader task on the shared runtime pulls
 //! chunks under a per-read stall timeout and fills a bounded channel the
-//! sync media path drains — backpressure is the channel filling and TCP
+//! sync media path drains. Backpressure is the channel filling and TCP
 //! doing the rest. Connect, redirects and every read race the session's
 //! [`CancelToken`], so teardown never waits out a network timeout.
-//! The same resolve-once/vet-all/pin-the-connection SSRF architecture as
-//! the ranged source, re-run on every redirect hop.
+//! SSRF handling is the ranged source's (resolve once, vet all, pin the
+//! connection), re-run on every redirect hop.
 //!
 //! The first bytes served are kept in a head cache so the container sniff
 //! and a demuxer restarting from offset 0 both read them; everything past
@@ -125,8 +125,8 @@ impl HttpLiveSource {
         ))
     }
 
-    /// Wrap an open body. `cancel` is this source's own token — the one
-    /// its `Drop` retires — so callers pass a child of the session's.
+    /// Wrap an open body. `cancel` is this source's own token, the one its
+    /// `Drop` retires, so callers pass a child of the session's.
     fn from_response(
         response: reqwest::Response,
         url: Url,
@@ -362,12 +362,12 @@ mod tests {
             .map(|_| ())
             .expect_err("the gate refuses every address");
         }
-        // Sampled rather than settled: a cancelled forwarder still has to
+        // Polled rather than read once: a cancelled forwarder still has to
         // be scheduled before it exits, the multi-threaded runtime's count
-        // is documented as approximate, and the runtime is process-wide so
-        // sibling rows contribute to it. Poll until it comes down — the
-        // leak this guards against is permanent, so a bounded wait cannot
-        // hide one, it only stops a scheduling delay reading as one.
+        // is documented as approximate, and sibling rows share the
+        // process-wide runtime. The leak guarded against is permanent, so
+        // a bounded wait cannot hide one; it only stops a scheduling delay
+        // reading as one.
         let mut grew = usize::MAX;
         for _ in 0..20 {
             grew = runtime().metrics().num_alive_tasks().saturating_sub(before);

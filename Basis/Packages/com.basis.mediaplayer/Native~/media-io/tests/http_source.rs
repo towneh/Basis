@@ -177,9 +177,9 @@ fn start_stalling_server(total: u64, serve: Option<usize>) -> (String, mpsc::Rec
 
 /// A server that accepts exactly one connection, answers it with the
 /// whole body however it was asked for, and then stops listening so a
-/// second connection is refused. This is the shape of the one-client-per-
-/// slot feeders the live rig runs, and of any origin that answers a
-/// ranged GET with a plain 200.
+/// second connection is refused: the shape of a feeder that serves one
+/// client at a time, and of any origin that answers a ranged GET with a
+/// plain 200.
 fn spawn_single_slot_server(body: Vec<u8>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
@@ -613,7 +613,7 @@ fn public_gate_blocks_loopback() {
 
 /// `Session::close` joins the opener thread from the client's main
 /// thread, so an open that cannot be abandoned freezes the client for the
-/// request budget — six redirect hops' worth, in the worst case.
+/// request budget: six redirect hops' worth, in the worst case.
 #[test]
 fn a_close_during_open_abandons_the_request() {
     let (base, requested) = start_stalling_server(1024, None);
@@ -713,24 +713,19 @@ fn a_close_during_a_read_abandons_it() {
     );
 }
 
-/// `read_at` is trait surface, so the buffer's length is the caller's to
-/// choose and zero is a length. The held chunk has to survive it: served
-/// as a spent one, the unread remainder is dropped and the loop pulls
-/// until the body ends, which on a live or stalled source is not a thing
-/// that happens. Pinned against a server that goes quiet, so a read that
-/// went to the network rather than to the chunk in hand cannot come back
-/// inside the window.
+/// `read_at` is trait surface, so a zero-length buffer is legal. The held
+/// chunk has to survive it: treated as spent, the unread remainder is
+/// dropped and the loop pulls until the body ends, which on a live or
+/// stalled source never happens. Pinned against a server that goes quiet,
+/// so a read that went to the network rather than to the chunk in hand
+/// cannot come back inside the window.
 #[test]
 fn a_zero_length_read_keeps_the_chunk_it_is_holding() {
-    // Small and written in one call, so the whole of it is one chunk on
-    // loopback and the first read provably leaves a remainder inside it.
-    // Sized from a 64 KiB body the row would be resting on where the
-    // transport happened to split it, and a short first chunk would send
-    // the second read to the network and read as a regression that is
-    // not one. Small also makes the failure loud rather than slow: the
-    // server writes this much and then never writes again, so a source
-    // that dropped the chunk has nothing to refetch and the read waits
-    // out the request timeout instead of quietly succeeding.
+    // Small and written in one call, so it arrives as one chunk on
+    // loopback and the first read leaves a remainder inside it. A larger
+    // body would depend on where the transport split it. The server never
+    // writes again, so a source that dropped the chunk waits out the
+    // request timeout rather than quietly refetching.
     const SERVED: usize = 32;
     let (base, _requested) = start_stalling_server(4 * 1024 * 1024, Some(SERVED));
     let mut source = open(&format!("{base}/media")).expect("open");
@@ -772,9 +767,8 @@ fn a_zero_length_read_keeps_the_chunk_it_is_holding() {
 }
 
 /// A transport failure has to say what failed. reqwest's own `Display`
-/// stops at "error sending request for url (...)" — the refusal, the TLS
-/// alert, the resolver's answer are all one `source()` hop below it, and
-/// naming only the outer layer leaves a diagnosis with nothing in it.
+/// stops at "error sending request for url (...)"; the refusal, TLS alert
+/// or resolver answer is one `source()` hop below it.
 #[test]
 fn a_transport_failure_names_its_cause() {
     // A port that was bound long enough to be sure nothing else holds it,
@@ -798,14 +792,14 @@ fn unsupported_scheme_is_a_url_error() {
 }
 
 /// The liveness inference reads two things off the source: whether the
-/// server will serve byte ranges, and whether it stated any length. The
-/// composition — finite and rangeable is on-demand — is what keeps a VOD
-/// off the jitter-buffer path, where it would play at delivery speed.
+/// server will serve byte ranges, and whether it stated any length.
+/// Finite and rangeable reads as on-demand, which keeps a VOD off the
+/// jitter-buffer path, where it would play at delivery speed.
 #[test]
 fn seekability_reads_ranges_and_length_not_guesses() {
     let body = fixture("h264-aac-640x360-30fps.mp4");
 
-    // A real 206 answer, which is the signal — not an advertised header.
+    // A real 206 answer.
     let ranged = spawn_server(body.clone(), Mode::Ranges);
     assert!(
         open(&format!("{ranged}/media"))
@@ -817,9 +811,8 @@ fn seekability_reads_ranges_and_length_not_guesses() {
     let plain = spawn_server(body.clone(), Mode::Sequential);
     assert!(!open(&format!("{plain}/media")).expect("open").is_seekable());
 
-    // 200 to a range request but `Accept-Ranges: bytes` advertised. The
-    // C player accepted this arm and so does this one, which is the only
-    // gap between them.
+    // 200 to a range request but `Accept-Ranges: bytes` advertised: the
+    // server honours ranges generally.
     let advertised = spawn_server(body.clone(), Mode::SequentialAdvertised);
     assert!(
         open(&format!("{advertised}/media"))

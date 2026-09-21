@@ -6,22 +6,21 @@
 //! Bounded: the platform resolver runs its own retry schedule, seconds
 //! to tens of seconds against a delegated but non-responsive nameserver,
 //! and neither [`IoLimits::connect_timeout`](crate::IoLimits) nor
-//! `request_timeout` covers any of it — both are client settings that
-//! start once an address set already exists. A hostile hostname costs
+//! `request_timeout` covers any of it: both are client settings that
+//! start once an address set exists. A hostile hostname costs
 //! [`RESOLVE_TIMEOUT`] here instead.
 //!
-//! Interruptible: `to_socket_addrs` blocks the thread that calls it, and
-//! a blocking syscall inside a poll cannot be pre-empted, so a `select!`
-//! racing a cancel token against a resolve written that way never gets
-//! to poll its cancel branch at all. Running it on the blocking pool is
-//! what makes the await point real.
+//! Interruptible: `to_socket_addrs` blocks the calling thread, and a
+//! blocking syscall inside a poll cannot be pre-empted, so a `select!`
+//! racing a cancel token against it never polls its cancel branch.
+//! Running it on the blocking pool makes the await point real.
 //!
 //! The timeout bounds the *wait*, not the syscall: nothing cancels a
 //! `getaddrinfo` once it has started, so a timed-out lookup keeps its
-//! pool thread until the platform resolver gives up. [`IN_FLIGHT`] is
-//! what bounds that, and it is why the lookup is spawned by hand rather
-//! than through `tokio::net::lookup_host`, which offers nowhere to hold
-//! the permit.
+//! pool thread until the platform resolver gives up. [`IN_FLIGHT`]
+//! bounds that, and it is why the lookup is spawned by hand rather than
+//! through `tokio::net::lookup_host`, which offers nowhere to hold the
+//! permit.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -41,20 +40,17 @@ pub(crate) const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ceiling on system-resolver calls in flight at once.
 ///
-/// Well above any legitimate demand — a session resolves one host at a
-/// time, and the hops within one open are sequential — and far below
-/// tokio's blocking pool, so a peer naming blackholed hosts cannot
-/// accumulate stuck threads until the pool itself is what starves. Once
-/// the permits are out a further resolve waits for one under the same
-/// [`RESOLVE_TIMEOUT`], which is the deliberate trade: a bounded refusal
-/// for that caller rather than an unbounded cost for the process.
+/// Well above legitimate demand (a session resolves one host at a time,
+/// and the hops within one open are sequential) and far below tokio's
+/// blocking pool, so a peer naming blackholed hosts cannot pile up stuck
+/// threads until the pool starves. Once the permits are out, a further
+/// resolve waits for one under the same [`RESOLVE_TIMEOUT`]: a bounded
+/// refusal for that caller rather than an unbounded cost for the process.
 static IN_FLIGHT: Semaphore = Semaphore::const_new(16);
 
-/// Lookups that have had to wait for a slot. A saturated pool is a
-/// process-wide condition rather than one caller's bad luck, and a
-/// queued resolve that then succeeds surfaces nothing at all — so the
-/// refusal naming the saturation is only half of it, and this is the
-/// half that shows the pressure before anything fails.
+/// Lookups that have had to wait for a slot. A queued resolve that then
+/// succeeds reports nothing, so this counter is what shows process-wide
+/// pressure before anything fails.
 static QUEUED: AtomicU64 = AtomicU64::new(0);
 
 /// Resolve `host:port`, or fail typed. Callers hold an async context;
@@ -83,10 +79,9 @@ where
     F: FnOnce() -> std::io::Result<Vec<SocketAddr>> + Send + 'static,
 {
     // Which half of the ceiling a timeout was spent in. Both refuse at
-    // the same deadline and they are different faults: one is the host's
-    // nameserver, the other is this process already holding every slot
-    // for lookups the platform has not given up on. A caller told only
-    // "no answer" would look at the wrong one.
+    // the same deadline but they are different faults: the host's
+    // nameserver, or this process already holding every slot for lookups
+    // the platform has not given up on.
     let queued = Arc::new(AtomicBool::new(false));
     let waiting = Arc::clone(&queued);
     let gated = async move {
@@ -94,10 +89,9 @@ where
             Ok(permit) => permit,
             Err(_) => {
                 waiting.store(true, Ordering::SeqCst);
-                // The first says the pool has started queueing and each
-                // later multiple says it has not stopped; every one of
-                // them would be a line per resolve under load, which is
-                // the condition being reported.
+                // Logged on the first queued lookup and every 64th after:
+                // a line per resolve would flood the log under exactly the
+                // load being reported.
                 let queued = QUEUED.fetch_add(1, Ordering::Relaxed) + 1;
                 if queued == 1 || queued.is_multiple_of(64) {
                     diag_log!(
@@ -146,13 +140,11 @@ where
 }
 
 /// The blocking lanes' form: same ceiling, driven on the shared I/O
-/// runtime. Every caller is an opener or media thread — a runtime worker
-/// would panic on the `block_on`, and none of them is one.
+/// runtime. Callers must be opener or media threads: a runtime worker
+/// would panic on the `block_on`.
 ///
-/// `resolve_vetted` is public, so that is a property of the callers
-/// rather than of this function, and it is checked here: a caller that
-/// vets a host from inside an async task would otherwise find out
-/// through tokio's own assertion in the field rather than a test's.
+/// `resolve_vetted` is public, so this is checked here: an async caller
+/// then fails in a test rather than on tokio's own assertion in the field.
 pub(crate) fn resolve_blocking(host: &str, port: u16) -> Result<Vec<SocketAddr>, IoError> {
     debug_assert!(
         tokio::runtime::Handle::try_current().is_err(),
@@ -176,14 +168,13 @@ mod tests {
     /// The property the cancel races upstream depend on: polling a
     /// resolve returns, so whatever the enclosing `select!` is racing it
     /// against gets polled too. A resolve that blocks its thread instead
-    /// completes on its first poll and the sibling branch never runs —
-    /// the `biased` order is what makes that distinguishable here.
+    /// completes on its first poll and the sibling branch never runs; the
+    /// `biased` order makes that distinguishable here.
     ///
-    /// The lookup is held until the sibling has run, so this rests on
-    /// the ordering rather than on one side being quicker than the
-    /// other: nothing here asks the host's resolver anything, and a
-    /// pool thread that gets in early cannot finish ahead of the branch
-    /// it is supposed to have yielded to.
+    /// The lookup is held until the sibling has run, so the row rests on
+    /// ordering rather than timing: nothing asks the host's resolver
+    /// anything, and a pool thread that starts early cannot finish ahead
+    /// of the branch it should have yielded to.
     #[test]
     fn a_resolve_yields_before_it_answers() {
         static GATE: Semaphore = Semaphore::const_new(1);
@@ -217,9 +208,9 @@ mod tests {
         });
     }
 
-    /// No permit, no lookup — and the wait for one is inside the same
-    /// ceiling, so a caller queued behind stuck lookups is refused
-    /// rather than parked.
+    /// No lookup starts without a permit, and the wait for one is inside
+    /// the same ceiling, so a caller queued behind stuck lookups is
+    /// refused rather than parked.
     #[test]
     fn a_resolve_without_a_permit_gives_up_under_the_same_ceiling() {
         static GATE: Semaphore = Semaphore::const_new(1);

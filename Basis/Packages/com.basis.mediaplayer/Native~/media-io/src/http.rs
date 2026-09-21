@@ -2,25 +2,26 @@
 //!
 //! Open resolves the host once, vets *every* returned address through the
 //! gate, and pins the connection to the vetted set (`resolve_to_addrs`)
-//! with Host/SNI carried by the URL — the resolve-then-reconnect TOCTOU
-//! is closed by construction. Redirects are handled manually so each
-//! hop re-runs the same vetting and re-pins, on every request and not
-//! only the first: a server may answer any ranged read with a redirect,
-//! and each read walks from the URL the caller opened rather than from
-//! wherever an earlier walk ended.
+//! with Host/SNI carried by the URL, which closes the resolve-then-reconnect
+//! TOCTOU by construction. Redirects are handled manually so each hop
+//! re-runs the same vetting and re-pins, on every request and not only the
+//! first: a server may answer any ranged read with a redirect, and each
+//! read walks from the URL the caller opened rather than from wherever an
+//! earlier walk ended.
 //!
-//! Reads on a range-capable server are chunked ranged requests under a
-//! per-request timeout, so a stalled link surfaces as a typed error rather
-//! than a silent hang; sequential reads ride one pooled connection, and a
-//! positioned read elsewhere costs one request. A server that answers the
-//! opening probe with a 200 has handed over the whole entity, so that
-//! response *is* the sequential stream (forward reads discard, backward
-//! reads restart) and the open costs one connection — which is all the
-//! origins that answer this way tend to have. No total timeout bounds
-//! that body, only the client's read timeout, so every request and every
-//! read races the session's [`CancelToken`] as well: the opener and demux
-//! threads this source runs on are both joined by a closing session, and a
-//! server that stops answering must hold neither of them.
+//! Reads on a range-capable server are chunked ranged requests, so a
+//! stalled link surfaces as a typed error rather than a silent hang;
+//! sequential reads ride one pooled connection, and a positioned read
+//! elsewhere costs one request. A server that answers the opening probe
+//! with a 200 has handed over the whole entity, so that response *is* the
+//! sequential stream (forward reads discard, backward reads restart) and
+//! the open costs one connection. Origins that answer this way often
+//! allow no more than one.
+//!
+//! No total timeout bounds a body, only the client's read timeout, so every
+//! request and every read also races the session's [`CancelToken`]: a
+//! closing session joins the opener and demux threads this source runs on,
+//! and a server that stops answering must hold neither of them.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -146,7 +147,7 @@ pub struct HttpSource {
     /// got and so drives the reads, while a server can answer 200 to a
     /// range request and still advertise `Accept-Ranges: bytes`.
     rangeable: bool,
-    /// Whether the response stated any length — the total, or just this
+    /// Whether the response stated any length, the total or just this
     /// body's. Chunked delivery with no length at all is the live shape.
     finite: bool,
     stream: Option<StreamState>,
@@ -325,10 +326,8 @@ impl HttpSource {
     }
 
     /// Whether this source reads as on-demand rather than a live edge:
-    /// finite and rangeable. A known total is deliberately not required —
-    /// that is a separate question from whether the source can be paced
-    /// and seeked, and demanding one misclassifies servers that serve
-    /// ranges without stating a total.
+    /// finite and rangeable. A known total is not required: demanding one
+    /// would misclassify servers that serve ranges without stating a total.
     pub fn is_seekable(&self) -> bool {
         self.finite && self.rangeable
     }
@@ -412,10 +411,9 @@ impl ByteSource for HttpSource {
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, SourceError> {
-        // A caller that asked for nothing gets nothing. `serve` copies zero
-        // bytes and reports it as a spent chunk, so the loop below would
-        // replace the chunk it is still holding — losing its unread
-        // remainder — and go on pulling until the body ends.
+        // `serve` reports a zero-byte copy as a spent chunk, so without this
+        // the loop below would replace the chunk it is still holding, lose
+        // its unread remainder and go on pulling until the body ends.
         if buf.is_empty() {
             return Ok(0);
         }
@@ -447,12 +445,10 @@ impl ByteSource for HttpSource {
 
             let stream = self.stream.as_mut().expect("stream present after reopen");
             // A failed read retires the response with it. Left installed,
-            // it stays usable to the check above, and a later read at the
-            // same position polls a `chunk()` future that was dropped
-            // mid-poll on the way out. Nothing reaches that today because
-            // the session's cancel token latches, so every later call
-            // resolves the cancel branch first — which makes this path
-            // safe by the token's behaviour rather than by its own state.
+            // it would pass the check above, and a later read at the same
+            // position would poll a `chunk()` future that was dropped
+            // mid-poll. The latching cancel token would also prevent that,
+            // but this path should not depend on it.
             let n = match stream.read(&cancel, buf) {
                 Ok(n) => n,
                 Err(e) => {
