@@ -36,20 +36,25 @@ if command -v ffprobe >/dev/null 2>&1; then
 else
     echo "SKIPPED: conformance — ffprobe not on PATH"
 fi
-# Software decode: rav1d and Opus through the whole headless pipeline, which
-# any host can run, GPU or not.
-echo "== software decode (AV1+Opus headless)"
+# Software decode: AV1 and Opus through the whole engine, no GPU needed.
+echo "== software decode (AV1 + Opus)"
 cargo run -q -p bm-probe -- play fixtures/mkv/av1-opus.webm --duration 8
-# Impairment: the worst recorded network-delay profile replayed through the
-# whole engine over a fixture paced at 1x, graded against the buffer sizing
-# model. Kept short here; TESTING.md has the full-length runs. The fixture is
-# H.264 and AAC, so a host without those decoders skips it.
-if cargo run -q -p bm-probe -- caps --compact | grep -q '"h264"'; then
-    echo "== impairment (phase-0 replay)"
+# The next two play H.264 and AAC fixtures, so a host without those decoders
+# skips them.
+caps=$(cargo run -q -p bm-probe -- caps --compact)
+if echo "$caps" | grep -q '"h264"' && echo "$caps" | grep -q '"aac"'; then
+    # Impairment: a recorded bad-network profile replayed through the engine
+    # over a fixture paced at 1x, graded against the buffer sizing model.
+    # Kept short here; TESTING.md has the full-length runs.
+    echo "== impairment (recorded network delay)"
     cargo run -q -p bm-probe -- impair fixtures/h264-aac-320x180-30s.ts \
         --profile ts-rtt300-loss005 --duration 25 --depth-ms 3000
+    # Split source: video off one file, audio off another, one session.
+    echo "== split source (two legs, one session)"
+    cargo run -q -p bm-probe -- play fixtures/split/h264-640x360-30fps-video.mp4 \
+        --audio-url fixtures/split/aac-48k-stereo-audio.m4a --duration 9
 else
-    echo "SKIPPED: impairment — no H.264 decode on this platform"
+    echo "SKIPPED: impairment and split source — no H.264 or AAC decode on this platform"
 fi
 if [ "${1:-}" = "--fuzz" ]; then
     echo "== cargo fuzz build"

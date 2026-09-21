@@ -44,9 +44,9 @@ after that it takes a few minutes.
 | `cargo deny` | Licences, security advisories, banned crates and crate sources, as set in `deny.toml` | network access |
 | `cargo vet` | Every dependency is audited or exempted in `supply-chain/` | network access |
 | Conformance | Each MP4 and TS fixture demuxes to exactly what ffprobe reads from it | `ffprobe` |
-| Software decode (Linux only) | AV1 and Opus play through the whole engine without a GPU | |
-| Impairment | A recorded bad-network profile replayed through the engine at 1x; playback has to keep going within the buffer model | H.264 and AAC decoders, so Linux skips it |
-| Split source (Windows only) | Video and audio from two files play as one session | |
+| Software decode | AV1 and Opus play through the whole engine without a GPU | |
+| Impairment | A recorded bad-network profile replayed through the engine at 1x; playback has to keep going within the buffer model | H.264 and AAC decoders, so Linux skips it today |
+| Split source | Video and audio from two files play as one session | H.264 and AAC decoders, so Linux skips it today |
 
 **A step whose requirement is missing prints `SKIPPED:` in yellow and the run
 still ends green**, so check for those lines before trusting a pass.

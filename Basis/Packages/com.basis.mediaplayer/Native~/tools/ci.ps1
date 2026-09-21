@@ -69,16 +69,18 @@ if (Get-Command ffprobe -ErrorAction SilentlyContinue) {
 } else {
     Write-Host "SKIPPED: conformance — ffprobe not on PATH" -ForegroundColor Yellow
 }
-# Impairment: the worst recorded network-delay profile replayed through the
-# whole engine over a fixture paced at 1x, graded against the buffer sizing
-# model. Kept short here; TESTING.md has the full-length runs.
-Step "impairment (phase-0 replay)" {
+# Software decode: AV1 and Opus through the whole engine, no GPU needed.
+Step "software decode (AV1 + Opus)" {
+    cargo run -q -p bm-probe -- play fixtures/mkv/av1-opus.webm --duration 8
+}
+# Impairment: a recorded bad-network profile replayed through the engine
+# over a fixture paced at 1x, graded against the buffer sizing model.
+# Kept short here; TESTING.md has the full-length runs.
+Step "impairment (recorded network delay)" {
     cargo run -q -p bm-probe -- impair fixtures/h264-aac-320x180-30s.ts `
         --profile ts-rtt300-loss005 --duration 25 --depth-ms 3000
 }
-# A split pair through the whole engine: video off one source, audio off
-# another, both metered by the one Bank. The unit rows pin the pieces; this
-# is the lane end to end.
+# Split source: video off one file, audio off another, one session.
 Step "split source (two legs, one session)" {
     cargo run -q -p bm-probe -- play fixtures/split/h264-640x360-30fps-video.mp4 `
         --audio-url fixtures/split/aac-48k-stereo-audio.m4a --duration 9
