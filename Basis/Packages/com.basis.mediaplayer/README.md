@@ -498,7 +498,7 @@ appears only when there is one. Pick a player to get:
    delivered, position against real time) to `BasisMediaFrames.csv` in the
    app's persistent data folder.
    **Engine capture** under **Advanced** on the player writes the engine's own
-   side. `Native~/TESTING.md` says what each column means and what healthy
+   side. `Native~/DIAGNOSTICS.md` says what each column means and what healthy
    values look like.
 
 ## Extending the player
