@@ -88,7 +88,7 @@ pub fn sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
         g.ue();
         g.ue();
         g.u(1);
-        if g.u(1) == 1 { /* scaling matrix — skip (uncommon in SPS) */ }
+        if g.u(1) == 1 { /* scaling lists are not walked (uncommon in an SPS) */ }
     }
     g.ue(); // log2_max_frame_num_minus4
     let poc_type = g.ue();

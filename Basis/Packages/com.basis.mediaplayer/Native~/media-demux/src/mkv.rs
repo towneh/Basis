@@ -1,8 +1,8 @@
 //! Matroska/WebM demuxer: `matroska-demuxer` walks the EBML;
 //! this wrapper maps tracks onto the codec table, converts stored
 //! H.264 to Annex B, and serves the pull model. Codecs without a decode
-//! adapter still announce — refusal is the decode layer's typed call,
-//! not a demux failure.
+//! adapter still announce: refusal is the decode layer's typed call, not a
+//! demux failure.
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// `Read + Seek` over a [`ByteSource`] for the EBML walker, which reads
-/// lazily — media data is only pulled as frames are requested.
+/// lazily: media data is only pulled as frames are requested.
 ///
 /// The walker retries reads while chasing seek-head positions, so hostile
 /// layouts can loop it forever (fuzz-found: ~6M reads/s on a 141-byte
@@ -35,8 +35,8 @@ struct SourceIo {
     eof_reads: u32,
     /// Two-block read cache: the EBML walk issues thousands of tiny reads
     /// and revisits regions across SeekHead/Cues jumps; over a ranged HTTP
-    /// source every position jump otherwise reopens the connection (a TLS
-    /// round trip each — measured ~5 s of open time on a remote WebM).
+    /// source every position jump otherwise reopens the connection, a TLS
+    /// round trip each (measured at ~5 s of open time on a remote WebM).
     /// Two blocks cover the walk-here-jump-there pattern.
     cache: [(u64, Vec<u8>); 2],
 }
@@ -46,7 +46,7 @@ const CACHE_BLOCK: u64 = 256 * 1024;
 
 /// Bounds on the two EBML *float* fields the walker forwards unfiltered.
 /// It rejects negatives only, and `NaN < 0.0` and `INFINITY < 0.0` are
-/// both false, so NaN and +Inf reach the casts here — where `as` saturates
+/// both false, so NaN and +Inf reach the casts here, where `as` saturates
 /// (NaN to 0, +Inf to the type maximum) instead of failing. Both limits
 /// sit above anything the codec table can carry.
 const MAX_DURATION_US: f64 = 100.0 * 3600.0 * 1_000_000.0;
@@ -301,14 +301,12 @@ impl MkvDemuxer {
             .filter(|entry| entry.track_type() == TrackType::Audio)
             .filter_map(|entry| {
                 let codec = map_audio_codec(entry.codec_id())?;
-                // A track with no Audio element at all states a geometry
-                // that is unknown rather than implausible, and zero is how
-                // that is said: the engine reads a zero rate as unknown too
-                // and declines to extrapolate a playhead from it rather
-                // than dividing by it, so the track still plays on what its
-                // decoder reports for itself. Refusing it the way an
-                // implausible geometry is refused would drop a track that
-                // plays.
+                // A track with no Audio element at all has an unknown
+                // geometry rather than an implausible one, announced as zero.
+                // The engine reads a zero rate as unknown and declines to
+                // extrapolate a playhead from it, so the track still plays on
+                // what its decoder reports. Refusing it like an implausible
+                // geometry would drop a track that plays.
                 let (sample_rate, channels) = match entry.audio() {
                     Some(audio) => audio_geometry(audio)?,
                     None => (0, 0),
@@ -480,8 +478,8 @@ impl MkvDemuxer {
         if let Some(video) = &self.video
             && self.frame.track == video.number
         {
-            // Simple blocks carry the keyframe flag; block groups do not —
-            // treat unflagged video frames as non-sync.
+            // Simple blocks carry the keyframe flag; block groups do not, so
+            // unflagged video frames are treated as non-sync.
             let key = self.frame.is_keyframe.unwrap_or(false);
             let data = match &video.avc {
                 Some(avc) => avc::to_annex_b(

@@ -66,7 +66,7 @@ impl SegmentIndex {
     }
 }
 
-/// Parse a `sidx` body — the box contents past its eight-byte header —
+/// Parse a `sidx` body (the box contents past its eight-byte header)
 /// whose last byte is at `after_box - 1`.
 pub(crate) fn parse(body: &[u8], after_box: u64) -> Result<SegmentIndex, &'static str> {
     let Some(&version) = body.first() else {

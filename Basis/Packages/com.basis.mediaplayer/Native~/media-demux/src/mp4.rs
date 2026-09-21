@@ -158,11 +158,7 @@ impl Mp4Demuxer {
                 "progressive MP4 needs a source with a known length",
             ))?;
 
-        // `moov` first, and nothing past it: whether this file has
-        // fragments at all is stated there, so the box after it answers
-        // nothing and, on a file whose `moov` is megabytes of sample
-        // table, costs a cache block fetched from the middle of the
-        // media to read eight bytes.
+        // `moov` first, and nothing past it (see `scan_prefix`).
         let mut notes = Vec::new();
         let mut budget = limits.max_metadata_bytes;
         let head = {
@@ -268,7 +264,7 @@ impl Mp4Demuxer {
 
     /// Conformance/oracle mode: emit video payloads exactly as stored
     /// (length-prefixed), skipping Annex-B conversion, so payload hashes
-    /// compare directly with ffprobe's per-packet data hashes — keyframes
+    /// compare directly with ffprobe's per-packet data hashes, keyframes
     /// included. The conversion itself is covered by the decode tests.
     pub fn set_emit_raw_video(&mut self, raw: bool) {
         self.emit_raw_video = raw;
@@ -509,9 +505,10 @@ impl Mp4Demuxer {
             return None;
         }
         // The in-box platform decoders handle at most 6 explicitly
-        // signalled channels (the C player's discovered contract: wider
-        // layouts AV inside the MFT rather than erroring). PCE-defined
-        // layouts (chan_conf 0) leave the real width unknown: refused too.
+        // signalled channels; wider layouts fault with an access violation
+        // inside the Media Foundation decoder rather than returning an
+        // error. PCE-defined layouts (chan_conf 0) leave the real width
+        // unknown and are refused too.
         if spec.chan_conf < 1 || spec.chan_conf > 6 {
             push_note(&mut self.notes, || {
                 format!(
@@ -903,8 +900,8 @@ struct Prefix {
 }
 
 /// Walk the top-level boxes from `from`, parsing any segment index on
-/// the way, and stop at the media — or, with `stop_after_moov`, at the
-/// end of `moov`.
+/// the way, and stop at the media (or, with `stop_after_moov`, at the
+/// end of `moov`).
 ///
 /// Stopping there is what keeps a progressive file's open honest.
 /// Whether a file has fragments at all is stated inside `moov`, so
@@ -1015,9 +1012,9 @@ fn media_end(indexes: &[SegmentIndex], len: u64, src: &mut CachedSource) -> u64 
 /// paths on inconsistent sample tables as a typed error: hostile metadata
 /// is a refusal, not a session abort.
 ///
-/// `budget` is what the open has left and is spent, not merely read: one
-/// file can be parsed twice here — a prefix that turns out to describe
-/// only part of itself is followed by a walk of the whole — and the
+/// `budget` is what the open has left and is spent, not merely read. One
+/// file can be parsed twice here (a prefix that turns out to describe
+/// only part of itself is followed by a walk of the whole), and the
 /// second parse continues the bound rather than restarting it.
 fn read_metadata(
     src: &mut CachedSource,
@@ -1156,7 +1153,7 @@ fn rescale(value: u64, from: u64, to: u64) -> u64 {
 }
 
 /// What a picker needs to show for one audio track, read straight from
-/// the container rather than from a bound decoder — a track that is never
+/// the container rather than from a bound decoder: a track that is never
 /// selected still has to be describable.
 fn describe_audio(mp4: &re_mp4::Mp4, track: &re_mp4::Track, id: TrackId) -> AudioTrackInfo {
     let trak = track.trak(mp4);
@@ -1281,8 +1278,8 @@ impl Demuxer for Mp4Demuxer {
             ..
         }) = &mut self.video
         {
-            // Last sync sample at or before the target (by decode order —
-            // sync samples present at their decode time).
+            // Last sync sample at or before the target, by decode order
+            // (sync samples present at their decode time).
             let key = landing(all, target).unwrap_or(0);
             *next = key;
             all.get(key).map(|s| s.pts).unwrap_or(target)
@@ -1372,8 +1369,8 @@ mod tests {
     /// A 64-bit size is stated from the start of the box and reported
     /// eight bytes short of it, so a box overrunning the file by exactly
     /// those eight bytes is the one a length check placed on the
-    /// reported size lets through — and the walk then steps past the end
-    /// and measures what is left of the file as a negative number.
+    /// reported size lets through. The walk then steps past the end and
+    /// measures what is left of the file as a negative number.
     #[test]
     fn a_sixty_four_bit_box_is_bounded_by_where_it_ends() {
         let mut bytes = header(16, b"ftyp");
@@ -1604,9 +1601,9 @@ mod tests {
         }
     }
 
-    /// One file can be parsed twice at open — a prefix that turns out to
-    /// describe only part of itself is followed by a walk of the whole —
-    /// and both come out of the one budget, or the cap on what an open
+    /// One file can be parsed twice at open (a prefix that turns out to
+    /// describe only part of itself is followed by a walk of the whole).
+    /// Both must come out of the one budget, or the cap on what an open
     /// may fetch is worth double what it says.
     #[test]
     fn a_second_parse_continues_the_budget_rather_than_restarting_it() {

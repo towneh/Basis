@@ -1,6 +1,6 @@
 //! Fuzz the raw MP3 demuxer: ID3 skip, sync hunting, frame-length
 //! arithmetic and the Xing/Info screen must hold up under arbitrary
-//! bytes — typed errors only, no panics, no unbounded loops.
+//! bytes: typed errors only, no panics, no unbounded loops.
 
 #![no_main]
 

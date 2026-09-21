@@ -1,9 +1,8 @@
 //! Fuzz the MPEG-TS demuxer end to end: arbitrary bytes must produce typed
 //! errors or a walkable event stream, never a panic or an out-of-bounds
-//! read. The seed corpus carries the C player's four pinned fuzz crashes
-//! (PAT/PMT section-length OOB, SPS bit-position overflow, SPS crop
-//! integer overflow, SPS ue(v) shift UB) so the ported guards stay
-//! regression-tested here too.
+//! read. The seed corpus carries four known crash inputs (PAT/PMT
+//! section-length OOB, SPS bit-position overflow, SPS crop integer
+//! overflow, SPS ue(v) shift UB) so their guards stay regression-tested.
 
 #![no_main]
 

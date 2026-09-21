@@ -1,9 +1,8 @@
 //! Elementary-stream bitstream parsing shared by the demux layer: Annex-B
 //! NAL walking, H.264 SPS dimensions, keyframe detection, ADTS headers and
-//! the AudioSpecificConfig. Ported from the C player's
-//! `basis_bitstream`, whose guards were paid for by fuzzing — the ue(v)
-//! shift cap, the frozen bit reader past end-of-data, and the i64 crop
-//! arithmetic all correspond to pinned crash testcases.
+//! the AudioSpecificConfig. The ue(v) shift cap, the bit reader that
+//! freezes past end-of-data and the i64 crop arithmetic each guard a crash
+//! that fuzzing found.
 //!
 //! Everything here parses attacker-controlled bytes.
 

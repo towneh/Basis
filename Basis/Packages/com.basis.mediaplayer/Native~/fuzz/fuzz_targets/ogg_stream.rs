@@ -1,6 +1,6 @@
 //! Fuzz the Ogg Opus demuxer end to end: the `ogg` crate's page walk plus
 //! our OpusHead/OpusTags handling and TOC duration derivation. Arbitrary
-//! bytes must produce typed errors or a walkable stream — no panics,
+//! bytes must produce typed errors or a walkable stream, with no panics,
 //! out-of-bounds reads or unbounded loops (the SourceIo budgets bound the
 //! walk).
 

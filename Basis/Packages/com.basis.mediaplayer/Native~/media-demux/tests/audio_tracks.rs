@@ -13,9 +13,8 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!("{path}{name}")).expect("fixture readable")
 }
 
-/// The audio track the demuxer actually bound, identified by the pts of
-/// its first AU's payload length — enough to tell two tracks apart when
-/// combined with the announced track id.
+/// The audio track the demuxer actually bound, as its announced track id
+/// and channel count.
 fn bound_track(name: &str, options: &DemuxOptions) -> (u32, u32) {
     let mut demuxer = open_auto_with(
         Box::new(MemSource(fixture(name))),
@@ -132,7 +131,7 @@ fn an_out_of_range_request_falls_back_to_the_first_track() {
 
 /// The OBS shape: a recording with the mix, the microphone and the desktop
 /// on separate tracks, none of them tagged with a language or a name. The
-/// picker still has to offer all three and bind the one asked for — so the
+/// picker still has to offer all three and bind the one asked for, so the
 /// enumeration cannot depend on metadata being present, and the labelling
 /// above it cannot depend on language alone to tell rows apart.
 #[test]

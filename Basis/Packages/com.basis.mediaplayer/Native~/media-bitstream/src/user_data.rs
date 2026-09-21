@@ -1,9 +1,9 @@
 //! SEI `user_data_unregistered` (payload type 5) extraction: opaque bytes
 //! an encoder or a relay stamped into the video, surfaced with the AU's
 //! PTS and left unparsed. The 16-byte UUID that opens every such message
-//! is split off so a consumer can pick its own out — x264 stamps its build
-//! string through the same payload type on every keyframe, so anything
-//! reading this lane filters on the UUID rather than on the type.
+//! is split off so a consumer can pick its own out. x264 stamps its build
+//! string through the same payload type on every keyframe, so a reader
+//! filters on the UUID rather than on the type.
 
 use crate::sei::scan_au_sei;
 
@@ -33,7 +33,7 @@ impl UserDataScanner {
         Self::default()
     }
 
-    /// Forget the timeline — for seeks, discontinuities and reconnects.
+    /// Forget the timeline, on a seek, discontinuity or reconnect.
     pub fn reset(&mut self) {
         self.last_pts = None;
     }

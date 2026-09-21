@@ -1,6 +1,6 @@
 //! Ogg Opus demuxer: the `ogg` crate walks pages; this wrapper
 //! follows the OpusHead stream, derives per-packet durations from the TOC
-//! byte (exact for valid streams — granule positions only re-state it) and
+//! byte (exact for valid streams; granule positions only re-state it) and
 //! shifts the timeline by pre-skip so priming samples carry negative pts,
 //! which the engine's origin drop consumes.
 
@@ -132,9 +132,8 @@ impl OggOpusDemuxer {
         let len = src.size().map_err(DemuxError::Source)?;
         // Ogg carries no index and no duration field: the length is the
         // last page's granule position. Read it from the tail before the
-        // reader takes the source, the way the C player does — scanning
-        // backwards for the final page header rather than walking the
-        // whole stream.
+        // reader takes the source, scanning backwards for the final page
+        // header rather than walking the whole stream.
         let last_granule = match len {
             Some(total) if total > 0 => last_page_granule(src.as_mut(), total)?,
             _ => None,
@@ -352,10 +351,9 @@ impl Demuxer for OggOpusDemuxer {
         self.generation = generation;
         // The bisection lands on a page boundary at or before the target,
         // and a page can hold many packets, so the timeline is re-anchored
-        // on the request rather than on the page's granule — which would
-        // report the end of the page's last packet, not the start of its
-        // first. Approximate, as seeking an indexless container is in
-        // every player.
+        // on the request rather than on the page's granule, which states
+        // the end of the page's last packet, not the start of its first.
+        // Approximate, as seeking an indexless container is in every player.
         self.samples_out = target.as_micros().max(0).saturating_mul(48_000) / 1_000_000;
         self.ended = false;
         Ok(MediaTime::from_micros(
@@ -435,8 +433,8 @@ mod tests {
     }
 
     /// The picture comment sits behind a vendor string and any number of
-    /// ordinary comments, each length-prefixed — the walk has to step over
-    /// all of them to reach it.
+    /// ordinary comments, each length-prefixed, and the walk has to step
+    /// over all of them to reach it.
     #[test]
     fn art_is_found_behind_the_other_comments() {
         let encoded = base64_encode(&picture(b"pngbytes"));

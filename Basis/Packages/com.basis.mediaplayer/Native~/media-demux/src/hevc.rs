@@ -1,7 +1,7 @@
 //! HEVC `hvcC` decoder-configuration parsing (ISO 14496-15 §8.3.3.1),
 //! reusing the AVC conversion machinery: the parameter sets land in one
 //! flat list ([`AvcConfig::sps`], VPS/SPS/PPS in stored order, `pps`
-//! empty) because length-prefixed → Annex-B conversion is identical —
+//! empty) because length-prefixed → Annex-B conversion is identical:
 //! prepend the sets on keyframes, walk NALs by the stated length size.
 
 use crate::DemuxError;
@@ -18,7 +18,7 @@ pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<AvcConfig, DemuxError> {
     let mut param_sets = Vec::new();
     for _ in 0..num_arrays {
         // array_completeness(1) + reserved(1) + NAL_unit_type(6), then the
-        // NAL count; the type byte is not needed — sets are prepended in
+        // NAL count. The type byte is not needed: sets are prepended in
         // stored order (VPS, SPS, PPS per the record's required layout).
         pos = pos.checked_add(1).ok_or_else(err)?;
         let count = u16::from_be_bytes([

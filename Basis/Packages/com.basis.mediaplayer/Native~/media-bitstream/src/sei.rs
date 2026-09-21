@@ -1,13 +1,11 @@
-//! SEI message walking (shared by captions today and the
-//! type-5 user-data lane later).
+//! SEI message walking, shared by the caption and type-5 user-data scanners.
 //!
-//! A caption SEI arrives inside a video access unit as a NAL (H.264 type 6,
+//! An SEI arrives inside a video access unit as a NAL (H.264 type 6,
 //! H.265 types 39/40) whose RBSP holds a sequence of `(payload_type,
 //! payload_size, payload)` messages, each length prefix coded as a run of
-//! 0xFF bytes plus a terminator byte. Both accumulators are u64: each run is
-//! bounded only by the NAL length, so a narrow accumulator overflows on a
-//! hostile run of 0xFF (a pinned C fuzz lesson — the C decoder's int
-//! overflow there was UB).
+//! 0xFF bytes plus a terminator byte. Both accumulators are u64: a run is
+//! bounded only by the NAL length, and a narrower accumulator overflows on
+//! a hostile run of 0xFF.
 
 use crate::annexb::{h264_nal_type, h265_nal_type, nal_units};
 

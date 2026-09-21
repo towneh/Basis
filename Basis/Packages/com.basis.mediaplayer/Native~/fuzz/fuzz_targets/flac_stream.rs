@@ -1,7 +1,7 @@
 //! Fuzz the raw FLAC demuxer: arbitrary bytes must produce typed errors
 //! or a walkable event stream, never a panic, out-of-bounds read or
 //! unbounded loop. Covers the metadata walk, frame-header validation
-//! (CRC-8), the frame-boundary scan and the seek bisection — including
+//! (CRC-8), the frame-boundary scan and the seek bisection, including
 //! the SEEKTABLE points it takes its bounds from.
 
 #![no_main]
@@ -21,10 +21,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     // A seek derived from the input drives the bisection before the walk.
-    // The tail is what the fuzzer can vary freely — the head is the magic
-    // and STREAMINFO, and a mutation there just fails the open — and the
-    // fold keeps the target inside a range a fixture-sized input reaches,
-    // so the bisection runs rather than clamping to the end every time.
+    // It is read from the tail, which the fuzzer can vary freely (the head
+    // is the magic and STREAMINFO, where a mutation just fails the open),
+    // and folded into a range a fixture-sized input reaches so the
+    // bisection runs rather than clamping to the end every time.
     let mut key = [0u8; 4];
     for (slot, byte) in key.iter_mut().zip(data.iter().rev()) {
         *slot = *byte;

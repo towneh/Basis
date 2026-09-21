@@ -1,6 +1,6 @@
-//! Fuzz the SEI walker and what sits on it — the CEA-608 decoder and the
-//! user-data scanner: arbitrary bytes treated as an Annex-B access unit
-//! must never panic, overread or hang — the scanners run on the demux
+//! Fuzz the SEI walker and what sits on it (the CEA-608 decoder and the
+//! user-data scanner). Arbitrary bytes treated as an Annex-B access unit
+//! must never panic, overread or hang: the scanners run on the demux
 //! thread against attacker-controlled video AUs on every transport.
 //! Both NAL layouts are driven, plus a PTS sequence that exercises the
 //! backwards-jump epoch reset.

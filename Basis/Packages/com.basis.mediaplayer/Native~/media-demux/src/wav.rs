@@ -6,7 +6,7 @@
 //!
 //! Supported: `WAVE_FORMAT_PCM` and `WAVE_FORMAT_EXTENSIBLE` wrapping PCM,
 //! 16- or 24-bit integer, 1-8 channels, 8-96 kHz. Anything else refuses
-//! typed — a WAV is audio-only, so unplayable audio is an unplayable file.
+//! typed: a WAV is audio-only, so unplayable audio is an unplayable file.
 
 use media_clock::{Generation, MediaTime};
 
@@ -60,8 +60,8 @@ impl WavDemuxer {
         generation: Generation,
     ) -> Result<Self, DemuxError> {
         // A size answer is also the seek gate: the sequential live source
-        // serves forward reads only, and reporting a duration we cannot
-        // land on would put a seek bar on a stream that refuses it.
+        // serves forward reads only, and a duration would put a seek bar on
+        // a stream that refuses it.
         let seekable = src.size().map_err(DemuxError::Source)?.is_some();
         let mut reader = SeqReader::new(src);
 
@@ -208,7 +208,7 @@ impl Demuxer for WavDemuxer {
             return Ok(StreamEvent::Eos(EosReason::Natural));
         }
 
-        // ~20 ms of whole frames per AU, as the C lane serves it.
+        // ~20 ms of whole frames per AU.
         let chunk_frames = (self.sample_rate as usize / 50).max(1);
         let mut want = chunk_frames * self.frame_bytes;
         if let Some(len) = self.data_len {

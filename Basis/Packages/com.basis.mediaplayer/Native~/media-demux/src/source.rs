@@ -207,7 +207,7 @@ impl SeqReader {
 
     /// Move to an absolute position, discarding the window. Unlike
     /// [`Self::seek_to`] this accepts backwards jumps of any distance, so
-    /// the source itself decides whether it can serve one — a sequential
+    /// the source itself decides whether it can serve one: a sequential
     /// live source fails the following read rather than here.
     pub fn reposition(&mut self, pos: u64) {
         self.buf.clear();
@@ -216,8 +216,8 @@ impl SeqReader {
         self.eof = false;
     }
 
-    /// Jump forward to an absolute position (tag skips); backwards jumps
-    /// within the buffer are honoured, before it refused.
+    /// Jump forward to an absolute position (tag skips). A backwards jump
+    /// is honoured within the buffer and refused before it.
     pub fn seek_to(&mut self, pos: u64) -> Result<(), SourceError> {
         if pos >= self.start && pos <= self.start + self.buf.len() as u64 {
             self.off = (pos - self.start) as usize;

@@ -1,9 +1,9 @@
 //! Fuzz the streaming MP4 demuxer end to end: arbitrary bytes must produce
 //! typed errors or a walkable event stream, never a panic escaping the
-//! demuxer or an out-of-bounds read. (The open path deliberately contains
-//! re_mp4's own panic paths as typed errors; everything after open — sample
-//! walking, Annex-B conversion, seek — runs unfenced and is what this
-//! target actually exercises.)
+//! demuxer or an out-of-bounds read. The open path fences re_mp4's own
+//! panics into typed errors; everything after open (sample walking,
+//! Annex-B conversion, seek) runs unfenced and is what this target
+//! exercises.
 //!
 //! The seeds include a fragmented file carrying a segment index, which is
 //! the layout that opens from the index and reads a movie fragment per

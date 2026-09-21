@@ -1,7 +1,7 @@
-//! Fuzz-found slow inputs must demux (or refuse) quickly. The mp4_stream
-//! target's first Linux campaign surfaced inputs that ran past the
-//! libFuzzer timeout; each pinned input here has to complete inside a
-//! wall-clock budget that is generous for CI but far below pathological.
+//! Fuzz-found slow inputs must demux (or refuse) quickly. Each pinned input
+//! here once ran past the libFuzzer timeout in the mp4_stream target, and
+//! has to complete inside a wall-clock budget that is generous for CI but
+//! far below pathological.
 
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ fn walk(bytes: Vec<u8>) -> Duration {
 /// Fuzz-found re_mp4 panic paths (u64 underflow on inconsistent mdhd
 /// durations and kin): the open boundary's catch_unwind fence must turn
 /// each into a typed error on the shipped panic=unwind build. These stay
-/// out of the fuzz seed corpus — under panic=abort they read as crashes
+/// out of the fuzz seed corpus: under panic=abort they read as crashes
 /// and would kill every campaign at startup (see fuzz/README.md).
 #[test]
 fn pinned_re_mp4_panics_are_contained() {
@@ -104,7 +104,7 @@ fn pinned_slow_mkv_inputs_stay_fast() {
 /// Fuzz-found matroska-demuxer panic paths (block-timestamp overflow in
 /// `parse_timestamp` on hostile blocks): the catch_unwind fences must
 /// turn each into a typed error on the shipped panic=unwind build. Kept
-/// out of the fuzz seed corpus — under panic=abort they read as crashes
+/// out of the fuzz seed corpus: under panic=abort they read as crashes
 /// and would kill campaigns at startup (see fuzz/README.md).
 #[test]
 fn pinned_matroska_panics_are_contained() {

@@ -1,5 +1,4 @@
-//! In-band CEA-608 closed-caption extraction, ported from the C player's
-//! `basis_caption.c` (the parity spec).
+//! In-band CEA-608 closed-caption extraction.
 //!
 //! Captions ride inside the coded video as SEI user-data (ATSC A/53
 //! `user_data_registered_itu_t_t35`, "GA94"), so one scan of each Annex-B
@@ -8,7 +7,7 @@
 //! triples, runs the CEA-608 field-1 caption decoder, and reports a cue
 //! (the full displayed text) whenever displayed memory changed.
 //!
-//! Slice 1 decodes CEA-608 field 1 (CC1) to plain text. CEA-708 DTVCC
+//! Only CEA-608 field 1 (CC1) is decoded, to plain text. CEA-708 DTVCC
 //! (cc_type 2/3) is parsed out but not decoded.
 
 use crate::sei::scan_au_sei;
@@ -250,7 +249,7 @@ impl Cea608 {
         }
 
         if (0x18..=0x1F).contains(&b0) {
-            return false; // channel 2 — slice 1 decodes CC1 only
+            return false; // channel 2; only CC1 is decoded
         }
 
         if is_ctrl {
@@ -397,9 +396,9 @@ impl CaptionScanner {
         }
     }
 
-    /// Drop all decoder state and pending text — for seeks, discontinuities
-    /// and reconnects, where captions from the old timeline must not
-    /// survive.
+    /// Drop all decoder state and pending text. Used on seeks,
+    /// discontinuities and reconnects, where captions from the old timeline
+    /// must not survive.
     pub fn reset(&mut self) {
         self.dec = Cea608::new();
         self.last_pts = None;
@@ -430,7 +429,7 @@ impl CaptionScanner {
             if payload_type == 4 {
                 a53_cc_triples(payload, |cc_type, b0, b1| {
                     // cc_type 0 = CEA-608 field 1; 1 = field 2, 2/3 =
-                    // CEA-708 DTVCC — not decoded in slice 1.
+                    // CEA-708 DTVCC. Only field 1 is decoded.
                     if cc_type == 0 {
                         changed |= self.dec.pair(b0, b1);
                     }
@@ -456,7 +455,7 @@ mod tests {
     use super::*;
 
     /// Wrap 608 byte pairs as a full Annex-B AU carrying one A/53 caption
-    /// SEI (odd parity bits left zero — the decoder masks to 7 bits).
+    /// SEI (odd parity bits left zero; the decoder masks to 7 bits).
     fn au_with_pairs(pairs: &[(u8, u8)]) -> Vec<u8> {
         let mut cc = vec![0x40 | pairs.len() as u8, 0x00];
         for &(b0, b1) in pairs {

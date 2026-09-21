@@ -1,6 +1,6 @@
 //! Demux layer: the typed `StreamEvent` path, the pull-based `Demuxer`
-//! trait, the byte-source seam, the streaming MP4 demuxer and the
-//! MPEG-TS demuxer (ported from the C player).
+//! trait, the byte-source seam, and one demuxer per supported container
+//! with [`open_auto`] choosing between them by sniffing.
 
 #![forbid(unsafe_code)]
 
@@ -100,9 +100,9 @@ pub fn sniff_container(head: &[u8]) -> Option<ContainerKind> {
     if head.starts_with(b"OggS") {
         return Some(ContainerKind::Ogg);
     }
-    // ID3v2 leads MP3 files in the wild (rarely ADTS; the demuxer refuses
-    // those with a clear message rather than the sniff guessing blind —
-    // tags routinely exceed any sniffable head).
+    // ID3v2 leads MP3 files in the wild, and occasionally ADTS. Tags
+    // routinely exceed any sniffable head, so the sniff does not guess: the
+    // MP3 demuxer refuses an ADTS body with a clear message.
     if head.starts_with(b"ID3") {
         return Some(ContainerKind::Mp3);
     }

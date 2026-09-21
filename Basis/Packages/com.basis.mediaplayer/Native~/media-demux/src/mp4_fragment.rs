@@ -355,8 +355,8 @@ mod tests {
     }
 
     /// The timeline continues across a fragment that states no `tfdt`,
-    /// and a `tfdt` overrides wherever the cursor stood — which is what
-    /// makes a fragment reachable by a seek rather than only in order.
+    /// and a `tfdt` overrides wherever the cursor stood. That is what makes
+    /// a fragment reachable by a seek rather than only in order.
     #[test]
     fn a_fragment_without_a_base_time_continues_the_one_before_it() {
         let bytes = fixture("h264-aac-manyfrag.mp4");

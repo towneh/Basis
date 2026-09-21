@@ -7,7 +7,7 @@
 //! platform can decode itself.
 //!
 //! FLAC's `PICTURE` block and Ogg's `METADATA_BLOCK_PICTURE` comment are
-//! the same structure — the latter is the former in base64 — so one parser
+//! the same structure (the latter is the former in base64), so one parser
 //! serves both. ID3v2's `APIC` frame is its own shape.
 
 /// One embedded picture: the container's bytes and the MIME type it stated.
@@ -192,7 +192,7 @@ fn parse_apic(major: u8, frame: &[u8]) -> Option<(u32, Artwork)> {
     let kind = u32::from(*frame.get(at)?);
     let desc_at = at + 1;
     // UTF-16 descriptions terminate on a null *pair*, and only on an even
-    // boundary — a lone zero byte is half a character.
+    // boundary: a lone zero byte is half a character.
     let data_at = if encoding == 1 || encoding == 2 {
         let mut i = desc_at;
         loop {

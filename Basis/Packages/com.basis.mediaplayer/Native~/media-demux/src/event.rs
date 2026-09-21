@@ -1,6 +1,6 @@
-//! The one typed event path every demuxer emits. Everything
-//! downstream — Bank, decoders, metadata surface — consumes these; every
-//! event carries a generation so stale data cannot cross a seek boundary.
+//! The typed event path every demuxer emits, consumed by the Bank, the
+//! decoders and the metadata surface. Access units carry a generation so
+//! stale data cannot cross a seek boundary.
 
 use media_clock::{Generation, MediaTime};
 
@@ -36,9 +36,8 @@ pub enum Format {
         /// Codec initialisation data the decoder needs alongside the AU
         /// stream (AV1: the config OBUs from `av1C`, which hardware
         /// decoders want prepended to the first AU). Empty when the codec
-        /// carries its configuration in-band — H.264/HEVC parameter sets
-        /// are converted into the Annex-B stream itself, so they never
-        /// ride here.
+        /// carries its configuration in-band. H.264/HEVC parameter sets
+        /// are written into the Annex-B stream itself and never ride here.
         codec_private: Vec<u8>,
     },
     Audio {

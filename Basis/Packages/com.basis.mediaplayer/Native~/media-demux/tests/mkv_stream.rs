@@ -296,7 +296,7 @@ const SAMPLING_FREQUENCY: &[u8] = &[0xB5];
 const DURATION: &[u8] = &[0x44, 0x89];
 
 /// `f64 as u32` saturates, so an unfiltered NaN would announce 0 Hz and
-/// +Inf would announce `u32::MAX` — the value that sizes the playback
+/// +Inf would announce `u32::MAX`, the value that sizes the playback
 /// ring. Neither may reach the announce; the video track is unaffected.
 #[test]
 fn an_implausible_sampling_frequency_skips_the_audio_track() {
@@ -329,11 +329,10 @@ fn an_implausible_sampling_frequency_skips_the_audio_track() {
 #[test]
 fn an_implausible_sampling_frequency_leaves_the_picker_empty() {
     let demuxer = open_patched("h264-multiaudio.mkv", SAMPLING_FREQUENCY, f64::NAN);
-    // Empty is the claim the name makes, and asserting it is what makes
-    // the row mean something: `all` over the list holds vacuously once the
-    // list is empty, so the old shape passed without the filter having run.
-    // Unpatched the fixture offers a picker; patched, the implausible entry
-    // is filtered and the one usable track left is not a choice.
+    // Assert emptiness rather than `all` over the list, which holds
+    // vacuously on an empty list. Unpatched the fixture offers a picker;
+    // patched, the implausible entry is filtered and the one usable track
+    // left is not a choice.
     assert!(
         !open("h264-multiaudio.mkv").audio_tracks().is_empty(),
         "the fixture offers a picker before the patch"
@@ -345,8 +344,8 @@ fn an_implausible_sampling_frequency_leaves_the_picker_empty() {
     );
 }
 
-/// `f64 as i64` saturates NaN to 0 — which every "duration <= 0" liveness
-/// test reads as live — and +Inf to `i64::MAX`, a 292 000-year VOD.
+/// `f64 as i64` saturates NaN to 0, which every "duration <= 0" liveness
+/// test reads as live, and +Inf to `i64::MAX`, a 292 000-year VOD.
 /// Reporting no duration keeps "unknown" honest.
 #[test]
 fn an_implausible_duration_is_reported_as_none() {
@@ -368,7 +367,7 @@ fn an_implausible_duration_is_reported_as_none() {
 }
 
 /// Stated channels is a u64 upstream, so narrowing it to the engine's u32
-/// is lossy in its own right — 2^32 + 8 arrives as 8 — and it is the ring's
+/// is lossy in its own right (2^32 + 8 arrives as 8), and it is the ring's
 /// other sizing factor. Out of range refuses the track, as an out-of-range
 /// rate does.
 #[test]
@@ -424,7 +423,7 @@ fn an_implausible_channel_count_leaves_the_picker_empty() {
 
 /// The field is a float because some rates are not integers, so a
 /// near-miss must land on the rate the encoder meant rather than one
-/// below it — truncating 47 999.999… to 47 999 drifts all session.
+/// below it. Truncating 47 999.999… to 47 999 drifts all session.
 /// In range and finite stays accepted either way.
 #[test]
 fn a_near_integer_sampling_frequency_rounds_to_the_intended_rate() {

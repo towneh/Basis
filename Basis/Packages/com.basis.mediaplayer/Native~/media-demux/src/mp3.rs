@@ -1,6 +1,6 @@
-//! Raw MP3 file demuxer: ID3v2 skip, then an MPEG audio frame walk
-//! — each AU is one Layer III frame, length computed from its header, pts
-//! from accumulated samples. A leading Xing/Info/VBRI frame is metadata,
+//! Raw MP3 file demuxer: ID3v2 skip, then an MPEG audio frame walk.
+//! Each AU is one Layer III frame, its length computed from its header and
+//! its pts from accumulated samples. A leading Xing/Info/VBRI frame is metadata,
 //! not audio: it is parsed for the duration and seek table, then dropped.
 //!
 //! Seeking an MP3 is approximate, as it is in every player: frames carry
@@ -228,8 +228,8 @@ impl Mp3Demuxer {
         }
 
         // Find the first frame: a valid header whose length lands on
-        // another valid header (or end of source) — the standard defence
-        // against payload false-syncs.
+        // another valid header (or end of source), the standard defence
+        // against payload false syncs.
         let mut skipped = 0u64;
         let info = loop {
             let data = reader.peek(4).map_err(DemuxError::Source)?;
@@ -364,7 +364,7 @@ impl Demuxer for Mp3Demuxer {
                 return Ok(StreamEvent::Eos(EosReason::Natural));
             }
             // A header must match the stream's fixed identity; anything
-            // else is a false sync inside garbage — resync.
+            // else is a false sync inside garbage, so resync.
             let info = match parse_frame_header(data) {
                 Some(info)
                     if info.version == self.version

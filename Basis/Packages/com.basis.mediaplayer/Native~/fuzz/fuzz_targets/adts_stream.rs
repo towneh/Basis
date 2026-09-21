@@ -1,6 +1,6 @@
 //! Fuzz the ADTS demuxer: sync hunting, header-length arithmetic, the
 //! ASC reconstruction and the byte-rate seek estimate must hold up under
-//! arbitrary bytes — typed errors only, no panics, no unbounded loops.
+//! arbitrary bytes: typed errors only, no panics, no unbounded loops.
 
 #![no_main]
 
@@ -16,10 +16,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     // A seek derived from the input drives the byte estimate and the
-    // confirmed-landing scan before the walk. The tail is what the fuzzer
-    // can vary freely — the head is the sync word the open hunts for —
-    // and the fold keeps the target inside a range a fixture-sized input
-    // reaches rather than always past its end.
+    // confirmed-landing scan before the walk. It is read from the tail,
+    // which the fuzzer can vary freely (the head is the sync word the open
+    // hunts for), and folded into a range a fixture-sized input reaches
+    // rather than always past its end.
     let mut key = [0u8; 4];
     for (slot, byte) in key.iter_mut().zip(data.iter().rev()) {
         *slot = *byte;

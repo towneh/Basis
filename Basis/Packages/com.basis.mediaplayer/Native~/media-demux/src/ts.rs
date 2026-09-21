@@ -1,8 +1,7 @@
 //! MPEG-TS demuxer (PAT/PMT/PES): H.264/H.265 video plus AAC (ADTS) or
-//! HDMV LPCM audio, ported from the C player's `basis_ts` — the port
-//! carries its fuzz-hardened section clamps, the PES accumulation cap and
-//! the mid-GOP join guard, with the pinned crash inputs replayed by the
-//! `ts_stream` fuzz target.
+//! HDMV LPCM audio, with fuzz-hardened section clamps, a PES accumulation
+//! cap and a mid-GOP join guard. The `ts_stream` fuzz target replays the
+//! known crash inputs.
 //!
 //! Live TS over HTTP is Annex-B video + ADTS audio in 188-byte packets;
 //! m2ts streams (192-byte packets, a 4-byte TP_extra_header before each
@@ -115,13 +114,12 @@ struct PesHeader {
     payload_off: usize,
 }
 
-/// PES packet header at the start of `p` (00 00 01 stream_id …).
 /// The CRC-32/MPEG-2 a PSI section carries in its last four bytes
 /// (H.222.0 §2.4.4): polynomial 0x04C11DB7, register all-ones to start,
 /// nothing reflected and nothing inverted at the end. Run over the
 /// section *including* its own CRC field, a sound one leaves zero.
 ///
-/// Only a section that arrived whole can be checked — a clamped one has
+/// Only a section that arrived whole can be checked: a clamped one has
 /// its CRC in the packets behind this one, which this parser does not
 /// reassemble.
 fn psi_crc_ok(section: &[u8]) -> bool {
@@ -139,6 +137,7 @@ fn psi_crc_ok(section: &[u8]) -> bool {
     crc == 0
 }
 
+/// PES packet header at the start of `p` (00 00 01 stream_id …).
 fn parse_pes_header(p: &[u8]) -> Option<PesHeader> {
     if p.len() < 9 || p[0] != 0 || p[1] != 0 || p[2] != 1 {
         return None;
@@ -179,7 +178,7 @@ pub struct TsDemuxer {
     pmt_pid: Option<u16>,
     /// The program the PAT selected. One PMT PID may legally carry the
     /// tables of more than one program, and the section header's
-    /// `program_number` is what tells them apart — without it the first
+    /// `program_number` is what tells them apart. Without it the first
     /// section walked binds, whichever program it belongs to.
     pmt_program: Option<u16>,
     /// Which PMT sections have been walked, and which table they belong
@@ -365,8 +364,8 @@ impl TsDemuxer {
         }
         // And it must be *this* program's table. A PMT PID may legally
         // carry more than one program's sections, distinguished only by
-        // the section header's program_number — the table_id_extension
-        // of H.222.0 §2.4.4. Without this, two programs sharing a pid
+        // the section header's program_number (the table_id_extension
+        // of H.222.0 §2.4.4). Without this, two programs sharing a pid
         // both arrive as version 0 section 0, the first one walked binds
         // its elementary streams and latches the identity, and the
         // section belonging to the program the PAT actually selected is
@@ -413,15 +412,15 @@ impl TsDemuxer {
         }
 
         // Where the whole section is here, its entries must tile the space
-        // between the descriptors and the CRC exactly, and that is proven
-        // before any of it is acted on: a copy whose entries overrun the
+        // between the descriptors and the CRC exactly, and that is checked
+        // before any of it is acted on. A copy whose entries overrun the
         // CRC, or leave a remainder too short to be another entry, is
-        // walked as far as it goes and then abandoned, and consuming the
-        // identity on the way would discard the sound copy repeating
-        // behind it — one malformed PMT would strand the program for as
-        // long as that version stood. A clamped section is exempt: what
-        // lies past the clamp is missing rather than wrong, and refusing
-        // it would bind none of the tracks its first packet does name.
+        // abandoned; consuming the identity on the way would discard the
+        // sound copy repeating behind it, and one malformed PMT would strand
+        // the program for as long as that version stood. A clamped section
+        // is exempt: what lies past the clamp is missing rather than wrong,
+        // and refusing it would bind none of the tracks its first packet
+        // does name.
         if whole {
             let mut scan = first;
             while scan + 5 <= es_end {
@@ -572,8 +571,8 @@ impl TsDemuxer {
                 match dims {
                     Some((w, h)) => (width, height) = (w, h),
                     // Mid-GOP join (or an SPS we couldn't read dimensions
-                    // from): drop this AU — it can't decode without its IDR
-                    // anyway — and wait for the next SPS-bearing keyframe
+                    // from): drop this AU, which can't decode without its IDR
+                    // anyway, and wait for the next SPS-bearing keyframe
                     // instead of announcing 0x0 and latching.
                     None => return,
                 }

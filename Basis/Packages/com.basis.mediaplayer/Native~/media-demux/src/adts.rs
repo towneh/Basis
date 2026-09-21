@@ -141,9 +141,8 @@ impl AdtsDemuxer {
             ));
         }
         // Average the leading frames rather than trust the first: a VBR
-        // encoder's opening frame is not the file's rate, and everything
-        // this lane can say about length and position rests on this one
-        // number.
+        // encoder's opening frame is not the file's rate, and both the
+        // duration and the seek rest on this one number.
         let mut measured = 0usize;
         let mut bytes = 0u64;
         let mut at = 0usize;
@@ -186,9 +185,9 @@ impl AdtsDemuxer {
     }
 
     /// The first frame at or after `from` that matches the stream and is
-    /// confirmed by the header the next frame starts with — the standard a
-    /// seek landing has to meet, since it starts reading mid-file where
-    /// the forward walk never does. Leaves the read position on the frame
+    /// confirmed by the header the next frame starts with. A seek landing
+    /// needs that standard because it starts reading mid-file, where the
+    /// forward walk never does. Leaves the read position on the frame
     /// it found; `None` = none before the source ended.
     fn confirmed_frame_at_or_after(&mut self, from: u64) -> Result<Option<u64>, DemuxError> {
         self.reader.reposition(from);

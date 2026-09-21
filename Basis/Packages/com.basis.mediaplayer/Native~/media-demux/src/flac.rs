@@ -190,7 +190,7 @@ pub struct FlacDemuxer {
     /// (sample, absolute offset) from the SEEKTABLE, ascending.
     seek_points: Vec<(u64, u64)>,
     /// Cover art from a PICTURE block. The bytes already travel inside the
-    /// codec private data — the whole header region does — but nothing
+    /// codec private data with the rest of the header region, but nothing
     /// downstream can find them in there.
     artwork: Option<Artwork>,
 }
@@ -347,8 +347,8 @@ impl FlacDemuxer {
     }
 
     /// Length of the frame whose header this is, found by scanning for the
-    /// next header carrying the number this frame implies — which together
-    /// with the CRC-8 makes payload false-syncs a non-issue. The flag says
+    /// next header carrying the number this frame implies. Together with
+    /// the CRC-8 that rules out payload false syncs. The flag says
     /// whether such a header was found: end of source terminates the last
     /// frame with nothing to confirm it against. Peeks only, so the read
     /// position is unchanged.
@@ -390,9 +390,9 @@ impl FlacDemuxer {
     }
 
     /// The first frame at or after `from` whose header matches the stream
-    /// and is confirmed by the frame following it — the standard a seek
-    /// landing has to meet, since it starts reading mid-file where the
-    /// forward walk never does. Leaves the read position on the frame it
+    /// and is confirmed by the frame following it. A seek landing needs
+    /// that standard because it starts reading mid-file, where the forward
+    /// walk never does. Leaves the read position on the frame it
     /// found; `None` = none before the source ended.
     fn confirmed_frame_at_or_after(
         &mut self,
@@ -497,9 +497,9 @@ impl Demuxer for FlacDemuxer {
         }
 
         // Best known frame at or before the goal. The first frame is the
-        // floor; a SEEKTABLE point beats it, and a probe beats that — a
-        // point is the file's word rather than something read back, so the
-        // landing is confirmed before it is reported.
+        // floor; a SEEKTABLE point beats it, and a probe beats that. A point
+        // is the file's word rather than something read back, so the landing
+        // is confirmed before it is reported.
         let mut lo = (self.first_frame, 0u64, self.max_block_size);
         let mut lo_confirmed = false;
         let mut hi = (
@@ -560,8 +560,8 @@ impl Demuxer for FlacDemuxer {
         }
 
         // The scans leave the reader on the frame they found, so only a
-        // landing settled by an earlier probe needs the window discarded —
-        // over a ranged source that discard costs a fetch.
+        // landing settled by an earlier probe needs the window discarded
+        // (over a ranged source that discard costs a fetch).
         if self.reader.pos() != lo.0 {
             self.reader.reposition(lo.0);
         }

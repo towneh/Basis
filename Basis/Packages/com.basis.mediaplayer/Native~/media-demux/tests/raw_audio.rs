@@ -99,8 +99,8 @@ fn flac_frames_match_ffprobe_and_carry_exact_pts() {
 
 /// The 7.1 lane. FLAC carries 8 channels through the demuxer
 /// unscreened (claxon's cap is 8, the decoder takes it), while ADTS AAC
-/// with channel_configuration 7 refuses typed at open — wider than the
-/// 1..=6 screen the AAC lanes share.
+/// with channel_configuration 7 refuses typed at open, being wider than
+/// the 1..=6 screen the AAC lanes share.
 #[test]
 fn flac_71_demuxes_eight_channels() {
     let run = run("sine-48k-71.flac");
@@ -492,7 +492,7 @@ fn mp3_seeks_by_its_xing_table() {
 }
 
 /// The committed FLAC fixtures carry STREAMINFO, VORBIS_COMMENT and
-/// PADDING but no SEEKTABLE — ffmpeg writes none — so this is the
+/// PADDING but no SEEKTABLE (ffmpeg writes none), so this is the
 /// bisection arm, and the demanding one: the 7.1 fixture's frames are
 /// ~52 kB each against the stereo fixture's ~1.3 kB.
 #[test]
@@ -597,11 +597,10 @@ fn flac_frame_offsets(data: &[u8], first_frame: usize) -> Vec<usize> {
     offsets
 }
 
-/// Rebuild a FLAC with a SEEKTABLE spliced in after STREAMINFO. Nothing
-/// available writes one — ffmpeg's muxer does not, and the reference
-/// encoder is not a build dependency — so the arm that takes its byte
-/// position from the file rather than bisecting for it would otherwise
-/// never run.
+/// Rebuild a FLAC with a SEEKTABLE spliced in after STREAMINFO. ffmpeg's
+/// muxer writes none and the reference encoder is not a build dependency,
+/// so without this the arm that takes its byte position from the file
+/// rather than bisecting for it would never run.
 fn flac_with_seektable(src: &[u8], every_n_frames: usize) -> Vec<u8> {
     assert_eq!(&src[..4], b"fLaC");
     let mut blocks: Vec<(u8, Vec<u8>)> = Vec::new();
@@ -672,9 +671,8 @@ impl media_demux::ByteSource for CountingSource {
 
 /// The SEEKTABLE arm: a file that states its byte positions must land on
 /// them directly, not bisect. The landing has to match the tableless file's
-/// to the sample — the table is a shortcut to the same frame, not a
-/// different answer — and it must cost fewer reads, which is the whole
-/// reason to honour it.
+/// to the sample (the table is a shortcut to the same frame), and it must
+/// cost fewer reads, which is the reason to honour it.
 #[test]
 fn flac_seeks_by_its_seektable_when_the_file_carries_one() {
     use media_clock::Generation;
@@ -913,7 +911,7 @@ fn mp4_with_cover(src: &[u8], picture: &[u8]) -> Vec<u8> {
 }
 
 /// MP4's art sits in the iTunes metadata atom, which the box parser
-/// already walks — this pins that it reaches the surface, and that the
+/// already walks. This pins that it reaches the surface, and that the
 /// format is sniffed from the bytes rather than trusted, since `covr`
 /// states only "image".
 #[test]
@@ -1046,8 +1044,8 @@ fn ogg_opus_seeks_by_granule_bisection() {
 
     // The last page's granule states the length. ffprobe reports 6.0065 s
     // for the same file because it counts the priming samples; those never
-    // reach the output, so the playable duration is the one reported —
-    // the same pre-skip convention the packet timestamps already use.
+    // reach the output, so the playable duration is the one reported,
+    // the same pre-skip convention the packet timestamps use.
     let duration = demuxer.duration().expect("a duration from the tail page");
     assert_eq!(duration, MediaTime::from_micros(6_000_000));
 

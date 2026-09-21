@@ -3,7 +3,7 @@
 //! accounting and receiver-report composition. The input is a stream of
 //! tagged length-prefixed chunks fed alternately as RTP and RTCP
 //! datagrams under an advancing synthetic clock. Arbitrary bytes must
-//! produce typed rejections or ordered packets — no panics and no
+//! produce typed rejections or ordered packets, with no panics and no
 //! unbounded buffer growth (the poll-after-feed contract bounds the
 //! reorder buffer).
 

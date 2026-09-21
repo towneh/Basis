@@ -1,5 +1,5 @@
 //! MPEG-TS demuxer behaviour over the committed fixtures, plus replay of
-//! the C player's pinned fuzz crashes (the four fixes the port carries).
+//! four known fuzz crash inputs.
 
 use media_clock::{Generation, MediaTime};
 use media_demux::{
@@ -71,7 +71,7 @@ fn psi_crc(section: &[u8]) -> [u8; 4] {
 /// Rewrite a built section's CRC over its own stated extent. Every helper
 /// that edits a section after building it has to call this, or the row it
 /// feeds is refused for its CRC rather than for the shape it was built to
-/// have — and would then pass while proving something else entirely.
+/// have, and would then pass while proving something else.
 fn restamp_crc(payload: &mut [u8]) {
     // payload[0] is the pointer field, so the section starts at 1 and its
     // length bytes are payload[2..4].
@@ -116,7 +116,7 @@ fn pmt_payload(version: u8, entries: &[(u8, u16)]) -> Vec<u8> {
     pmt_section_payload(version, 0, 0, entries)
 }
 
-/// The same as section `section` of `last` — a PMT may legitimately span
+/// The same as section `section` of `last`. A PMT may legitimately span
 /// several sections, which are one table between them.
 fn pmt_section_payload(version: u8, section: u8, last: u8, entries: &[(u8, u16)]) -> Vec<u8> {
     let mut es = Vec::new();
@@ -177,7 +177,7 @@ fn next_pmt_payload(version: u8, entries: &[(u8, u16)]) -> Vec<u8> {
 }
 
 /// A sound PMT with one byte of its entry flipped and its CRC left as it
-/// was — the shape is intact and only the check says otherwise, which is
+/// was: the shape is intact and only the check says otherwise, which is
 /// what a lossy transport delivers.
 fn corrupt_pmt_payload(version: u8, entries: &[(u8, u16)]) -> Vec<u8> {
     let mut payload = pmt_payload(version, entries);
@@ -210,10 +210,9 @@ fn ragged_pmt_payload(version: u8) -> Vec<u8> {
     payload[2] = 0xB0;
     payload[3] = 20;
     // The stated extent runs two bytes past what was built, and the
-    // demuxer reads those from the packet's filler — so carry them here
-    // before restamping, or the section is sound in shape and fails its
-    // own check, which refuses it one screen earlier than this row is
-    // about.
+    // demuxer reads those from the packet's filler. Carry them here before
+    // restamping, or the section fails its own CRC and is refused one
+    // screen earlier than this row is about.
     payload.extend_from_slice(&[0xFF, 0xFF]);
     restamp_crc(&mut payload);
     payload
@@ -268,7 +267,7 @@ fn a_repeated_pmt_section_is_walked_once() {
 
 /// A PAT that is not yet applicable may not repoint the PMT PID. It
 /// names where the table in force lives, so acting on the next copy
-/// stops the demuxer reading the PID that is in force — and because the
+/// stops the demuxer reading the PID that is in force, and because the
 /// PID is the new table's identity, the sections already walked under
 /// the old one go with it. The decoy PID here carries nothing, so a
 /// stream that took it binds no tracks at all.
@@ -321,7 +320,7 @@ fn a_section_on_pid_zero_that_is_not_a_pat_is_ignored() {
 /// it must not be walked. Every claiming arm is guarded on the pid being
 /// unbound and the section number is latched on the way, so a corrupt
 /// copy acted on first both binds what it names and consumes the
-/// identity — the sound copy repeating behind it is then skipped and
+/// identity; the sound copy repeating behind it is then skipped and
 /// cannot replace either. Observed through the unclaimed-stream_type
 /// note, which is the walk's only outward effect: the corrupt copy's
 /// type must never appear and the sound copy's must.
@@ -344,7 +343,7 @@ fn a_section_failing_its_crc_leaves_the_walk_to_the_sound_copy() {
 
 /// One PMT pid, two programs. The section header's program_number is the
 /// only thing that tells their tables apart, so a demuxer reading the
-/// pid alone binds whichever section arrives first — and both normally
+/// pid alone binds whichever section arrives first. Both normally
 /// arrive as version 0, section 0, so the second is then dropped as a
 /// repeat of the first. Here the PAT selects program 1 and program 2's
 /// section arrives ahead of it, so binding by arrival order takes the
@@ -402,7 +401,7 @@ fn a_pmt_version_bump_binds_the_tracks_it_adds() {
 
 /// A PMT may legitimately span several sections, and the stream repeats
 /// the whole cycle. Each section of a table is walked once, so a cycle
-/// costs nothing after the first — tracking only the previous section
+/// costs nothing after the first. Tracking only the previous section
 /// would let an alternating pair thrash the latch forever, which is also
 /// the cheapest way for a stream to defeat it on purpose.
 #[test]
@@ -444,7 +443,7 @@ fn each_section_of_a_multi_section_pmt_is_walked_once() {
 
 /// A table's identity includes the PID that carried it. A PAT that selects
 /// a different PMT PID names a different table even though both are at the
-/// usual version 0, section 0 — so the tracks the new one names must still
+/// usual version 0, section 0, so the tracks the new one names must still
 /// bind.
 #[test]
 fn a_new_pmt_pid_is_a_new_table_at_the_same_section_key() {
@@ -580,7 +579,7 @@ fn a_pmt_entry_outside_its_section_does_not_consume_the_identity() {
 }
 
 /// A PMT too large for one packet is clamped to what the packet holds
-/// rather than refused, and binds the tracks its first packet names —
+/// rather than refused, and binds the tracks its first packet names;
 /// refusing it instead would bind none of them. The entry check must not
 /// turn that into a refusal: the entries beyond the clamp are not
 /// malformed, they are simply not here.
@@ -608,8 +607,8 @@ fn a_pmt_spanning_packets_still_binds_what_its_first_packet_names() {
 }
 
 /// A remainder too short to be another entry is the same defect as an
-/// entry running past the CRC — the section does not describe what it
-/// says it describes — and it must not cost the sound copy behind it
+/// entry running past the CRC (the section does not describe what it
+/// says it describes), and it must not cost the sound copy behind it
 /// either.
 #[test]
 fn a_pmt_with_a_ragged_tail_does_not_consume_the_identity() {
@@ -663,7 +662,7 @@ fn unclaimed_stream_type_notes_are_capped() {
 }
 
 /// A continuation payload has no pointer field, so its bytes are not a
-/// table header however much they look like one — the packet has to say a
+/// table header however much they look like one: the packet has to say a
 /// unit starts there.
 #[test]
 fn a_pmt_continuation_payload_is_not_read_as_a_section() {
@@ -826,8 +825,8 @@ fn sniffs_ts_and_m2ts() {
     assert_eq!(sniff_container(&[0u8; 1024]), None);
 }
 
-/// The C player's pinned fuzz crashes, carried over as seeds: each must
-/// walk to EOS (or a typed error) without panicking.
+/// Known fuzz crash inputs: each must walk to EOS (or a typed error)
+/// without panicking.
 #[test]
 fn replays_the_pinned_c_fuzz_crashes() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fuzz/corpus/ts_stream");

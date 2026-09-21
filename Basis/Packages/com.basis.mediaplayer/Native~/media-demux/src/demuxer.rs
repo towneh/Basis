@@ -40,7 +40,7 @@ pub struct DemuxOptions {
 pub struct DemuxLimits {
     /// Ceiling on bytes the metadata parse may pull (boxes, sample tables).
     pub max_metadata_bytes: u64,
-    /// Ceiling on a single compressed access unit — far above any real one,
+    /// Ceiling on a single compressed access unit, far above any real one,
     /// so a hostile size field cannot drive a huge allocation.
     pub max_au_bytes: u64,
 }
@@ -56,8 +56,8 @@ impl Default for DemuxLimits {
 
 pub trait Demuxer: Send {
     /// Pull the next event. Emits `Format` events first, then interleaved
-    /// `Au`s in decode order; returns `Eos` at the end (and keeps returning
-    /// it — the engine stops pulling).
+    /// `Au`s in decode order; returns `Eos` at the end, and keeps returning
+    /// it if pulled again.
     fn next_event(&mut self) -> Result<StreamEvent, DemuxError>;
 
     /// Reposition to the keyframe-clean point at or before `target`, adopt
@@ -103,14 +103,12 @@ pub trait Demuxer: Send {
 /// than from a container's fixed structure. Notes are drained once, after
 /// open, so nothing empties them again for the life of the session: a
 /// source that can keep producing distinct ones would otherwise grow the
-/// collection without bound on the demux thread. They are a set of
-/// findings about a source, not a log of what it did.
+/// collection without bound on the demux thread.
 pub const MAX_NOTES: usize = 64;
 
 /// Record a note unless it duplicates one already held or the collection
 /// is full. The note is built only when there is room for it, so a source
-/// generating them endlessly stops costing anything at all, and the
-/// duplicate scan stays constant-cost because the length is bounded.
+/// that generates them endlessly costs nothing once the cap is reached.
 pub fn push_note(notes: &mut Vec<String>, note: impl FnOnce() -> String) {
     if notes.len() >= MAX_NOTES {
         return;
