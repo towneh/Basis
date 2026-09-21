@@ -7,7 +7,7 @@ cap and the prefabs. None has an automated test. The engine's tests are in
 
 | What | How |
 | --- | --- |
-| Engine gate: format, lint, tests, audits, ffprobe conformance | `Native~/tools/ci.ps1` (Windows), `Native~/tools/ci.sh` (Linux) |
+| Engine gate: format, lint, tests, audits, ffprobe conformance | `Native~/tools/ci.ps1` (Windows), `Native~/tools/ci.sh` (Linux); each step is described in [`Native~/TESTING.md`](Native~/TESTING.md#running-the-tests) |
 | Headless playback | `Native~/bm-probe` |
 | Graded playback in the editor | `Basis > Tools > Media Player > Run Smoke Test` |
 | The same in batch | `-executeMethod BasisMediaSmokeTest.RunBatch` (exit code 0 on a pass; steer it with `BASIS_SMOKE_URL`, `BASIS_SMOKE_SECONDS`, `BASIS_SMOKE_LIVE`, `BASIS_SMOKE_STRICT_HOLDS`) |

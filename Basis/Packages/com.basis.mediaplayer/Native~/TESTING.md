@@ -16,8 +16,9 @@ area you change.
   limit.
 - **Optional:** `ffprobe` for the conformance check; librist built into
   `third_party/librist/` by `tools/build-librist.ps1` or `.sh` (needs meson and
-  ninja) for RIST; Unity's Android NDK (`tools/android-env.ps1`) for the Android
-  build check. Without each, the gate skips that step.
+  ninja) for RIST; `rustup target add aarch64-linux-android` and Unity's Android
+  NDK (`tools/android-env.ps1` finds it) for the Android build check. Without
+  each, the gate skips that step.
 - **For some by-hand rows:** Python 3 and ffmpeg (fixture scripts and local
   servers in `tools/`), and nightly Rust with `cargo-fuzz` on Linux (see
   `fuzz/README.md`).
@@ -29,10 +30,32 @@ area you change.
 tools/ci.sh           # Linux
 ```
 
-The gate runs `cargo fmt --check`, clippy with `-D warnings`, all tests, the
-RIST and Android checks, `cargo deny`, `cargo vet`, the ffprobe conformance
-check, an impairment replay and a split-source run. **A skipped step prints
-`SKIPPED:` in yellow and the run still ends green**; check for those lines.
+This is the gate: run it before every commit. It runs these steps in order and
+stops at the first failure. The first run builds everything and takes a while;
+after that it takes a few minutes.
+
+| Step | Checks | Needs |
+| --- | --- | --- |
+| `cargo fmt --check` | Formatting is `rustfmt`'s default | |
+| `cargo clippy` | No lint warnings anywhere, tests and examples included | |
+| `cargo test` | Every test in the workspace | Windows for the session, Media Foundation and GPU tests |
+| RIST | The RIST transport lints clean and its tests pass | librist built, see [`third_party/librist/`](third_party/librist/README.md) |
+| Android (Windows only) | The engine compiles and lints for Quest | the `aarch64-linux-android` Rust target and an Android NDK |
+| `cargo deny` | Licences, security advisories, banned crates and crate sources, as set in `deny.toml` | network access |
+| `cargo vet` | Every dependency is audited or exempted in `supply-chain/` | network access |
+| Conformance | Each MP4 and TS fixture demuxes to exactly what ffprobe reads from it | `ffprobe` |
+| Software decode (Linux only) | AV1 and Opus play through the whole engine without a GPU | |
+| Impairment | A recorded bad-network profile replayed through the engine at 1x; playback has to keep going within the buffer model | H.264 and AAC decoders, so Linux skips it |
+| Split source (Windows only) | Video and audio from two files play as one session | |
+
+**A step whose requirement is missing prints `SKIPPED:` in yellow and the run
+still ends green**, so check for those lines before trusting a pass.
+`-Fuzz` (`--fuzz` on Linux) also builds the fuzz targets, which needs nightly
+Rust on Linux or WSL (see [`fuzz/`](fuzz/README.md)).
+
+On Windows, `cargo vet` rewrites the files in `supply-chain/` with Windows line
+endings. `git diff` shows no change, and `git checkout -- supply-chain` puts
+them back.
 
 ```
 cargo test -p media-demux                          # one crate

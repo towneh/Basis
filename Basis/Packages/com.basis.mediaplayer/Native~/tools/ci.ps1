@@ -1,5 +1,6 @@
 # The engine gate on Windows. Run before committing; everything here must pass.
 # Steps whose tool is missing print SKIPPED and do not fail the run.
+# TESTING.md ("Running the tests") says what each step checks and needs.
 #
 #   .\tools\ci.ps1          # fmt, clippy, tests, the RIST and Android builds,
 #                           # deny, vet, and the headless playback checks

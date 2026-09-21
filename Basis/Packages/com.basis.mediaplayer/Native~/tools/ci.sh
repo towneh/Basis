@@ -1,6 +1,7 @@
 #!/bin/sh
 # The engine gate on Linux. Run before committing; everything here must pass.
 # Steps whose tool is missing print SKIPPED and do not fail the run.
+# TESTING.md ("Running the tests") says what each step checks and needs.
 #
 #   ./tools/ci.sh          # fmt, clippy, tests, the RIST build, deny, vet,
 #                          # and the headless playback checks

@@ -39,7 +39,7 @@ to `Linux/x86_64/`. Each needs librist staged first (see
 
 | Tool | Does |
 | --- | --- |
-| `tools/ci.ps1`, `tools/ci.sh` | The gate: formatting, lints, tests, licence and supply-chain audits, and headless playback checks |
+| `tools/ci.ps1`, `tools/ci.sh` | The gate to run before every commit; [`TESTING.md`](TESTING.md#running-the-tests) describes each step |
 | `tools/android-env.ps1` | Finds an Android NDK (Unity's by default) and sets cargo up for `aarch64-linux-android`; dot-source it |
 | `tools/stage-android-plugin.ps1` | Builds the Android plugin and copies it into the package |
 | `tools/build-librist.ps1`, `build-librist.sh`, `build-librist-android.sh` | Build the librist library for Windows, Linux and Android |
