@@ -1,20 +1,19 @@
-//! DXVA hardware decode: the same sync-MFT driving
-//! model as `video_mft`, bound to a D3D11 device through the DXGI device
-//! manager, so the decoder allocates NV12 texture-array slices GPU-side
-//! and output never touches system memory. Frames leave as
-//! `VideoFrame::Opaque` whose payload owns the `IMFSample` — dropping it
-//! returns the surface to the MFT's pool, which is the release
-//! discipline (an unreleased output sample drains the pool and
-//! `ProcessOutput` returns `NEED_MORE_INPUT` forever).
+//! DXVA hardware decode: the same sync-MFT driving model as `video_mft`,
+//! bound to a D3D11 device through the DXGI device manager, so the decoder
+//! allocates NV12 texture-array slices GPU-side and output never touches
+//! system memory. Frames leave as `VideoFrame::Opaque` whose payload owns
+//! the `IMFSample`. Dropping it returns the surface to the MFT's pool; an
+//! output sample that is never released drains the pool and
+//! `ProcessOutput` then returns `NEED_MORE_INPUT` forever.
 //!
-//! The hardware claim is two-legged: a decoder MFT must enumerate for
-//! the subtype *and* `ID3D11VideoDevice` must report the DXVA profile
-//! with NV12 output and a decoder configuration at the target
-//! resolution — the Store VP9/AV1 extensions pass enumeration and then
-//! decode on the CPU internally on GPUs without the profile. The runtime
-//! backstop for probe false-positives is an output sample without DXGI
-//! backing: reported through [`media_decode::VideoDecoder::hardware_fell_back`]
-//! so the engine reroutes to the software path instead of failing.
+//! Hardware support needs two things: a decoder MFT must enumerate for the
+//! subtype, and `ID3D11VideoDevice` must report the DXVA profile with NV12
+//! output and a decoder configuration at the target resolution. The Store
+//! VP9/AV1 extensions pass enumeration and then decode on the CPU
+//! internally on GPUs without the profile. If the probe is still wrong at
+//! runtime, the output sample has no DXGI backing; that is reported
+//! through [`media_decode::VideoDecoder::hardware_fell_back`] so the engine
+//! reroutes to the software path instead of failing.
 
 use media_decode::{
     ColorInfo, DecodeError, OpaqueFrame, OpaqueImage, SubmitOutcome, VideoFrame, packed_nv12_len,
@@ -48,18 +47,18 @@ use std::mem::ManuallyDrop;
 
 /// Setting this environment variable (to any value) makes every hardware
 /// probe report absent, so sessions take the software rung with a
-/// `DecodeFallbackHwToSw` diagnostic — the forced-fallback test lever and
-/// a field escape hatch for broken drivers.
+/// `DecodeFallbackHwToSw` diagnostic. Used to test the fallback, and as an
+/// escape hatch for broken drivers.
 pub const DISABLE_HW_DECODE_ENV: &str = "BASIS_MEDIA_DISABLE_HW_DECODE";
 
 fn hw_disabled() -> bool {
     std::env::var_os(DISABLE_HW_DECODE_ENV).is_some()
 }
 
-/// D3D11 decoder-profile GUIDs, defined locally so SDK header vintage
-/// never gates the build (the values are the documented DXVA profile
-/// GUIDs; 8-bit profile 0 only for VP9/AV1 — 10-bit is deliberately
-/// unprobed, P010 is not negotiated in Phase 1).
+/// D3D11 decoder-profile GUIDs (the documented DXVA values), defined
+/// locally so the SDK header version never gates the build. VP9 and AV1
+/// probe 8-bit profile 0 only: 10-bit would need P010 output, which is not
+/// negotiated.
 const PROFILE_H264_VLD_NOFGT: GUID = GUID::from_values(
     0x1b81be68,
     0xa0c7,
@@ -180,7 +179,7 @@ impl DxvaDevice {
         }
     }
 
-    /// Leg 2 of the hardware claim: the GPU reports the DXVA profile,
+    /// The GPU half of the hardware check: the GPU reports the DXVA profile,
     /// decodes it to NV12, and offers at least one decoder configuration
     /// at the target resolution.
     fn supports(&self, profile: &GUID, width: u32, height: u32) -> bool {
@@ -219,7 +218,7 @@ impl DxvaDevice {
     }
 }
 
-/// Both legs of the hardware claim for a codec at a resolution, on a
+/// Both halves of the hardware check for a codec at a resolution, on a
 /// transient device (the capability probe can run with no session open).
 /// [`DISABLE_HW_DECODE_ENV`] forces absent.
 pub fn probe_hardware(codec: HwCodec, width: u32, height: u32) -> bool {
@@ -241,7 +240,7 @@ pub fn probe_hardware(codec: HwCodec, width: u32, height: u32) -> bool {
 /// The measured resolution ceiling for the hardware route: the highest
 /// rung of a 1080p → 4K → 8K ladder the GPU offers a decoder
 /// configuration at, so the resolver ranks routes on measured numbers.
-/// `None` = no hardware route for the codec at all.
+/// `None` means no hardware route for the codec at all.
 pub fn probe_hardware_ceiling(codec: HwCodec) -> Option<(u32, u32)> {
     if hw_disabled() || mf_startup().is_err() {
         return None;
@@ -266,10 +265,10 @@ pub fn probe_hardware_ceiling(codec: HwCodec) -> Option<(u32, u32)> {
     best
 }
 
-/// Read a DXVA opaque frame back to packed NV12 — the conformance-test
-/// oracle (hardware decode is bit-exact against the software route, so
-/// the readback hashes must match). The play path never touches the CPU;
-/// this exists for tests and diagnostics only.
+/// Read a DXVA opaque frame back to packed NV12, for tests and diagnostics
+/// only. Conformance tests use it as an oracle: hardware decode is
+/// bit-exact against the software route, so the readback hashes must
+/// match.
 pub fn read_back_nv12(frame: &OpaqueFrame) -> Result<media_decode::Nv12Frame, DecodeError> {
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
@@ -305,10 +304,8 @@ pub fn read_back_nv12(frame: &OpaqueFrame) -> Result<media_decode::Nv12Frame, De
         let staging = staging.ok_or_else(|| DecodeError("no readback staging".into()))?;
         context.CopySubresourceRegion(&staging, 0, 0, 0, 0, texture, subresource, None);
         let (w, h) = (frame.width as usize, frame.height as usize);
-        // Sized before the map rather than inside it: a fallible step
-        // between `Map` and `Unmap` returns with the staging texture
-        // still mapped, and it is then dropped in that state. The lock
-        // paths in the software route keep the same discipline.
+        // Sized before the map: a fallible step between `Map` and `Unmap`
+        // would return with the staging texture still mapped.
         let packed = packed_nv12_len("dxva readback", w, h)?;
         let mut mapped = Default::default();
         mf(
@@ -317,16 +314,11 @@ pub fn read_back_nv12(frame: &OpaqueFrame) -> Result<media_decode::Nv12Frame, De
         )?;
         let pitch = mapped.RowPitch as usize;
         let base = mapped.pData as *const u8;
-        // The strided read is bounded by the mapping, not by the
-        // destination `packed` sizes: the row copies read `w` bytes at
-        // `row * pitch`, and the chroma copies start at
-        // `pitch * desc.Height`, so a pitch narrower than the row or a
-        // texture shorter than the frame reads outside it. The software
-        // route checks the same shape before its own copy.
+        // The strided read is bounded by the mapping, not by `packed`: the
+        // row copies read `w` bytes at `row * pitch` and the chroma copies
+        // start at `pitch * desc.Height`, so a pitch narrower than the row
+        // or a texture shorter than the frame would read outside it.
         if base.is_null() || pitch < w || (desc.Height as usize) < h {
-            // Unmapped before the return: a fallible step inside the
-            // mapped window is what leaves the staging texture mapped
-            // when it drops.
             context.Unmap(&staging, 0);
             return Err(DecodeError(format!(
                 "dxva readback: {w}x{h} does not fit stride {pitch} in a {}-row texture",
@@ -377,7 +369,7 @@ impl OpaqueImage for DxvaImage {
     }
 }
 
-/// Hardware video decoder: one type for every DXVA codec — only the
+/// Hardware video decoder, one type for every DXVA codec. Only the
 /// subtype/profile pair and the AV1 config-OBU carriage differ.
 pub struct HwVideoDecoder {
     mft: IMFTransform,
@@ -390,10 +382,10 @@ pub struct HwVideoDecoder {
     /// Clean aperture from `MF_MT_MINIMUM_DISPLAY_APERTURE`, re-read at
     /// every stream change (many decoders only populate it then).
     aperture: Option<(i32, i32, u32, u32)>,
-    /// AV1 config OBUs held until the first accepted input: they ride the
-    /// first real AU (a duplicated sequence header is legal OBU syntax; a
-    /// config-only sample is of unverified MFT tolerance), cleared only
-    /// once `ProcessInput` consumed the carrier.
+    /// AV1 config OBUs, prepended to the first real AU rather than sent
+    /// alone: a duplicated sequence header is legal OBU syntax, while MFT
+    /// tolerance of a config-only sample is unverified. Cleared once
+    /// `ProcessInput` accepts the carrier.
     config_obus: Vec<u8>,
     /// Post-reset output gate: the MFT's reorder pipeline can emit a
     /// garbage frame after a flush; anything with a pts before the first
@@ -416,13 +408,12 @@ unsafe impl Send for HwVideoDecoder {}
 const FLOOR_DROP_BOUND: u32 = 16;
 
 impl HwVideoDecoder {
-    /// `width`/`height` are the container-stated coded dimensions,
-    /// required: the input type always states `MF_MT_FRAME_SIZE` (the
-    /// Store HEVC MFT null-derefs its worker thread when data arrives on
-    /// a sizeless input type, so sizeless streams refuse before the MFT
-    /// is ever configured). `config` carries AV1 config OBUs (empty for
-    /// every other codec, and for AV1 streams whose sequence header rides
-    /// in-band).
+    /// `width`/`height` are the container-stated coded dimensions and are
+    /// required: the input type always states `MF_MT_FRAME_SIZE`, because
+    /// the Store HEVC MFT null-derefs on its worker thread when data
+    /// arrives on a sizeless input type. `config` carries AV1 config OBUs
+    /// (empty for every other codec, and for AV1 streams whose sequence
+    /// header is in-band).
     pub fn new(
         codec: HwCodec,
         width: u32,
@@ -457,10 +448,9 @@ impl HwVideoDecoder {
                 codec.tag(),
                 MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
             )?;
-            // Bind the device manager before the input/output types (the
-            // C-proven ordering). A refusal is logged, not fatal: the
-            // output would then lack DXGI backing and the runtime
-            // fallback signal reroutes to software.
+            // Bind the device manager before setting the input/output
+            // types. A refusal is logged, not fatal: the output then lacks
+            // DXGI backing and the runtime fallback reroutes to software.
             if let Err(e) =
                 mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, dxva.manager.as_raw() as usize)
             {
@@ -551,7 +541,7 @@ impl HwVideoDecoder {
     }
 
     /// Re-read `MF_MT_MINIMUM_DISPLAY_APERTURE` from the current output
-    /// type. Called at configure *and* every stream change — many
+    /// type. Called at configure and at every stream change, since many
     /// decoders only populate it after the first-frame stream change.
     fn read_aperture(&mut self) {
         self.aperture = None;
@@ -593,9 +583,8 @@ impl HwVideoDecoder {
             let pts_us = sample.GetSampleTime().map(|t| t / 10).unwrap_or(0);
             let buffer = mf(sample.GetBufferByIndex(0), "GetBufferByIndex (dxva)")?;
             let Ok(dxgi) = buffer.cast::<IMFDXGIBuffer>() else {
-                // The runtime software-fallback signal: the MFT decoded on
-                // the CPU internally (a probe false-positive). The engine
-                // reads `hardware_fell_back` and reroutes.
+                // The MFT decoded on the CPU internally despite the probe.
+                // The engine reads `hardware_fell_back` and reroutes.
                 self.fell_back = true;
                 return Err(DecodeError(format!(
                     "{}: decoder produced software frames (no GPU decode path engaged)",
@@ -687,9 +676,9 @@ impl media_decode::VideoDecoder for HwVideoDecoder {
         // ManuallyDrop; both are reclaimed on every path after the call.
         unsafe {
             loop {
-                // The output stream info is re-read every iteration, not
-                // cached: PROVIDES_SAMPLES and cbSize can change across a
-                // stream change (the C-discovered contract).
+                // Re-read every iteration rather than cached:
+                // PROVIDES_SAMPLES and cbSize can change across a stream
+                // change.
                 let info = mf(self.mft.GetOutputStreamInfo(0), "GetOutputStreamInfo")?;
                 let provides = info.dwFlags
                     & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
@@ -716,8 +705,8 @@ impl media_decode::VideoDecoder for HwVideoDecoder {
                 let result = self
                     .mft
                     .ProcessOutput(0, std::slice::from_mut(&mut out), &mut status);
-                // Reclaim COM references on every path (the DXVA sample IS
-                // the MFT's pooled surface — leaking one stalls decode).
+                // Reclaim COM references on every path. The DXVA sample is
+                // the MFT's pooled surface, and leaking one stalls decode.
                 let sample = ManuallyDrop::take(&mut out.pSample);
                 drop(ManuallyDrop::take(&mut out.pEvents));
 
@@ -727,11 +716,7 @@ impl media_decode::VideoDecoder for HwVideoDecoder {
                             DecodeError("ProcessOutput returned no sample".into())
                         })?;
                         let frame = self.resolve_frame(sample)?;
-                        // Post-reset garbage gate: the reorder pipeline
-                        // can emit a stale frame after a flush. Anything
-                        // before the first post-reset submission's pts is
-                        // dropped (its sample released), bounded so a
-                        // re-stamped output can't hold video shut.
+                        // See `output_floor_pts`.
                         if let Some(floor) = self.output_floor_pts {
                             if frame.pts_us() < floor && self.floor_dropped < FLOOR_DROP_BOUND {
                                 self.floor_dropped += 1;

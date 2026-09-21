@@ -1,14 +1,11 @@
-//! The DXVA hardware route against the software route, per codec:
-//! H.264/VP9/AV1 decode is bit-exact by spec, so the hardware output
-//! (read back once, test-only) must byte-match the CPU path frame for
-//! frame — the decode analogue of the GPU-pass-vs-reference oracle, and
-//! it catches slice/aperture/stride mistakes cold. Rows skip loudly
-//! where this machine's GPU has no profile for the codec (that absence
-//! is exactly what the engine reports as a diagnostic).
+//! The DXVA hardware route against the software route, per codec.
+//! H.264, VP9 and AV1 decoding is bit-exact by specification, so the
+//! hardware output (read back, test-only) must byte-match the CPU path
+//! frame for frame. That catches slice, aperture and stride mistakes. Rows
+//! skip loudly where this machine's GPU has no profile for the codec.
 //!
-//! Also pinned here: the ported C-player contracts a unit can reach —
-//! the sizeless-HEVC refusal (before the MFT is ever configured), the
-//! opaque payload's slice exposure, AV1 config-OBU carriage, and
+//! Also covered: the sizeless-HEVC refusal (before the MFT is configured),
+//! the opaque payload's slice exposure, AV1 config-OBU carriage, and
 //! flush/restart through `reset`.
 
 #![cfg(windows)]
@@ -82,8 +79,8 @@ fn video_track(fixture: &str, expect: VideoCodec) -> Track {
 
 /// Crop a packed NV12 buffer to the display region: the coded pad (e.g.
 /// 360 → 368 macroblock rounding) is unspecified content the two routes
-/// legitimately fill differently — decode is bit-exact only over the
-/// visible frame.
+/// may fill differently, so decode is bit-exact only over the visible
+/// frame.
 fn visible_nv12(data: &[u8], coded_w: u32, coded_h: u32, disp_w: u32, disp_h: u32) -> Vec<u8> {
     let (cw, _ch) = (coded_w as usize, coded_h as usize);
     let (dw, dh) = (disp_w as usize, disp_h as usize);
@@ -100,7 +97,7 @@ fn visible_nv12(data: &[u8], coded_w: u32, coded_h: u32, disp_w: u32, disp_h: u3
 
 /// Drive a decoder over the track, collecting every output cropped to
 /// the display region as packed NV12 with its pts. Hardware frames are
-/// read back and dropped as they emerge — holding them would drain the
+/// read back and dropped as they emerge; holding them would drain the
 /// MFT's small surface pool.
 fn decode_all(
     decoder: &mut dyn VideoDecoder,
@@ -244,8 +241,8 @@ fn vp9_hardware_matches_software() {
 #[test]
 fn av1_hardware_matches_rav1d() {
     let track = video_track("av1-opus.webm", VideoCodec::Av1);
-    // Config OBUs ride the first real AU (C contract): the demuxer
-    // surfaces them for AV1, and the constructor takes them.
+    // Config OBUs ride the first real AU: the demuxer surfaces them for
+    // AV1, and the constructor takes them.
     let mut hw = match decode_mf::HwVideoDecoder::new(
         decode_mf::HwCodec::Av1,
         track.width,
@@ -324,8 +321,8 @@ fn av1_submit_never_waits_on_undrained_output() {
     );
 }
 
-/// First HEVC on Windows (there is no software oracle — DXVA is the only
-/// route): the fixture decodes to the expected frame count at the coded
+/// HEVC on Windows has no software oracle, since DXVA is the only route.
+/// The fixture decodes to the expected frame count at the coded
 /// dimensions, pts monotonic in display order.
 #[test]
 fn hevc_decodes_through_dxva() {
@@ -362,10 +359,10 @@ fn hevc_decodes_through_dxva() {
     assert!(h == 360 || h == 368, "coded height {h}");
 }
 
-/// The Store HEVC MFT null-derefs its own worker thread if data arrives
-/// on a sizeless input type; the refusal happens before the MFT is ever
-/// configured (and before any device exists, so this row runs on every
-/// machine).
+/// The Store HEVC MFT null-derefs on its own worker thread if data arrives
+/// on a sizeless input type. The refusal happens before the MFT is
+/// configured and before any device exists, so this row runs on every
+/// machine.
 #[test]
 fn sizeless_hevc_refuses_before_configure() {
     let err = decode_mf::HwVideoDecoder::new(decode_mf::HwCodec::H265, 0, 0, &[])

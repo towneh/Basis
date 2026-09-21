@@ -1,12 +1,10 @@
-//! Software decoders: permissively licensed,
-//! in-process, one behaviour on every platform.
+//! Software decoders: permissively licensed, in-process, one behaviour on
+//! every platform.
 //!
-//! The AV1 floor (rav1d) is absent on Android for now: the crates.io
-//! rav1d package cannot build its arm64 assembly (`src/arm/asm-offsets.h`
-//! is missing from the published crate — an upstream report
-//! candidate), and the Vulkan present path has no CPU-frame upload yet, so
-//! Android's AV1 route is platform-decoder-or-typed-refusal until both
-//! land.
+//! The rav1d AV1 decoder is not built on Android: the crates.io package
+//! cannot build its arm64 assembly (`src/arm/asm-offsets.h` is missing from
+//! the published crate), and the Vulkan present path has no CPU-frame
+//! upload. Android AV1 is the platform decoder or a typed refusal.
 
 #[cfg(not(target_os = "android"))]
 mod av1;

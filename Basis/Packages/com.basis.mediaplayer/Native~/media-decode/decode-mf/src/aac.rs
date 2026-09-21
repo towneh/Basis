@@ -1,12 +1,13 @@
 //! AAC decode through the in-box Media Foundation decoder, driven as a
-//! sync MFT exactly like the video path. The configuration contract is the
-//! one discovered on the C player: fixed CLSID, raw AAC frames
-//! (payload type 0), `MF_MT_USER_DATA` = 12 zero bytes (the HEAACWAVEINFO
-//! fields after WAVEFORMATEX) followed by the AudioSpecificConfig.
+//! sync MFT like the video path. The decoder wants: the fixed CLSID, raw
+//! AAC frames (payload type 0), and `MF_MT_USER_DATA` set to 12 zero bytes
+//! (the HEAACWAVEINFO fields after WAVEFORMATEX) followed by the
+//! AudioSpecificConfig.
 //!
 //! Callers screen the channel layout before construction (≤ 6 explicitly
-//! signalled channels): fed anything wider the in-box decoder accepts the
-//! input type and then AVs decoding the first frame rather than erroring.
+//! signalled channels). Fed anything wider, the in-box decoder accepts the
+//! input type and then takes an access violation decoding the first frame
+//! rather than returning an error.
 
 use media_decode::{AudioDecoder, DecodeError, PcmChunk, SubmitOutcome};
 use windows::Win32::Media::MediaFoundation::{

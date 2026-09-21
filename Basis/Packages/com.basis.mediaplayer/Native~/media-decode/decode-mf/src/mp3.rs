@@ -1,8 +1,7 @@
-//! MP3 decode through the in-box Media Foundation decoder (the
-//! patents have expired, but the platform route needs no bundled code at
-//! all). Same sync-MFT driving as AAC; the input type is just
-//! MAJOR=Audio, SUBTYPE=MP3 plus the container-stated rate and channels —
-//! everything else is in the frame headers.
+//! MP3 decode through the in-box Media Foundation decoder, which needs no
+//! bundled code. Same sync-MFT driving as AAC; the input type is just
+//! MAJOR=Audio, SUBTYPE=MP3 plus the container-stated rate and channels.
+//! Everything else is in the frame headers.
 
 use media_decode::{AudioDecoder, DecodeError, PcmChunk, SubmitOutcome};
 use windows::Win32::Media::MediaFoundation::{

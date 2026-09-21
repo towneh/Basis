@@ -17,8 +17,8 @@ const CONFIG_LEN: usize = 3;
 
 /// Stream order to WAVE order for the Blu-ray assignments whose order
 /// differs: Blu-ray puts the LFE last and the side pair ahead of the rears.
-/// Each entry maps a source channel to its WAVE output slot. `None` =
-/// identity — mono, stereo, 3.0, 4.0 and 5.0 already arrive in WAVE order.
+/// Each entry maps a source channel to its WAVE output slot. `None` means
+/// identity: mono, stereo, 3.0, 4.0 and 5.0 already arrive in WAVE order.
 fn bluray_remap(assignment: u8) -> Option<&'static [usize]> {
     const K51: [usize; 6] = [0, 1, 2, 4, 5, 3];
     const K70: [usize; 7] = [0, 1, 2, 5, 3, 4, 6];
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn refuses_configs_it_cannot_serve() {
         // 20-bit Blu-ray, and a remap table that disagrees with the
-        // announced channel count — both would index out of a frame.
+        // announced channel count: both would index out of a frame.
         assert!(PcmDecoder::new(48_000, 2, &[0, 2, 0]).is_err());
         assert!(PcmDecoder::new(48_000, 2, &[9, 1, 0]).is_err());
         assert!(PcmDecoder::new(48_000, 2, &[0, 1]).is_err());

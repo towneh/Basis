@@ -17,9 +17,9 @@ use windows::core::Interface;
 
 use crate::win_d3d12::{D3d12Host, release_retired};
 
-/// Function slots are `Option` for the reason the Android declarations
-/// give: a Unity build that leaves one empty must not make the table an
-/// invalid value.
+/// Function slots are `Option` because a Rust `fn` pointer may not be null:
+/// a Unity build that leaves one empty must not make the table an invalid
+/// value.
 #[repr(C)]
 struct IUnityInterfaces {
     get_interface: *mut c_void,
@@ -121,7 +121,7 @@ pub unsafe fn plugin_load(interfaces: *mut c_void) {
     if interfaces.is_null() {
         return;
     }
-    // SAFETY: caller contract — Unity's live interface table.
+    // SAFETY: caller contract: Unity's live interface table.
     unsafe {
         let Some(get) = (*interfaces).get_interface_split else {
             return;

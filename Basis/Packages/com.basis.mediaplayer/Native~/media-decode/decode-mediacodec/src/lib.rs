@@ -2,10 +2,10 @@
 //!
 //! Video decodes into an `AImageReader` surface (format PRIVATE,
 //! GPU_SAMPLED_IMAGE usage) and surfaces frames as opaque
-//! `AHardwareBuffer` handles — decoder output stays in the vendor's
-//! layout end-to-end, never CPU-locked; the Vulkan present pass imports
-//! the buffer on the render thread. Audio decodes to PCM through the
-//! codec's output buffers.
+//! `AHardwareBuffer` handles. Decoder output stays in the vendor's layout
+//! and is never CPU-locked; the Vulkan present pass imports the buffer on
+//! the render thread. Audio decodes to PCM through the codec's output
+//! buffers.
 //!
 //! The whole crate is Android-only; on every other platform it compiles
 //! to nothing (the engine's routing is target-gated to match).

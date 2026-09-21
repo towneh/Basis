@@ -1,7 +1,6 @@
-//! Adapter fixture rows for the software decoders: each
-//! decoder is driven with the AUs its real demuxer produces from the
-//! committed sine fixture, and the PCM out is checked for count and
-//! content, not just absence of errors.
+//! Fixture rows for the software decoders. Each decoder is driven with the
+//! AUs its real demuxer produces from a committed sine fixture, and the PCM
+//! out is checked for count and content.
 
 use decode_sw::{FlacDecoder, OpusDecoder};
 use media_clock::Generation;
@@ -108,9 +107,8 @@ fn opus_fixture_decodes_with_pre_skip_before_the_origin() {
     assert!(chunks.iter().any(|c| c.pts_us >= 0));
 }
 
-/// Claxon's channel cap is 8 — the 7.1 fixture decodes to
-/// eight-channel PCM end to end. (Surfacing beyond the ring's interleave
-/// is the managed splitter's job, not the adapter's.)
+/// Claxon's channel cap is 8, so the 7.1 fixture decodes to eight-channel
+/// PCM end to end. Splitting the channels out is the managed side's job.
 #[test]
 fn flac_71_fixture_decodes_eight_channels() {
     let demuxed = demux("sine-48k-71.flac");

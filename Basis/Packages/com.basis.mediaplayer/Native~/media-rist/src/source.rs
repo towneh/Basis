@@ -1,8 +1,8 @@
 //! The librist-backed receiver: librist owns the UDP sockets, ARQ, GRE
 //! tunnel, jitter buffer and (Main Profile) PSK-AES, and hands recovered
-//! MPEG-TS payload to a data callback; we buffer it and serve it as a
-//! `ByteSource`, so the engine's TS lane consumes RIST exactly as it consumes
-//! the live HTTP byte sources.
+//! MPEG-TS payload to a data callback. This buffers it and serves it as a
+//! `ByteSource`, so the engine's TS lane consumes RIST the same way as the
+//! live HTTP byte sources.
 
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::net::SocketAddr;
@@ -71,21 +71,19 @@ impl Shared {
     }
 }
 
-/// librist data callback — runs on a librist output thread, must be
-/// thread-safe and must not stall. The block is reference-counted and must be
-/// released with `rist_receiver_data_block_free2`.
-/// Panics absorbed by the fence below. A count rather than a flag: the
-/// line it drives says how much has been lost this way, and the callback
-/// runs once per datagram so it cannot say so every time.
+/// Panics absorbed by the fence in `on_data`. A count rather than a flag,
+/// so the throttled warning can say how many datagrams were lost this way.
 static PANICS: AtomicU64 = AtomicU64::new(0);
 
-/// The frame is librist's, which cannot unwind, so a panic is absorbed
-/// here; the block is released on every path either way.
+/// librist data callback. Runs on a librist output thread, so it must be
+/// thread-safe and must not stall. The block is reference-counted and must
+/// be released with `rist_receiver_data_block_free2`, which happens on
+/// every path. The frame is librist's and cannot unwind, so a panic is
+/// absorbed here.
 extern "C" fn on_data(arg: *mut c_void, mut block: *mut ffi::RistDataBlock) -> c_int {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // The block is checked below and the argument is checked here:
-        // both come from librist, and a fence catches an unwind rather
-        // than a dereference of a pointer that was never ours.
+        // Both pointers come from librist; the fence catches an unwind,
+        // not a bad dereference, so each is null-checked.
         if arg.is_null() {
             return;
         }
@@ -105,21 +103,17 @@ extern "C" fn on_data(arg: *mut c_void, mut block: *mut ffi::RistDataBlock) -> c
         }
     }));
     if outcome.is_err() {
-        // Absorbing it keeps the unwind off librist's thread, which is
-        // this fence's job. Saying nothing made it indistinguishable
-        // from ordinary loss: the datagram is gone either way, and this
-        // lane drops datagrams by design, so a capture showed a clean
-        // recovery where a panic was repeating. Counted rather than
-        // logged outright — the callback runs once per datagram.
+        // Reported so a repeating panic is not mistaken for ordinary
+        // datagram loss. Throttled, since the callback runs once per
+        // datagram.
         let panics = PANICS.fetch_add(1, Ordering::Relaxed) + 1;
         if panics == 1 || panics.is_multiple_of(256) {
             diag_warn!("rist: {panics} panic(s) in the data callback, datagram dropped");
         }
     }
-    // The free dereferences the block without checking it, so the null the
-    // read above already guards against is guarded here too. The return
-    // value stays 0 on every path: librist cannot re-deliver a datagram, so
-    // there is nothing a failure code would buy.
+    // The free dereferences the block without checking it. The return
+    // value is 0 on every path: librist cannot re-deliver a datagram, so a
+    // failure code would achieve nothing.
     if !block.is_null() {
         // SAFETY: non-null per the check above; this is the block librist
         // handed over, released exactly once.
@@ -171,8 +165,8 @@ pub struct RistSource {
 }
 
 impl RistSource {
-    /// Open a Main-Profile receiver for `url` (`rist://host:port?query` —
-    /// secret / aes-type / buffer ride in the query, parsed by librist).
+    /// Open a Main-Profile receiver for `url` (`rist://host:port?query`;
+    /// secret, aes-type and buffer ride in the query, parsed by librist).
     ///
     /// `vetted` is the address-gate-vetted socket address for the URL's host;
     /// librist is pinned to it rather than re-resolving the hostname, closing
@@ -192,8 +186,8 @@ impl RistSource {
             .ok_or_else(|| RistError::config("rist url requires an explicit port"))?;
 
         // Reconstruct the URL for librist's parser. It wants
-        // "rist://host:port[?query]" with NO path — a trailing '/' makes it
-        // mis-parse the host/port entirely.
+        // "rist://host:port[?query]" with no path: a trailing '/' makes it
+        // mis-parse the host and port.
         let librist_url = match parsed.query() {
             Some(query) => format!("rist://{host}:{port}?{query}"),
             None => format!("rist://{host}:{port}"),
@@ -261,7 +255,7 @@ impl RistSource {
         // Pin librist to the vetted address. Setting address_family routes
         // librist onto its manual-sockdata path, which treats address as a
         // literal (no re-resolution) but takes the port from physical_port
-        // rather than the address string — and rist_parse_address2 never
+        // rather than the address string, and rist_parse_address2 never
         // populates physical_port. Carry the URL port across explicitly, or
         // librist resolves the literal against port 0 and sends nowhere.
         let ip_literal = vetted.ip().to_string();
@@ -335,7 +329,7 @@ impl RistSource {
 
     /// Blocking sequential read: waits until librist delivers bytes, the
     /// cancel probe fires (served as end-of-source), or forever if the sender
-    /// stays quiet — a silent RIST sender is indistinguishable from a slow
+    /// stays quiet. A silent RIST sender is indistinguishable from a slow
     /// one, and librist keeps the session alive underneath.
     fn read_next(&mut self, buf: &mut [u8]) -> usize {
         loop {
@@ -346,10 +340,9 @@ impl RistSource {
             if n > 0 {
                 return n;
             }
-            // Recovered rather than propagated, as the writer and the
-            // drain are: the ring is left consistent by every one of
-            // them, so a panic elsewhere is no reason for this thread to
-            // take the session down on every later read.
+            // Poison is recovered, as in the writer and the drain: the
+            // ring is always left consistent, so a panic elsewhere should
+            // not fail every later read.
             let ring = self.shared.ring.lock().unwrap_or_else(|e| e.into_inner());
             // Re-check under the lock so a write between drain and lock
             // cannot be slept through.

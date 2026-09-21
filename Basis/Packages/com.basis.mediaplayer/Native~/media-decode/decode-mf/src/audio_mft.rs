@@ -1,6 +1,6 @@
-//! The shared sync-MFT driver for the in-box audio decoders: output
-//! negotiation, sample plumbing and the drain/flush protocol are identical
-//! across codecs — only the input type configured by the adapter differs.
+//! The shared sync-MFT driver for the in-box audio decoders. Output
+//! negotiation, sample plumbing and the drain/flush protocol are the same
+//! for every codec; only the input type the adapter configures differs.
 
 use media_decode::{DecodeError, PcmChunk, SubmitOutcome};
 use windows::Win32::Media::MediaFoundation::{
@@ -69,9 +69,9 @@ impl AudioMft {
         (self.out_rate, self.out_channels)
     }
 
-    /// Pick the offered output type the way the C player learnt to: prefer
-    /// a channel count matching the input (keeps discrete surround), then
-    /// the stereo fold-down, then IEEE float over 16-bit PCM.
+    /// Pick among the offered output types: prefer a channel count matching
+    /// the input (keeps discrete surround), then the stereo fold-down, then
+    /// IEEE float over 16-bit PCM.
     fn negotiate_output(&mut self) -> Result<(), DecodeError> {
         // SAFETY: COM calls on the owned MFT; offered media types are owned
         // wrappers queried before use.
@@ -226,7 +226,7 @@ impl AudioMft {
     }
 
     pub(crate) fn try_output(&mut self) -> Result<Option<PcmChunk>, DecodeError> {
-        // SAFETY: as the video path — the MFT_OUTPUT_DATA_BUFFER's
+        // SAFETY: as on the video path, the MFT_OUTPUT_DATA_BUFFER's
         // ManuallyDrop COM pointers are reclaimed on every path after
         // ProcessOutput.
         unsafe {

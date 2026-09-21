@@ -1,16 +1,15 @@
-//! Android / Vulkan present path:
-//! Vulkan-init interception guarantees the device extensions and YCbCr
-//! feature; the decoder's `AHardwareBuffer` imports into Unity's own
-//! `VkDevice`; one compute pass converts into Unity's RGBA RenderTexture
-//! on the render thread.
+//! Android / Vulkan present path. Vulkan-init interception guarantees the
+//! device extensions and YCbCr feature; the decoder's `AHardwareBuffer`
+//! imports into Unity's own `VkDevice`; one compute pass converts into
+//! Unity's RGBA RenderTexture on the render thread.
 //!
-//! Managed graphics contract (Vulkan, normative): the output texture is a
-//! Unity RenderTexture, **linear** (no sRGB) RGBA32 with
-//! `enableRandomWrite = true`, created at the snapshot's display size and
-//! registered via `bm_session_set_output_texture(GetNativeTexturePtr())`.
-//! The plugin must be preloaded (`PluginImporter.isPreloaded`) so the
-//! interception registers before graphics initialisation. Render events
-//! are issued as on D3D11; teardown order is likewise unchanged.
+//! Managed-side requirements: the output texture is a Unity RenderTexture,
+//! **linear** (no sRGB) RGBA32 with `enableRandomWrite = true`, created at
+//! the snapshot's display size and registered via
+//! `bm_session_set_output_texture(GetNativeTexturePtr())`. The plugin must
+//! be preloaded (`PluginImporter.isPreloaded`) so the interception
+//! registers before graphics initialisation. Render events and teardown
+//! order are the same as on D3D11.
 
 mod fns;
 mod intercept;
@@ -28,9 +27,9 @@ pub unsafe fn unity_plugin_load(interfaces: *mut core::ffi::c_void) {
     unsafe { intercept::plugin_load(interfaces) }
 }
 
-/// logcat line under the `basis-media` tag (stderr goes nowhere on
-/// Android; the engine's own eprintln diagnostics still do, so anything
-/// load-bearing should reach here too).
+/// Write a logcat line under the `basis-media` tag. stderr goes nowhere on
+/// Android, and the engine's own eprintln diagnostics still go there, so
+/// anything that matters should reach here too.
 pub fn log(line: &str) {
     unity::log(line);
 }

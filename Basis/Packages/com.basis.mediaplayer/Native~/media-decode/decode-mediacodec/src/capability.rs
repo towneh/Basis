@@ -1,11 +1,11 @@
-//! Capability probes. Presence and route come from the NDK: a
-//! decoder that `createDecoderByType` actually instantiates is a
-//! will-decode claim for the route the engine takes, and the codec name
-//! separates hardware from the `c2.android`/`OMX.google` software
-//! fallbacks. Ceilings need `MediaCodecList`'s `CodecCapabilities`, which
-//! has no NDK surface — they go through JNI when the host process has
-//! handed over its `JavaVM` (Unity does, at `JNI_OnLoad`); without one,
-//! ceilings stay 0 (unstated, ranked conservatively).
+//! Capability probes. Presence and route come from the NDK: a decoder
+//! that `createDecoderByType` actually instantiates is the one the engine
+//! would use, and the codec name separates hardware from the
+//! `c2.android`/`OMX.google` software implementations. Ceilings need
+//! `MediaCodecList`'s `CodecCapabilities`, which has no NDK surface, so
+//! they go through JNI when the host process has handed over its `JavaVM`
+//! (Unity does, at `JNI_OnLoad`). Without one, ceilings stay 0 (unstated,
+//! ranked conservatively).
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -20,13 +20,12 @@ static JAVA_VM: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
 ///
 /// # Safety
 /// `vm` must be the process's live `JavaVM*`, as the runtime hands it to
-/// `JNI_OnLoad`. It is kept for the process lifetime and revived later
-/// with `JavaVM::from_raw` on whichever thread runs the ceiling probe,
-/// and every JNI call that follows dispatches through the invocation
-/// table read out of it — so any other address becomes an indirect call
-/// through a word of unrelated memory. Nothing downstream can check
-/// this: the null guard at the load site rejects the one value that
-/// would fault immediately rather than misbehave.
+/// `JNI_OnLoad`. It is kept for the process lifetime and revived with
+/// `JavaVM::from_raw` on whichever thread runs the ceiling probe, and
+/// every JNI call then dispatches through the invocation table read out of
+/// it, so any other address becomes an indirect call through unrelated
+/// memory. Nothing downstream can check this; the load site only rejects
+/// null.
 pub unsafe fn set_java_vm(vm: *mut c_void) {
     JAVA_VM.store(vm, Ordering::Release);
 }
@@ -75,7 +74,7 @@ pub fn probe_video_decoder(mime: VideoMime) -> Option<CodecProbe> {
 
 /// `MediaCodecList` → the named codec's `VideoCapabilities`: upper
 /// supported width/height, and the achievable frame rate at that size.
-/// Any JNI failure degrades to `None` — the probe never fails the caller.
+/// Any JNI failure degrades to `None`; the probe never fails the caller.
 fn jni_video_ceilings(codec_name: &str, mime: &str) -> Option<(u32, u32, u32)> {
     use jni::JavaVM;
     use jni::objects::{JObject, JObjectArray, JValue};

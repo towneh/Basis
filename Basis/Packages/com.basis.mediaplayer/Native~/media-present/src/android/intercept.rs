@@ -1,11 +1,11 @@
-//! Vulkan initialisation interception: hook Unity's `vkGetInstanceProcAddr` chain so device creation
-//! is guaranteed to enable the AHardwareBuffer-import extensions and the
-//! `samplerYcbcrConversion` feature. Unity's OpenXR path already asks for
-//! all of it on Quest; the hook makes that a contract instead of an
-//! observation, appending only what the caller didn't already enable.
+//! Vulkan initialisation interception: hook Unity's `vkGetInstanceProcAddr`
+//! chain so device creation enables the AHardwareBuffer-import extensions
+//! and the `samplerYcbcrConversion` feature. Unity's OpenXR path already
+//! asks for all of it on Quest; the hook guarantees it elsewhere, appending
+//! only what the caller did not already enable and the driver advertises.
 //!
-//! Every callback here is entered from C — Unity's graphics layer or the
-//! Vulkan loader — so each one is fenced and degrades rather than
+//! Every callback here is entered from C (Unity's graphics layer or the
+//! Vulkan loader), so each one is fenced and degrades rather than
 //! unwinding: an unexpected hook state forwards or refuses instead of
 //! asserting, and no lock in this module panics on poisoning.
 
@@ -23,13 +23,11 @@ struct HookState {
     real_create_instance: Option<vk::PFN_vkCreateInstance>,
     real_create_device: Option<vk::PFN_vkCreateDevice>,
     instance: Option<vk::Instance>,
-    /// Which spellings of the features query this instance may be
-    /// asked, most capable first, and `None` in a slot the instance does
-    /// not support. Decided at instance creation because that is where
-    /// the API version and the enabled instance extensions are visible.
-    /// Both are kept rather than one: an instance created at 1.1 can
-    /// still be given a physical device from a 1.0 driver, and the core
-    /// name is then the wrong one to have committed to.
+    /// The spellings of the features query this instance supports (core,
+    /// then KHR), `None` in a slot it does not. Decided at instance
+    /// creation, where the API version and enabled instance extensions are
+    /// visible. Both are kept because an instance created at 1.1 can still
+    /// be given a physical device from a 1.0 driver.
     features2: [Option<&'static CStr>; 2],
 }
 
@@ -62,7 +60,7 @@ static GRAPHICS_IFACE: Mutex<usize> = Mutex::new(0);
 static VULKAN_IFACE: Mutex<usize> = Mutex::new(0);
 
 /// Entry from `UnityPluginLoad` (media-ffi forwards). Must run before
-/// graphics initialisation — the plugin has to be preloaded
+/// graphics initialisation, so the plugin has to be preloaded
 /// (`PluginImporter.isPreloaded`).
 ///
 /// # Safety
@@ -71,7 +69,7 @@ pub unsafe fn plugin_load(interfaces: *mut c_void) {
     if interfaces.is_null() {
         return;
     }
-    // SAFETY: caller contract — live IUnityInterfaces vtable.
+    // SAFETY: caller contract: live IUnityInterfaces vtable.
     unsafe {
         let ifs = &*(interfaces as *mut unity::IUnityInterfaces);
         let Some(get_interface_split) = ifs.get_interface_split else {
@@ -82,10 +80,10 @@ pub unsafe fn plugin_load(interfaces: *mut c_void) {
             as *mut unity::IUnityGraphics;
         // Both interfaces are published before the callback is armed:
         // registering can dispatch the initialize event from inside the
-        // register call, and `device_event` reads the Vulkan interface and
-        // gives up where it is absent. That event is the documented — and
-        // only — point at which the instance becomes available, so losing
-        // it leaves the present path inert for the whole run.
+        // register call, and `device_event` gives up if the Vulkan
+        // interface is absent. That event is the only point at which the
+        // instance becomes available, so missing it leaves the present
+        // path inert for the whole run.
         let v2 = get_interface_split(unity::GUID_VULKAN_V2.0, unity::GUID_VULKAN_V2.1)
             as *mut unity::IUnityGraphicsVulkanV2;
         if v2.is_null() {
@@ -100,8 +98,7 @@ pub unsafe fn plugin_load(interfaces: *mut c_void) {
             register(on_device_event);
         } else {
             // Without it `device_event` never fires and the interception
-            // sits inert for the whole run; every other absent slot here
-            // says so, and this one used to go quiet.
+            // sits inert for the whole run.
             unity::log("plugin_load: no RegisterDeviceEventCallback on the graphics interface");
         }
         if v2.is_null() {
@@ -168,9 +165,8 @@ unsafe fn device_event(event_type: c_int) {
                     fns,
                 });
                 // No handle values in the log: `vk::Device` is a
-                // dispatchable handle, so `{:?}` on it prints a live
-                // process address into a sink `adb logcat` and any
-                // bug report can read.
+                // dispatchable handle, so `{:?}` would print a live process
+                // address where `adb logcat` and bug reports can read it.
                 logf!(
                     "device_event: vulkan ctx captured (qfam={})",
                     uvi.queue_family_index
@@ -285,8 +281,8 @@ unsafe fn create_instance(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .real_create_instance;
-    // The loader is only ever handed this pointer from the arm that
-    // stores the real one; reaching it without has nothing to forward to.
+    // The loader only gets this hook from the arm that stores the real
+    // function, so this should not happen; there is nothing to forward to.
     let Some(real) = real else {
         unity::log("vkCreateInstance: hook reached with no real fn");
         return vk::Result::ERROR_INITIALIZATION_FAILED;
@@ -303,17 +299,13 @@ unsafe fn create_instance(
                 .p_application_info
                 .as_ref()
                 .map_or(0, |app| app.api_version);
-            // The core query needs 1.1 and the extension one needs its
-            // instance extension: a loader will hand over a pointer for a
-            // name the instance never supported, and calling it is not
-            // defined. Both are recorded where both preconditions hold,
-            // and the probe takes whichever the loader resolves — the
-            // version the application asked for is not the version the
-            // driver behind a given physical device need implement, so
-            // committing to the core name on the strength of it would
-            // leave the extension spelling untried. Neither available
-            // means the device features go unprobed rather than guessed
-            // at.
+            // The core query needs 1.1 and the KHR one needs its instance
+            // extension. A loader will return a pointer for a name the
+            // instance never supported, and calling it is undefined, so
+            // only names whose precondition holds are recorded. Both are
+            // kept because the application's requested version says
+            // nothing about what a given physical device's driver
+            // implements. With neither, the features go unprobed.
             let core = (api >= vk::API_VERSION_1_1).then_some(c"vkGetPhysicalDeviceFeatures2");
             let khr = (0..ci.enabled_extension_count as usize)
                 .any(|i| {
@@ -330,11 +322,9 @@ unsafe fn create_instance(
     result
 }
 
-/// What the probe could establish. A device that does not advertise the
-/// feature and a probe that never ran are the same silence on the wire
-/// and different places to look on a device pass: the first is the
-/// driver's answer, the second says the interception had nothing to ask
-/// with.
+/// What the probe could establish. `Absent` is the driver's answer;
+/// `Unprobed` means the interception had nothing to ask with. Both leave
+/// the feature alone, but they point at different causes in the log.
 enum YcbcrProbe {
     Advertised,
     Absent,
@@ -342,18 +332,17 @@ enum YcbcrProbe {
 }
 
 /// Whether the driver advertises `samplerYcbcrConversion` for this
-/// device. `Unprobed` where the question cannot be put at all, which is
-/// the answer that matters either way: forcing the feature on where the
-/// device does not have it fails `vkCreateDevice` with
-/// `ERROR_FEATURE_NOT_PRESENT`, and the device this hook sits on is the
-/// app's, not the video path's.
+/// device, or `Unprobed` where the question cannot be asked. Forcing the
+/// feature on where the device lacks it fails `vkCreateDevice` with
+/// `ERROR_FEATURE_NOT_PRESENT`, and that device is the whole app's, not
+/// just the video path's.
 ///
 /// # Safety
 /// `instance` and `physical_device` must be the loader's own handles, and
 /// `real_gipa` must be the loader's own resolver for that instance. Every
-/// name in `features2` must be one the instance supports, since resolving
-/// anything else and calling it is not defined however willingly a loader
-/// hands the pointer over.
+/// name in `features2` must be one the instance supports: calling a
+/// function resolved for any other name is undefined, even if the loader
+/// returns a pointer.
 unsafe fn ycbcr_probe(
     real_gipa: Option<vk::PFN_vkGetInstanceProcAddr>,
     instance: Option<vk::Instance>,
@@ -369,13 +358,11 @@ unsafe fn ycbcr_probe(
     if features2.iter().all(Option::is_none) {
         return YcbcrProbe::Unprobed("no features query this instance supports");
     }
-    // Ordered by what *this* physical device implements rather than by
-    // what the instance was created at: an instance at 1.1 can be handed
-    // a device from a 1.0 driver, and the core query is the wrong name to
-    // put to one. `vkGetPhysicalDeviceProperties` is core 1.0, so it can
-    // always be asked. Ordered rather than restricted — a device that
-    // answers 1.0 still gets the core name tried behind the extension
-    // one, so nothing that resolves today stops being reached.
+    // Ordered by what this physical device implements rather than the
+    // instance version, since a 1.1 instance can be handed a device from a
+    // 1.0 driver. `vkGetPhysicalDeviceProperties` is core 1.0, so it can
+    // always be asked. A 1.0 device still gets the core name tried after
+    // the KHR one.
     // SAFETY: the loader's own resolver, called with its own handles.
     let device_is_1_1 = unsafe {
         real_gipa(instance, c"vkGetPhysicalDeviceProperties".as_ptr()).is_some_and(|f| {
@@ -466,8 +453,8 @@ unsafe fn create_device(
         )
     };
     // As in `create_instance`: without the real function there is nothing
-    // to forward to. A missing gipa costs the two probes below, and both
-    // of them read learning nothing as leaving the caller's device alone.
+    // to forward to. A missing gipa only disables the two probes below,
+    // which then leave the caller's device request unchanged.
     let Some(real_create_device) = real_create_device else {
         unity::log("vkCreateDevice: hook reached with no real fn");
         return vk::Result::ERROR_INITIALIZATION_FAILED;
@@ -543,31 +530,27 @@ unsafe fn create_device(
             logf!("vkCreateDevice: appended [{}]", appended.join(","));
         }
 
-        // samplerYcbcrConversion: flip in place when the caller already
-        // chains a features struct (mixing both is a spec violation),
-        // else prepend our own. Only where the driver has it, the same
-        // rule the extension list above follows — asking for a feature a
-        // device lacks fails the create outright, and this create is the
-        // app's own.
+        // samplerYcbcrConversion: set it in place when the caller already
+        // chains a features struct (the Vulkan spec forbids chaining both
+        // the 1.1 and the YCbCr feature structs), else prepend our own.
+        // Only where the driver advertises it: asking for a feature the
+        // device lacks fails the app's own device creation.
         //
-        // The in-place arm writes into Unity's own structures, which is
-        // the price of the spec's rule: the two feature structs may not
-        // both be chained, so where the caller has one it is the only
-        // place the bit can be set, and copying a chain of arbitrary
-        // types to edit a copy is not something this hook can do
-        // generically. The write is idempotent and turns the feature on
-        // rather than off, so a chain Unity reuses for a later create
-        // carries a request it already made here.
+        // The in-place arm writes into Unity's own structures. Where the
+        // caller has a features struct it is the only place the bit can
+        // go, and this hook cannot generically copy a chain of arbitrary
+        // types. The write is idempotent and only turns the feature on,
+        // so a chain Unity reuses for a later create carries the same
+        // request.
         let mut our_ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default();
         let mut local_ci = *ci;
         let probe = ycbcr_probe(real_gipa, instance, features2, physical_device);
         if matches!(probe, YcbcrProbe::Advertised) {
             let mut ycbcr_found = false;
             let mut chain = ci.p_next as *mut vk::BaseOutStructure<'_>;
-            // Bounded: the chain is the caller's, and a cycle in one this
-            // hook does not own would spin inside `vkCreateDevice` on the
-            // app's own thread, where the panic fence is no help. Far
-            // past any real chain, so a sound one is unaffected.
+            // Bounded: a cycle in the caller's chain would otherwise spin
+            // inside `vkCreateDevice` on the app's thread, where the panic
+            // fence is no help. The cap is far past any real chain.
             let mut hops = 0u32;
             while !chain.is_null() && hops < 64 {
                 hops += 1;
@@ -588,11 +571,9 @@ unsafe fn create_device(
                 }
             }
             // Prepending is only safe where the walk reached the end of
-            // the chain. The two feature structs may not both be
-            // chained, so a walk that stopped at the hop cap may have a
-            // caller's one past it, and adding ours would make two — the
-            // same `ERROR_FEATURE_NOT_PRESENT` class of failure on the
-            // app's own device that the probe above exists to avoid.
+            // the chain. A walk stopped by the hop cap may have missed a
+            // caller's features struct, and adding ours would then chain
+            // both, failing the app's device creation.
             if !ycbcr_found {
                 if chain.is_null() {
                     our_ycbcr.sampler_ycbcr_conversion = vk::TRUE;

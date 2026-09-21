@@ -1,8 +1,7 @@
 //! The shared sync-MFT driver for the video decoders: NV12 output
-//! negotiation (matrix/range re-read on every stream change), the
-//! fresh-sample-per-call output contract, strided copies and the
-//! drain/flush protocol are identical across codecs — only the input type
-//! configured by the adapter differs.
+//! negotiation (matrix and range re-read on every stream change), a fresh
+//! output sample per call, strided copies and the drain/flush protocol.
+//! Only the input type the adapter configures differs between codecs.
 
 use media_decode::{
     ColorInfo, DecodeError, Nv12Frame, SubmitOutcome, YuvMatrix, YuvRange, packed_nv12_len,
@@ -24,9 +23,9 @@ use windows::core::Interface;
 use crate::mf;
 use std::mem::ManuallyDrop;
 
-/// Probe for a registered sync video decoder MFT taking `subtype` input
-/// (how the Store-extension decoders are found — their absence is a
-/// typed error the engine reports, never a mystery).
+/// Probe for a registered sync video decoder MFT taking `subtype` input.
+/// This is how the Store-extension decoders are found; a missing one is a
+/// typed error the engine reports.
 pub(crate) fn create_decoder_for(
     subtype: &windows::core::GUID,
     what: &str,
@@ -204,8 +203,8 @@ impl VideoMft {
             return Ok(None);
         }
         // SAFETY: COM object creation with no raw pointers; the fresh sample
-        // and buffer are owned wrappers. A fresh sample per call is the
-        // discovered MFT contract (reuse fails on the second frame).
+        // and buffer are owned wrappers. The H.264 MFT rejects a reused
+        // caller-allocated sample on the second frame, hence one per call.
         unsafe {
             let sample = mf(MFCreateSample(), "MFCreateSample (output)")?;
             let buffer = mf(
@@ -219,14 +218,11 @@ impl VideoMft {
 
     /// Copy one decoded sample out as NV12.
     ///
-    /// The two lock paths are not equally bounded. `Lock` reports the
-    /// mapped length, so the extent check has a real ceiling to test the
-    /// strided read against. `Lock2D` reports none — `mapped_len` answers
-    /// `None` and `check_extent` accepts any extent — so on that path the
-    /// stride check is the whole of what stands between a decoder's stated
-    /// pitch and the read. That is the design and not an oversight: the
-    /// 2D lock hands back a scanline pointer with no buffer bounds to ask
-    /// for. A reader should not assume every path here is length-checked.
+    /// The lock paths are not equally bounded. `Lock` and `Lock2DSize`
+    /// report the mapped length, so the strided read is checked against it.
+    /// `Lock2D` hands back a scanline pointer and a pitch with no bounds
+    /// (`mapped_len` answers `None` and `check_extent` accepts any extent),
+    /// so on that path the stride check is the only guard on the read.
     fn copy_frame(&self, sample: &IMFSample) -> Result<Nv12Frame, DecodeError> {
         // SAFETY: Lock2DSize/Lock2D/Lock expose a buffer valid until the
         // matching unlock; the stride is checked forwards and at least a
@@ -244,10 +240,9 @@ impl VideoMft {
             if let Ok(buf2d) = buffer.cast::<IMF2DBuffer>() {
                 let mut scanline0 = std::ptr::null_mut();
                 let mut pitch = 0i32;
-                // Lock2DSize also reports where the mapping starts and how
-                // long it is, which is what bounds the copy below. Lock2D
-                // is the fallback for a buffer without the newer interface
-                // and leaves only the stride to go on.
+                // Lock2DSize also reports the mapping's start and length,
+                // which bound the copy below. Lock2D is the fallback for a
+                // buffer without `IMF2DBuffer2` and leaves only the stride.
                 let sized = buf2d.cast::<IMF2DBuffer2>().ok();
                 let mut start = std::ptr::null_mut();
                 let mut len = 0u32;
@@ -285,14 +280,11 @@ impl VideoMft {
                     buffer.Lock(&mut ptr, Some(&mut max), Some(&mut current)),
                     "buffer Lock",
                 )?;
-                // MF_MT_DEFAULT_STRIDE is under-reported by some decoders,
-                // so the row width stays the floor here; what bounds the
-                // copy is the decoded length rather than the capacity the
-                // buffer was created with, which is the larger of the two
-                // and covers bytes this sample never wrote. A buffer
-                // claiming more valid data than it maps has contradicted
-                // itself, and taking that claim is the whole of what this
-                // bound exists to refuse.
+                // Some decoders under-report MF_MT_DEFAULT_STRIDE, so the
+                // row width is the floor. The copy is bounded by the valid
+                // length, not the buffer's capacity (which covers bytes this
+                // sample never wrote). A buffer claiming more valid data
+                // than it maps has contradicted itself and is refused.
                 let checked = (current <= max)
                     .then_some(current as usize)
                     .ok_or_else(|| {
@@ -440,17 +432,16 @@ impl VideoMft {
 }
 
 /// Media Foundation reports strides as signed LONGs, and a negative one
-/// means the surface is stored bottom-up — `copy_nv12` reads rows forwards
-/// from the first scanline and cannot follow that. Refuse it rather than
-/// casting it into a huge unsigned offset.
+/// means the surface is stored bottom-up. `copy_nv12` reads rows forwards
+/// from the first scanline and cannot follow that, so refuse it rather
+/// than casting it into a huge unsigned offset.
 fn forward_stride(tag: &str, pitch: i32) -> Result<usize, DecodeError> {
     usize::try_from(pitch)
         .map_err(|_| DecodeError(format!("{tag}: bottom-up NV12 surface (stride {pitch})")))
 }
 
-/// As [`forward_stride`], and additionally a stride shorter than a row
-/// cannot cover the copy — where the buffer states its own pitch there is
-/// nothing to clamp it to, so refuse that too.
+/// As [`forward_stride`], and also refuses a stride shorter than a row.
+/// Where the buffer states its own pitch there is nothing to clamp it to.
 fn checked_pitch(tag: &str, pitch: i32, width: usize) -> Result<usize, DecodeError> {
     match forward_stride(tag, pitch)? {
         checked if checked >= width => Ok(checked),
@@ -504,12 +495,10 @@ fn nv12_extent(pitch: usize, width: usize, height: usize) -> Option<usize> {
 /// How much of a mapped buffer sits at or after `scanline0`.
 ///
 /// `mapping` is the buffer's own start and length where the lock reported
-/// them, and `None` for a lock that states no mapping at all — `Lock2D`
-/// gives back a stride and nothing else, so there is nothing to check the
-/// copy against and `Ok(None)` says so. A mapping the scanline is *not*
-/// inside is a different thing: the buffer has described itself
-/// incoherently, and treating that as "no information" would quietly drop
-/// the length check, so it refuses.
+/// them, and `None` for a lock that states no mapping (`Lock2D`), which
+/// answers `Ok(None)`. A mapping that does not contain the scanline means
+/// the buffer has described itself incoherently; that is refused rather
+/// than treated as "no information", which would drop the length check.
 fn mapped_len(
     tag: &str,
     scanline0: *mut u8,
@@ -526,11 +515,9 @@ fn mapped_len(
     if start.is_null() || scanline0.is_null() {
         return Err(outside());
     }
-    // Unsigned: the same answer where the scanline is at or after the
-    // mapping's start, and a refusal rather than an overflowing
-    // subtraction where it is not. Signed, the most incoherent pair a
-    // buffer could state is the one that panics a debug build instead of
-    // being refused, which is the whole job here.
+    // Unsigned, so a scanline before the mapping's start is refused. A
+    // signed difference of two far-apart addresses would overflow and
+    // panic a debug build on exactly the input this should refuse.
     let offset = (scanline0 as usize)
         .checked_sub(start as usize)
         .ok_or_else(outside)?;
@@ -544,7 +531,7 @@ fn mapped_len(
 ///
 /// # Safety
 /// - `src` must be readable for [`nv12_extent`]`(pitch, width, height)`
-///   bytes — the extent the strided read touches, which ends the last
+///   bytes: the extent the strided read touches, which ends the last
 ///   chroma row at `width` rather than at the end of its stride.
 /// - `pitch` must be at least `width`.
 /// - `dst` must hold at least [`packed_nv12_len`]`(width, height)` bytes.
@@ -613,11 +600,7 @@ mod tests {
     #[test]
     fn an_odd_dimension_is_refused_rather_than_rounded() {
         // NV12's chroma is exactly half the luma in each axis, so an odd
-        // dimension has no representation in it. Rounding down returns a
-        // length that fits a copy running half-height rows and silently
-        // drops the bottom row of the picture; rounding up returns one a
-        // caller writing the other way overruns. Neither is a size this
-        // can answer with, on either axis or both.
+        // dimension on either axis has no representation.
         for (width, height) in [(4, 3), (3, 4), (3, 3)] {
             assert!(
                 packed_nv12_len(TAG, width, height).is_err(),
@@ -632,10 +615,9 @@ mod tests {
 
     #[test]
     fn a_frame_size_whose_planes_overflow_is_refused_before_it_allocates() {
-        // The wrap this refuses allocates short and leaves the copy
-        // writing the geometry it was given past the end of it. Even on
-        // both axes, so it is the product that refuses these and not the
-        // representability check above.
+        // A wrapped product would allocate short and the copy would write
+        // past it. Both axes are even, so the overflow check is what
+        // refuses these.
         assert!(packed_nv12_len(TAG, usize::MAX / 2 + 1, 2).is_err());
         assert!(packed_nv12_len(TAG, usize::MAX / 3 + 1, 2).is_err());
         // And a geometry far larger than any real frame, but inside the
@@ -669,11 +651,9 @@ mod tests {
 
     #[test]
     fn an_address_pair_too_far_apart_to_subtract_is_refused_not_panicked() {
-        // One from each half of the address space. Their difference does
-        // not fit in a signed word, so taking it that way overflows —
-        // and the most incoherent mapping a buffer could state is the
-        // one input this function exists to refuse, which makes a debug
-        // build's panic on it exactly the wrong answer.
+        // One from each half of the address space: their difference does
+        // not fit in a signed word, and must be refused rather than
+        // panicking a debug build.
         let start = (usize::MAX / 2 + 1) as *mut u8;
         let scanline0 = (usize::MAX / 2) as *mut u8;
         assert!(mapped_len(TAG, scanline0, Some((start, 256))).is_err());

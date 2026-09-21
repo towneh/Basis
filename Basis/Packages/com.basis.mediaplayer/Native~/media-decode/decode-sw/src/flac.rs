@@ -1,9 +1,9 @@
-//! FLAC decode on claxon (in-process, no platform decoder involved —
-//! the C-era blocker was the hanging MF FLAC MFT, not FLAC itself).
+//! FLAC decode on claxon, in-process. The platform route is avoided
+//! because the Media Foundation FLAC MFT hangs.
 //!
 //! Each submitted AU is one complete FLAC frame (Matroska stores frames;
 //! the raw-file demuxer emits whole frames), decoded synchronously into a
-//! small output queue — FLAC has no codec latency, so drain is a no-op.
+//! small output queue. FLAC has no codec latency, so drain is a no-op.
 
 use std::collections::VecDeque;
 use std::io::Cursor;

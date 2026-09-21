@@ -1,7 +1,6 @@
-//! AV1 software decode on rav1d (the software fallback: pure Rust, the
-//! dav1d port, driven through its dav1d-compatible C API). 8-bit 4:2:0
-//! only for now: the present layer speaks NV12; 10-bit wants a P010 path
-//! it does not have yet, so higher depths are a typed refusal.
+//! AV1 software decode on rav1d (the pure-Rust dav1d port, driven through
+//! its dav1d-compatible C API). 8-bit 4:2:0 only: the present layer takes
+//! NV12 and has no P010 path, so higher depths are a typed refusal.
 
 use std::ptr::NonNull;
 
@@ -89,12 +88,9 @@ impl SwAv1Decoder {
         let width = pic.p.w as usize;
         let height = pic.p.h as usize;
         // An AV1 frame size is `frame_width_minus_1 + 1`, so it may be odd,
-        // and NV12 has no way to carry that: its chroma plane is exactly
-        // half the luma in each axis. The interleave below would take
-        // `width / 2` samples of a `width.div_ceil(2)`-wide chroma row and
-        // drop the last column, and the present layer refuses an odd frame
-        // outright — so refuse here, where the reason is still legible,
-        // rather than once per frame further down.
+        // and NV12 cannot carry that: its chroma plane is exactly half the
+        // luma in each axis. `packed_nv12_len` refuses it too; this check
+        // stays for the clearer message.
         if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return Err(DecodeError(format!(
                 "AV1 picture {width}x{height} has no NV12 representation"
@@ -111,12 +107,7 @@ impl SwAv1Decoder {
                 pic.stride[0], pic.stride[1]
             )));
         };
-        // Both axes are even by the refusal above — which the shared
-        // rule now makes as well, keeping the one here for the message
-        // it gives a stream that names an odd picture. It sizes this
-        // exactly: a full Y plane and a half-height interleaved chroma
-        // one, checked, because it is what sizes the destination the
-        // unsafe block below writes through.
+        // Sizes the destination the unsafe block below writes through.
         let mut data = vec![0u8; packed_nv12_len("AV1 picture", width, height)?];
         // SAFETY: the picture's planes are valid for its stated geometry
         // until dav1d_picture_unref; the strides are checked forwards and
@@ -258,10 +249,9 @@ impl Drop for SwAv1Decoder {
     }
 }
 
-/// The strides are signed, and the decoder states them per picture: a
-/// negative one is a bottom-up plane the forward row reads in `convert`
-/// cannot follow, and one shorter than the row it carries cannot bound
-/// them either. `None` for both.
+/// The decoder states signed strides per picture. `None` for a negative
+/// one (a bottom-up plane the forward row reads in `convert` cannot
+/// follow) or one shorter than the row it carries.
 fn checked_strides(y: isize, uv: isize, width: usize) -> Option<(usize, usize)> {
     let y = usize::try_from(y).ok()?;
     let uv = usize::try_from(uv).ok()?;

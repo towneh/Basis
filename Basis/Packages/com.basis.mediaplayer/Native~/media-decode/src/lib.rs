@@ -47,23 +47,17 @@ pub struct Nv12Frame {
 
 /// Bytes a packed [`Nv12Frame`] of this geometry occupies: a full-width Y
 /// plane followed by a half-height interleaved chroma plane. Every route
-/// that packs one sizes its destination from here, so the layout has one
-/// rule rather than one per decoder.
+/// that packs one sizes its destination from here.
 ///
-/// The destination is allocated before a decoder has reported anything
-/// about the memory it will be copied from, so this is where an
-/// implausible frame size is caught: a product that wraps allocates
-/// short and the copy then writes the geometry it was given past the end
-/// of it.
+/// The destination is allocated before the decoder has described the
+/// memory it will be copied from, so this is where an implausible frame
+/// size is caught: a product that wraps would allocate short and the copy
+/// would then write past the end.
 ///
-/// Odd dimensions are refused rather than rounded. NV12's chroma plane
-/// is exactly half the luma in each axis, so an odd one has no
-/// representation in it at all: rounding down returns a length a copy
-/// writing half-height rows fits exactly and drops the bottom row of the
-/// picture, while a caller that rounds the other way writes past it.
-/// This is public, so the choice belongs here rather than in each route
-/// that reaches it — and refusing is what the software AV1 route already
-/// did on its own, for the same reason.
+/// Odd dimensions are refused rather than rounded. NV12's chroma plane is
+/// exactly half the luma in each axis, so an odd dimension has no
+/// representation: rounding down drops the bottom row of the picture, and
+/// rounding up lets a copy write past the buffer.
 pub fn packed_nv12_len(tag: &str, width: usize, height: usize) -> Result<usize, DecodeError> {
     if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(DecodeError(format!(
@@ -94,9 +88,8 @@ pub trait OpaqueImage: Send {
 
     /// Windows DXVA payloads: the decoded NV12 plane as
     /// (`ID3D11Texture2D*`, subresource index). The texture is a slice of
-    /// the decoder's array — the index is load-bearing, never assume
-    /// slice 0. Both valid for the lifetime of this object. `None` on
-    /// every other platform's payload.
+    /// the decoder's array, so never assume slice 0. Both are valid for the
+    /// lifetime of this object. `None` on every other platform's payload.
     fn d3d11_slice(&self) -> Option<(*mut core::ffi::c_void, u32)> {
         None
     }
@@ -186,7 +179,7 @@ pub enum SubmitOutcome {
 /// One decoded PCM chunk: interleaved f32, `data.len() == frames * channels`.
 /// `sample_rate`/`channels` are the decoder's *output* format, which can
 /// change mid-stream (HE-AAC renegotiates when in-band SBR doubles the core
-/// rate) — consumers re-check per chunk.
+/// rate), so consumers re-check per chunk.
 pub struct PcmChunk {
     pub sample_rate: u32,
     pub channels: u32,
@@ -196,9 +189,9 @@ pub struct PcmChunk {
 
 pub trait AudioDecoder {
     /// The output format the decoder will produce, `(sample_rate,
-    /// channels)`, as negotiated at construction. Chunks re-state it and
-    /// can diverge mid-stream (HE-AAC renegotiation) — this is the format
-    /// the ring is built for.
+    /// channels)`, as negotiated at construction. This is the format the
+    /// ring is built for; chunks re-state it and can diverge mid-stream
+    /// (HE-AAC renegotiation).
     fn output_format(&self) -> (u32, u32);
 
     /// Submit one raw compressed frame with its presentation timestamp.
@@ -214,9 +207,9 @@ pub trait AudioDecoder {
     /// After `begin_drain`, whether a `None` from `try_output` means the
     /// stream is truly dry. Synchronous adapters drain inline, so `None`
     /// is always dry (the default). An adapter whose tail arrives
-    /// asynchronously returns false while output may still come — bounding
-    /// its own wait internally so this eventually reports true — and the
-    /// caller keeps polling instead of blocking inside one call, staying
+    /// asynchronously returns false while output may still come, bounding
+    /// its own wait so this eventually reports true. The caller keeps
+    /// polling rather than blocking inside one call, so it stays
     /// responsive to flushes.
     fn drain_dry(&self) -> bool {
         true
@@ -249,9 +242,9 @@ pub trait VideoDecoder {
     /// After `begin_drain`, whether a `None` from `try_output` means the
     /// stream is truly dry. Synchronous adapters drain inline, so `None`
     /// is always dry (the default). An adapter whose tail arrives
-    /// asynchronously returns false while output may still come — bounding
-    /// its own wait internally so this eventually reports true — and the
-    /// caller keeps polling instead of blocking inside one call, staying
+    /// asynchronously returns false while output may still come, bounding
+    /// its own wait so this eventually reports true. The caller keeps
+    /// polling rather than blocking inside one call, so it stays
     /// responsive to flushes.
     fn drain_dry(&self) -> bool {
         true

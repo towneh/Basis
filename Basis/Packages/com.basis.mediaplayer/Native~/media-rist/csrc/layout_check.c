@@ -1,6 +1,6 @@
 /* Exports sizeof/offsetof of the librist structs media-rist declares by hand,
  * so a Rust test can assert the declared layout matches the pinned headers on
- * every build (the hand-written-FFI equivalent of bindgen's layout tests). */
+ * every build (the equivalent of bindgen's layout tests). */
 
 #include <librist/librist.h>
 #include <stddef.h>

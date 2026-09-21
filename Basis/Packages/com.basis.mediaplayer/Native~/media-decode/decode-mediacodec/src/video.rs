@@ -1,9 +1,9 @@
 //! Video through MediaCodec into an `AImageReader` surface: output stays
 //! in the decoder's opaque layout (UBWC on Adreno) and frames surface as
-//! `AHardwareBuffer` handles for the Vulkan present pass to import.
-//! Release discipline is strict: a codec output buffer is
-//! only rendered to the surface when the reader has a slot for it, and
-//! every acquired image keeps the reader alive until the handle drops.
+//! `AHardwareBuffer` handles for the Vulkan present pass to import. A
+//! codec output buffer is only rendered to the surface when the reader has
+//! a slot for it, and every acquired image keeps the reader alive until
+//! the handle drops.
 
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -20,14 +20,12 @@ use crate::ffi::*;
 
 /// Reader slots: enough for the engine's whole decoded-frame budget
 /// (FramePool slots + the parked frame + the render event's current and
-/// retired frames) plus acquire headroom. Opaque frames are the codec's
-/// own surface buffers — small multiples of one frame, not the C ring's
-/// 32 BGRA slots.
+/// retired frames) plus acquire headroom.
 const MAX_IMAGES: i32 = 10;
 
 /// Cumulative wait budget for the drain tail: once EOS is queued, output
 /// is awaited (in slices) up to this long before the stream is declared
-/// dry — a broken codec must not wedge the session's end.
+/// dry, so a broken codec cannot wedge the session's end.
 const DRAIN_BUDGET: Duration = Duration::from_secs(2);
 const DRAIN_SLICE: Duration = Duration::from_millis(20);
 
@@ -63,13 +61,13 @@ struct ReaderHandle {
 // decode thread and image drops; libmediandk reader calls are internally
 // synchronised.
 unsafe impl Send for ReaderHandle {}
-// SAFETY: as above — shared only through Arc, calls internally
+// SAFETY: as above: shared only through Arc, calls internally
 // synchronised by libmediandk.
 unsafe impl Sync for ReaderHandle {}
 
 impl Drop for ReaderHandle {
     fn drop(&mut self) {
-        // SAFETY: last owner — no codec writes into the surface any more
+        // SAFETY: last owner. No codec writes into the surface any more
         // (the codec drops before the decoder's Arc) and no acquired
         // image survives (each held an Arc).
         unsafe { AImageReader_delete(self.reader) };
@@ -268,11 +266,9 @@ impl McVideoDecoder {
                 AImage_delete(image);
                 return Err(DecodeError(format!("AImage_getHeight: {status}")));
             }
-            // A failed query leaves the out-param untouched, so a zero is
-            // indistinguishable from a real dimension by the time the
-            // present pass clamps it up to one and derives the sampling
-            // rectangle from that. Refuse the frame the way every
-            // neighbouring NDK failure here does.
+            // A failed query leaves the out-param at zero, which the present
+            // pass would clamp up to one and derive a sampling rectangle
+            // from. Refuse the frame instead.
             if width <= 0 || height <= 0 {
                 AImage_delete(image);
                 return Err(DecodeError(format!("image geometry {width}x{height}")));
@@ -357,11 +353,11 @@ impl VideoDecoder for McVideoDecoder {
         if let Some(frame) = self.acquire_image()? {
             return Ok(Some(frame));
         }
-        // Drain tail: EOS is queued but the pipeline still holds frames —
-        // wait ONE slice per call under the cumulative budget, so a
+        // Drain tail: EOS is queued but the pipeline still holds frames.
+        // Wait one slice per call under the cumulative budget, so a
         // transient gap between outputs is not mistaken for dry while the
-        // caller stays responsive between calls (a seek's flush must not
-        // wait out a codec that never flags EOS — the OMX avc decoder on
+        // caller stays responsive between calls. A seek's flush must not
+        // wait out a codec that never flags EOS (the OMX avc decoder on
         // Quest never does). `drain_dry` reports false until the tail is
         // in or the budget is spent; the engine keeps polling.
         if self.codec.draining() && !self.eos_out {

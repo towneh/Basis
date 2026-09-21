@@ -6,8 +6,7 @@ use media_decode::{ColorInfo, YuvMatrix, YuvRange};
 
 /// Row-vector coefficients for `dot((y, u, v, 1), row)` per output channel
 /// (R, G, B), with y/u/v normalised to `[0, 1]`. Unspecified matrix/range
-/// resolve to BT.601 limited, the convention every shipped build of this
-/// pipeline has used for unstated streams.
+/// resolve to BT.601 limited.
 pub fn coefficients(color: ColorInfo) -> [[f32; 4]; 3] {
     let (kr, kb) = match color.matrix {
         YuvMatrix::Bt709 => (0.2126, 0.0722),

@@ -1,7 +1,6 @@
 //! The Vulkan device functions the present pass calls, loaded through
-//! Unity's `vkGetInstanceProcAddr` (no loader, no
-//! global function tables — everything comes off the chain Unity itself
-//! uses).
+//! Unity's `vkGetInstanceProcAddr`. There is no loader and no global
+//! function table: everything comes off the chain Unity itself uses.
 
 use core::ffi::CStr;
 

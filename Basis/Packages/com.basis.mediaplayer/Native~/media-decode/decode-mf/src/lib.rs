@@ -53,8 +53,8 @@ pub(crate) fn mf_startup() -> Result<(), DecodeError> {
 }
 
 /// Build the video input type every MF video decoder wants: major, subtype
-/// and (where the caller knows it) the coded frame size — H.264 carries
-/// its dimensions in-band, VP9/AV1 decoders want them stated.
+/// and, where the caller knows it, the coded frame size. H.264 carries its
+/// dimensions in-band; the VP9 and AV1 decoders want them stated.
 fn video_input_type(
     subtype: &windows::core::GUID,
     size: Option<(u32, u32)>,
@@ -102,10 +102,9 @@ macro_rules! delegate_video_decoder {
     };
 }
 
-/// Capability probe: whether the platform VP9 decoder MFT (the
-/// Store "VP9 Video Extensions") both enumerates and activates — the same
-/// path `Vp9Decoder::new` takes, so a `true` is a will-decode claim for
-/// the route the engine would actually use.
+/// Capability probe: whether the platform VP9 decoder MFT (the Store "VP9
+/// Video Extensions") both enumerates and activates. This is the path
+/// `Vp9Decoder::new` takes, so `true` means that route will decode.
 pub fn probe_vp9() -> bool {
     mf_startup().is_ok()
         && create_decoder_for(
@@ -147,8 +146,8 @@ impl H264Decoder {
 delegate_video_decoder!(H264Decoder);
 
 /// VP9 through the platform decoder (the Store "VP9 Video Extensions"
-/// MFT), found by probe: its absence is a typed error the engine reports
-/// (the silently-absent-extension class becomes a diagnostic).
+/// MFT), found by probe. A missing extension is a typed error the engine
+/// reports rather than a silent failure.
 pub struct Vp9Decoder {
     mft: VideoMft,
 }

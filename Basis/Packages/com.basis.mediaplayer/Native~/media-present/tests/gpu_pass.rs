@@ -1,7 +1,7 @@
 //! The conversion pass validated against the CPU reference: synthetic
-//! sweeps across every stated matrix/range, continuity with the integer
-//! maths the CPU path shipped with, and real decoded fixture frames
-//! through the full producer→consumer handoff.
+//! sweeps across every stated matrix/range, agreement with an integer
+//! BT.601 conversion, and real decoded fixture frames through the full
+//! producer→consumer handoff.
 
 #![cfg(windows)]
 
@@ -92,8 +92,8 @@ fn gpu_matches_reference_across_matrices_and_ranges() {
     }
 }
 
-/// Continuity with the CPU path this pass replaced: the shipped integer
-/// BT.601-limited conversion, pinned here as the historical oracle.
+/// An independent integer BT.601-limited conversion as a second oracle for
+/// the float reference.
 #[test]
 fn reference_agrees_with_the_shipped_integer_convert() {
     fn integer_bt601_limited(width: usize, height: usize, data: &[u8], out: &mut Vec<u8>) {
@@ -235,10 +235,10 @@ fn gpu_matches_reference_on_fixture_frames() {
 }
 
 /// The DXVA input path: `present_slice` on a presenter sharing the
-/// decode device must convert exactly the addressed texture-array slice
-/// (the MFT's subresource index is load-bearing — never slice 0 by
-/// assumption). Two slices carry distinct patterns; each present must
-/// reproduce its own slice's reference conversion.
+/// decode device must convert exactly the addressed texture-array slice,
+/// honouring the MFT's subresource index rather than assuming slice 0. Two
+/// slices carry distinct patterns; each present must reproduce its own
+/// slice's reference conversion.
 #[test]
 fn present_slice_honours_the_subresource_index() {
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -349,7 +349,7 @@ fn present_slice_honours_the_subresource_index() {
             matrix: YuvMatrix::Bt709,
             range: YuvRange::Limited,
         };
-        // Slice 1 first — an index-ignoring implementation would show
+        // Slice 1 first: an index-ignoring implementation would show
         // slice 0 here and fail against pattern 1's reference.
         for slice in [1usize, 0] {
             assert!(
@@ -372,7 +372,7 @@ fn present_slice_honours_the_subresource_index() {
 }
 
 /// The presenter owns the NT handle `CreateSharedHandle` hands back, so
-/// dropping it must close the handle — otherwise every rebuild strands a
+/// dropping it must close the handle. Otherwise every rebuild strands a
 /// kernel handle and pins the texture's video memory for the process's life.
 ///
 /// A duplicate pins the kernel object for the length of the test, so a
@@ -411,14 +411,12 @@ fn dropping_the_presenter_closes_its_shared_handle() {
     drop(presenter);
 
     let mut flags = 0u32;
-    // SAFETY: reading a handle's flags and comparing object identity.
-    // A closed handle is reported as invalid under an ordinary run, which
-    // is what this asks about — the duplicate above is what pins the
-    // object, since a sibling row can recycle the freed value. Note that
-    // a process with strict handle checking on, which a debugger turns on
-    // for its child, raises on the closed value instead of answering; the
-    // row is written for `cargo test` and would have to ask a different
-    // way under one.
+    // SAFETY: reading a handle's flags and comparing object identity. In
+    // an ordinary run a closed handle is reported as invalid; the
+    // duplicate pins the object in case a sibling row recycles the freed
+    // value. Under strict handle checking (which a debugger enables for its
+    // child) the closed value raises instead, so this row is meant for a
+    // plain `cargo test`.
     let still_ours = unsafe {
         GetHandleInformation(raw, &mut flags).is_ok() && CompareObjectHandles(raw, dup).as_bool()
     };

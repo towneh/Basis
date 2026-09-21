@@ -3,8 +3,7 @@
 //!
 //! The native dependency sits behind the `librist` cargo feature. With it off
 //! (the default) this crate is a stub whose `open` returns a typed
-//! [`RistError::NotBuilt`] refusal and nothing links — the same graceful
-//! posture as the C player's `BASIS_WITH_RIST` flag.
+//! [`RistError::NotBuilt`] refusal and nothing links.
 
 use std::fmt;
 

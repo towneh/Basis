@@ -1,16 +1,15 @@
-//! The shared async-callback plumbing under both adapters: MediaCodec's
-//! callbacks land on the codec's own internal thread (adapter-
-//! specific decode threads); they only ever push indices into this state
-//! and notify. The engine's decode thread consumes through the trait
-//! surface. Queue depths are the codec's own (input buffers granted by
-//! `onAsyncInputAvailable`, output buffers by `onAsyncOutputAvailable`) —
-//! nothing here inherits another adapter's numbers, and a dry input queue
-//! surfaces as `NotAccepting` for the gated release to absorb.
+//! The shared async-callback plumbing under both adapters. MediaCodec's
+//! callbacks land on the codec's own internal thread and only push indices
+//! into this state and notify; the engine's decode thread consumes through
+//! the trait surface. Queue depths are the codec's own (input buffers
+//! granted by `onAsyncInputAvailable`, output buffers by
+//! `onAsyncOutputAvailable`), and a dry input queue surfaces as
+//! `NotAccepting` for the caller to retry.
 //!
-//! That thread belongs to libmediandk and cannot unwind, so every
-//! trampoline below is fenced and no acquisition of this state panics on
-//! a poisoned lock: the queues and the format stay structurally valid
-//! across one, and a stale index is what the flush epoch already covers.
+//! The callback thread belongs to libmediandk and cannot unwind, so every
+//! trampoline below is fenced and no acquisition of this state panics on a
+//! poisoned lock. The queues and the format stay structurally valid across
+//! a poisoning.
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_void};
@@ -56,32 +55,29 @@ impl Callbacks {
         })
     }
 
-    /// The only way in, so the recovery above is stated once rather than
-    /// at every acquisition. `state` is private to this module for the
-    /// same reason: a plain `unwrap` here would panic on the codec's own
-    /// thread, which cannot unwind.
+    /// The only way to the state, recovering from poison. `state` is
+    /// private so nothing takes it with a plain `unwrap`, which would panic
+    /// on the codec's own thread, which cannot unwind.
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, CbState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 /// Longest decoder-supplied error detail read. Bounds the scan as well as
-/// the copy: the string arrives on the framework's own thread and its
-/// length is the codec's choice, and a vendor blob that forgot the
-/// terminator would otherwise walk that thread off the end of the buffer.
+/// the copy: the string's length is the codec's choice, and a vendor blob
+/// without a terminator would otherwise read off the end of the buffer.
 const DETAIL_CAP: usize = 256;
 
 /// Note a panic one of the callback fences caught.
 ///
-/// The fence is what keeps an unwind out of the framework's thread, but
-/// swallowing the panic outright leaves the codec holding a granted index
-/// nobody will collect and the session waiting on a buffer that never
-/// arrives — a stall, with nothing said about why. Recording it turns that
-/// into an ordinary failed session on the next use.
+/// Swallowing the panic outright would leave the codec holding a granted
+/// index nobody collects and the session waiting on a buffer that never
+/// arrives. Recording it turns that silent stall into an ordinary failed
+/// session on the next use.
 ///
 /// Re-locking here is sound: the guard the panicking frame held was
 /// dropped as the stack unwound, and the lock is taken through poison
-/// recovery like every other use of it.
+/// recovery.
 ///
 /// # Safety
 /// `userdata` is the `Arc<Callbacks>` raw pointer this driver registered,
@@ -309,7 +305,7 @@ impl AsyncCodec {
     }
 
     /// Copy one compressed AU into a free input buffer. A dry input queue
-    /// is `NotAccepting` — the codec grants indices as it consumes.
+    /// is `NotAccepting`; the codec grants indices as it consumes.
     pub fn submit(&mut self, au: &[u8], pts_us: i64) -> Result<SubmitOutcome, DecodeError> {
         if let Some(e) = self.take_error() {
             return Err(e);
@@ -435,10 +431,8 @@ impl AsyncCodec {
         self.cb.lock().format
     }
 
-    /// Flush for a seek/loop: invalidates every granted index, so the
-    /// queues clear under the same lock, and the epoch advances so a
-    /// callback racing the flush cannot re-deliver a stale index. Async
-    /// codecs must be restarted after a flush.
+    /// Flush for a seek/loop. This invalidates every granted index, so both
+    /// queues are cleared. Async codecs must be restarted after a flush.
     pub fn reset(&mut self) -> Result<(), DecodeError> {
         // SAFETY: flush/start on a live codec in the Executing state.
         unsafe {
@@ -449,11 +443,10 @@ impl AsyncCodec {
                     self.name
                 )));
             }
-            // Flush invalidates every granted index; the clear runs under
-            // the callback lock so a dispatched-but-blocked callback lands
-            // after it (a stale index it might still deliver is re-granted
-            // by start below — a duplicate would surface as a loud queue
-            // error, not a silent wedge).
+            // The clear runs under the callback lock, so a callback already
+            // dispatched but blocked on it lands afterwards. A stale index it
+            // delivers is re-granted by the start below; a duplicate would
+            // surface as a queue error rather than a silent wedge.
             {
                 let mut state = self.cb.lock();
                 state.input_free.clear();
@@ -485,6 +478,7 @@ impl Drop for AsyncCodec {
     }
 }
 
+/// The codec's component name (e.g. `c2.qti.avc.decoder`).
 ///
 /// # Safety
 /// `codec` must be a live `AMediaCodec*`; `getName` reads through it.

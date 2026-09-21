@@ -1,12 +1,11 @@
-//! The per-session render pass: import the decoder's
-//! `AHardwareBuffer` into Unity's `VkDevice` and run one compute dispatch
-//! converting into Unity's RGBA RenderTexture, recorded on Unity's
-//! current command buffer inside the render event. The driver's
-//! per-buffer suggested `VkSamplerYcbcrConversion` does the matrix/range
-//! work (read per buffer — decoder buffers carry their own
-//! dataspace); GPU lifetime rides Unity's frame counters
-//! (`safeFrameNumber`), so nothing is destroyed while a submitted command
-//! buffer might still read it.
+//! The per-session render pass: import the decoder's `AHardwareBuffer`
+//! into Unity's `VkDevice` and run one compute dispatch converting into
+//! Unity's RGBA RenderTexture, recorded on Unity's current command buffer
+//! inside the render event. The driver's suggested
+//! `VkSamplerYcbcrConversion` does the matrix/range work, read per buffer
+//! because decoder buffers carry their own dataspace. GPU lifetime follows
+//! Unity's frame counters (`safeFrameNumber`), so nothing is destroyed
+//! while a submitted command buffer might still read it.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -159,9 +158,9 @@ impl SessionRenderer {
     }
 
     /// Draw `frame` (if any) into the registered Unity texture. Returns
-    /// true when a fresh frame was recorded. Failures log (once per
-    /// cause where repetitive) and drop the frame — the render thread
-    /// never blocks and never panics.
+    /// true when a fresh frame was recorded. Failures log (once per cause
+    /// where repetitive) and drop the frame; the render thread never blocks
+    /// and never panics.
     ///
     /// # Safety
     /// `unity_texture` must be the `GetNativeTexturePtr()` value of a live
@@ -170,18 +169,17 @@ impl SessionRenderer {
     /// call. Unity's `access_texture` dereferences it and writes back the
     /// `VkImage`, layout and extent that drive the view and the dispatch
     /// below, so a stale or fabricated pointer is a use-after-free inside
-    /// Unity's own resource tracker before it is anything of ours. The
-    /// null check inside rejects the one value that cannot do that.
+    /// Unity's own resource tracker. Only null is rejected here.
     pub unsafe fn render(
         &mut self,
         frame: Option<VideoFrame>,
         unity_texture: *mut core::ffi::c_void,
         generation: u64,
     ) -> bool {
-        // The body below holds this guard across sites that can panic, and
-        // the ABI fence above catches those without clearing the poison, so
-        // recovering here is what keeps one caught panic from disabling the
-        // present path (and the device event) for the rest of the process.
+        // The body holds this guard across sites that can panic, and the
+        // ABI fence catches those without clearing the poison. Recovering
+        // here stops one caught panic disabling the present path (and the
+        // device event) for the rest of the process.
         let mut guard = CTX.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ctx) = guard.as_mut() else {
             if !self.warned_no_ctx {
@@ -254,8 +252,8 @@ impl SessionRenderer {
             return false;
         }
 
-        // Per-buffer import properties + the driver's suggested
-        // conversion — read for every buffer, never assumed.
+        // Import properties and the driver's suggested conversion, read for
+        // every buffer rather than assumed.
         let (props, fmt_props) = {
             let mut fmt_props = vk::AndroidHardwareBufferFormatPropertiesANDROID::default();
             let mut props = vk::AndroidHardwareBufferPropertiesANDROID {
@@ -377,8 +375,8 @@ impl SessionRenderer {
                 return false;
             }
             // The shader writes through an rgba8 storage view; sRGB (or
-            // non-RGBA8) targets cannot take storage writes here. The
-            // managed contract mirrors D3D11's: a linear RGBA32 target.
+            // non-RGBA8) targets cannot take storage writes here. As on
+            // D3D11, the managed side must supply a linear RGBA32 target.
             if dst.format != vk::Format::R8G8B8A8_UNORM {
                 if !self.warned_format {
                     self.warned_format = true;
@@ -452,10 +450,10 @@ impl SessionRenderer {
             let imported = self.imports.get_mut(&ahb_key).expect("imported above");
             imported.last_used = state.current_frame_number;
 
-            // Acquire the buffer from the codec (foreign queue family);
-            // contents were written outside Vulkan, so UNDEFINED discards
-            // nothing we need... except the content itself arrives via the
-            // external-memory guarantee, not the layout transition.
+            // Acquire the buffer from the codec (foreign queue family). The
+            // contents were written outside Vulkan and arrive through the
+            // external-memory guarantee, not the layout transition, so
+            // UNDEFINED as the old layout loses nothing.
             let barrier = vk::ImageMemoryBarrier {
                 src_access_mask: vk::AccessFlags::empty(),
                 dst_access_mask: vk::AccessFlags::SHADER_READ,
@@ -544,8 +542,8 @@ impl SessionRenderer {
                 inv_coded_h: 1.0 / imported.height.max(1) as f32,
                 // Unity samples an externally written RenderTexture
                 // vertically flipped on Vulkan (row 0 is the on-screen
-                // bottom; pinned empirically on the Quest pass), so the
-                // pass writes rows inverted.
+                // bottom; observed on Quest), so the pass writes rows
+                // inverted.
                 flip_x: 0,
                 flip_y: 1,
             };
@@ -599,10 +597,9 @@ impl SessionRenderer {
 impl Drop for SessionRenderer {
     fn drop(&mut self) {
         // Sessions close from the main thread while Unity may still be
-        // submitting: Vulkan objects go to the process-wide graveyard,
-        // drained by later render events (any session) once their frames
-        // are provably retired. Frames (AImages) drop here — the decoder
-        // side owns their lifetime rules.
+        // submitting, so Vulkan objects go to the process-wide graveyard,
+        // drained by later render events once their frames are provably
+        // retired.
         let mut items: Vec<Retired> = Vec::new();
         if let Some(convert) = self.convert.take() {
             items.push(Retired::Convert(convert));
@@ -628,7 +625,7 @@ fn build_convert(
     let external = fmt_props.format == vk::Format::UNDEFINED;
     // SAFETY: object creation against the live device; every result is
     // checked and partially built objects are destroyed on the error
-    // paths via the small `cleanup` closure discipline below.
+    // paths (see `cleanup_base`).
     unsafe {
         let ext_format = vk::ExternalFormatANDROID {
             external_format: fmt_props.external_format,
@@ -978,29 +975,27 @@ fn import_buffer(
 /// Destroy graveyard entries whose frames are provably retired, with no
 /// session involved.
 ///
-/// `SessionRenderer::render` collects as part of its own pass, but it is
-/// reached only through a live session's handle, and `bm_session_close`
-/// retires that handle before the renderer's objects reach the graveyard.
-/// A closing session's objects are therefore destroyed by some *other*
-/// live session's render events, and the last session to close leaves
-/// nothing that can ever run the collector: its buried view outlives the
-/// image it was made over, whatever the managed side then does with the
-/// texture. This is the drain that the caller issues instead.
+/// `SessionRenderer::render` collects as part of its own pass, but only a
+/// live session reaches it, and `bm_session_close` retires the handle
+/// before the renderer's objects reach the graveyard. A closing session's
+/// objects are therefore destroyed by another session's render events, and
+/// the last session to close would leave nothing to run the collector: its
+/// buried view would outlive the image it was made over. The caller issues
+/// this drain for that case.
 ///
-/// Silent where the device context or the recording state is absent, save
-/// for one line the first time the latter happens: it means the drain ran
-/// and destroyed nothing, while its caller is counting down to releasing
-/// the texture regardless.
+/// Silent where the device context or the recording state is absent,
+/// except for one line the first time the recording state is missing: the
+/// drain then destroyed nothing, while its caller goes on to release the
+/// texture regardless.
 pub fn drain_graveyard() {
     let mut guard = CTX.lock().unwrap_or_else(|e| e.into_inner());
     let Some(ctx) = guard.as_mut() else {
         return;
     };
     // SAFETY: Unity vtable call on the render thread, the documented call
-    // site. Same query the render pass makes, and the command buffer is
-    // checked with it for the same reason: both are how Unity says the
-    // call arrived inside a render event, and the frame numbers below mean
-    // nothing anywhere else.
+    // site. As in the render pass, the query and a non-null command buffer
+    // are how Unity signals the call is inside a render event; the frame
+    // numbers below mean nothing anywhere else.
     let recording = unsafe {
         let mut state = core::mem::zeroed::<unity::UnityVulkanRecordingState>();
         let recording_state = (*ctx.vulkan_iface).command_recording_state;
@@ -1027,10 +1022,10 @@ static WARNED_NO_RECORDING: AtomicBool = AtomicBool::new(false);
 
 mod graveyard {
     //! Vulkan objects whose owner (a closing session) cannot prove GPU
-    //! quiescence: parked here, destroyed by later render events once
+    //! quiescence, parked here and destroyed by later render events once
     //! `safeFrameNumber` passes the burial frame. If no render event ever
-    //! runs again the objects leak until process end — bounded and
-    //! preferable to destroying in-flight resources.
+    //! runs again they leak until process end, which is bounded and better
+    //! than destroying in-flight resources.
 
     use std::sync::Mutex;
 

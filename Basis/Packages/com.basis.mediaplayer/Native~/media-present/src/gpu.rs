@@ -364,7 +364,7 @@ impl ConvertPass {
     }
 
     /// Fill the sampled texture from a decoder-owned NV12 texture-array
-    /// slice with one GPU subresource copy — the DXVA input path. The
+    /// slice with one GPU subresource copy (the DXVA input path). The
     /// subresource index comes from `IMFDXGIBuffer::GetSubresourceIndex`
     /// and is honoured as given (never assume slice 0).
     ///

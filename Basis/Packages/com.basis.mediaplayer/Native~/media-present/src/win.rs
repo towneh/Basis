@@ -1,11 +1,11 @@
 //! D3D11 shared-texture handoff into Unity via a keyed mutex.
 //!
-//! Producer (decode thread, own D3D11 device) converts the decoder's NV12
-//! frame into a shared BGRA texture with one GPU pass (`gpu`);
-//! consumer (Unity render thread) opens the shared handle on Unity's
-//! device and copies into a Unity-created texture. Keyed-mutex protocol:
-//! producer acquires key 0 / releases key 1, consumer acquires key 1 /
-//! releases key 0, both with timeouts so neither side ever blocks the other.
+//! The producer (decode thread, own D3D11 device) converts the decoder's
+//! NV12 frame into a shared BGRA texture with one GPU pass (`gpu`). The
+//! consumer (Unity render thread) opens the shared handle on Unity's device
+//! and copies into a Unity-created texture. Keyed-mutex protocol: the
+//! producer acquires key 0 and releases key 1, the consumer acquires key 1
+//! and releases key 0, both with timeouts so neither side blocks the other.
 
 use std::ffi::c_void;
 
@@ -38,8 +38,8 @@ enum Acquire {
 }
 
 /// `AcquireSync` reports a timeout as the success HRESULT `WAIT_TIMEOUT`
-/// (0x102), which `windows`' `Result<()>` projection collapses into `Ok` —
-/// so go through the raw vtable to keep the distinction.
+/// (0x102), which the `windows` crate's `Result<()>` projection collapses
+/// into `Ok`, so this goes through the raw vtable to keep the distinction.
 fn acquire_sync(
     keyed: &IDXGIKeyedMutex,
     key: u64,
@@ -105,9 +105,9 @@ impl SharedTexturePresenter {
         }
     }
 
-    /// Build the presenter on an existing device — the hardware decode
-    /// path, where the decoder's NV12 slices must live on the same device
-    /// the conversion pass samples them from.
+    /// Build the presenter on an existing device. Used by the hardware
+    /// decode path, where the decoder's NV12 slices must live on the same
+    /// device the conversion pass samples them from.
     ///
     /// # Safety
     /// `device_ptr` must be a live `ID3D11Device*`; a reference is cloned,
@@ -170,12 +170,11 @@ impl SharedTexturePresenter {
                 ),
                 "CreateSharedHandle",
             )?;
-            // The handle is owned from here, and `Drop` cannot run until
-            // `Self` exists — so a path that returns between the two has
-            // to close it itself or the texture's video memory stays
-            // pinned for the life of the process, one handle per
-            // presenter rebuild. The presenter is rebuilt on every
-            // announced coded-size or codec change.
+            // The handle is owned from here, but `Drop` cannot run until
+            // `Self` exists. A path that returns in between must close it,
+            // or the texture's video memory stays pinned for the life of
+            // the process, one leak per presenter rebuild (every coded-size
+            // or codec change).
             let built = (|| -> Result<(IDXGIKeyedMutex, gpu::ConvertPass), PresentError> {
                 let keyed: IDXGIKeyedMutex = d3d(texture.cast(), "cast IDXGIKeyedMutex")?;
                 let pass = gpu::ConvertPass::new(&device, &texture, width, height)?;
@@ -266,7 +265,7 @@ impl SharedTexturePresenter {
     /// Present a decoder-owned NV12 texture-array slice (the DXVA path):
     /// one GPU subresource copy into the pass's sampled texture, then the
     /// same conversion draw. The caller must keep the slice's owning
-    /// sample alive until this returns — the copy is submitted on this
+    /// sample alive until this returns: the copy is then submitted on this
     /// device's immediate context before the sample is released, which
     /// orders it ahead of any decoder reuse of the surface.
     ///

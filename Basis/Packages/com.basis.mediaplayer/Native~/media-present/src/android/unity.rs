@@ -1,7 +1,7 @@
 //! Unity native plugin API declarations (ported from IUnityInterface.h /
 //! IUnityGraphics.h / IUnityGraphicsVulkan.h; `UNITY_INTERFACE_API` is
 //! empty on Android, so everything is plain `extern "C"`). Struct layouts
-//! mirror the headers field-for-field — the V2 Vulkan interface is a
+//! mirror the headers field for field: the V2 Vulkan interface is a
 //! vtable and every slot must sit at its exact offset.
 
 #![allow(non_snake_case)]

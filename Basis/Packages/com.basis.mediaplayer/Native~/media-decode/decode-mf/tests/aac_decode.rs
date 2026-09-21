@@ -1,5 +1,5 @@
 //! Decode the committed fixture's AAC track through the in-box MFT
-//! headless: pins the discovered configuration contract (raw payload,
+//! headless, checking the configuration it needs (raw payload,
 //! HEAACWAVEINFO blob, float output ranking) against the real decoder.
 
 #![cfg(windows)]
@@ -81,7 +81,7 @@ fn fixture_aac_track_decodes_to_pcm() {
     }
 
     // 283 AUs x 1024 samples, minus whatever the decoder holds back as
-    // priming — expect within a few frames of the 6 s content.
+    // priming: expect within a few frames of the 6 s content.
     assert!(
         total_frames > 280 * 1024 && total_frames <= 283 * 1024,
         "unexpected frame total {total_frames}"

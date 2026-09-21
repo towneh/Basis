@@ -1,5 +1,5 @@
-//! Audio through MediaCodec (AAC and MP3 decode on the platform,
-//! never bundled). No surface — PCM comes back through the codec's output
+//! Audio through MediaCodec: AAC and MP3 decode on the platform decoder.
+//! There is no surface; PCM comes back through the codec's output
 //! buffers, converted to interleaved f32 for the ring. Float output is
 //! requested at configure; the output format's stated encoding decides
 //! how each buffer is read, so a codec that ignores the request still
@@ -13,16 +13,16 @@ use media_decode::{AudioDecoder, DecodeError, PcmChunk, SubmitOutcome};
 use crate::driver::AsyncCodec;
 use crate::ffi::*;
 
-/// Drain-tail wait budget, sliced (see the video adapter's rationale).
+/// Drain-tail wait budget, spent in slices (see the video adapter).
 const DRAIN_BUDGET: Duration = Duration::from_secs(1);
 const DRAIN_SLICE: Duration = Duration::from_millis(20);
 
 /// Bounds on the geometry handed to `AMediaCodec_configure`. The NDK
 /// takes `int32_t`, so narrowing the container's `u32` flips the sign
-/// above `i32::MAX` and a stated 3 GHz rate configures a vendor codec
-/// with a negative one. Whether that is refused cleanly or used to
-/// compute buffer geometry is up to a closed-source blob, so it is
-/// refused here instead. Both sit above anything the codec table carries.
+/// above `i32::MAX`, and a stated 3 GHz rate would configure a vendor
+/// codec with a negative one. Whether a closed-source codec refuses that
+/// or computes buffer geometry from it is unknown, so it is refused here.
+/// Both bounds sit above anything a real stream carries.
 const MAX_SAMPLE_RATE: u32 = 384_000;
 const MAX_CHANNELS: u32 = 64;
 
@@ -80,15 +80,12 @@ impl McAudioDecoder {
             AMediaFormat_setInt32(format, c"pcm-encoding".as_ptr(), ENCODING_PCM_FLOAT);
             // Some devices' AAC decoders fold multichannel down to stereo
             // unless configured with an output-channel ceiling. Both the
-            // generic (API 32+) and the legacy AAC key — unknown keys are
-            // ignored, values above the stream's count clamp to it.
+            // generic (API 32+) and the legacy AAC key are set: unknown keys
+            // are ignored, and values above the stream's count clamp to it.
             //
-            // The ceiling asked for is the one that will be accepted: a
-            // codec honouring a larger request would report a geometry
-            // `read_output` then fails the track over, which is a hard
-            // decode failure for a shape this call asked to receive. Any
-            // value at or above the stream's own count defeats the
-            // downmix equally, so the bound is the same constant.
+            // The ceiling is `MAX_CHANNELS` because a codec honouring a
+            // larger request could report a geometry `read_output` refuses.
+            // Any value at or above the stream's count defeats the downmix.
             let ceiling = MAX_CHANNELS as i32;
             AMediaFormat_setInt32(format, c"max-output-channel-count".as_ptr(), ceiling);
             AMediaFormat_setInt32(format, c"aac-max-output-channel_count".as_ptr(), ceiling);
@@ -123,17 +120,14 @@ impl McAudioDecoder {
             self.eos_out = true;
         }
         let read = self.read_output(index, &info);
-        // The index is granted whatever the info turned out to say, so it
-        // goes back before any refusal above it: a codec whose output pool
-        // is not returned stalls, which reads as a hang rather than as the
-        // error that caused it.
+        // The index goes back whatever the read returned: a codec whose
+        // output pool is not returned stalls, which reads as a hang rather
+        // than as the error that caused it.
         // SAFETY: release the granted index exactly once, never rendered.
         let status =
             unsafe { AMediaCodec_releaseOutputBuffer(self.codec.raw(), index as usize, false) };
-        // The release status is read first: where both it and the read
-        // failed, propagating the read would discard the codec-level
-        // failure entirely, and that is the one that says the codec is in
-        // trouble rather than this frame.
+        // A release failure takes precedence over a read failure: it says
+        // the codec is in trouble rather than this frame.
         if status != AMEDIA_OK {
             let after = read
                 .err()
@@ -154,12 +148,11 @@ impl McAudioDecoder {
         index: i32,
         info: &AMediaCodecBufferInfo,
     ) -> Result<Option<PcmChunk>, DecodeError> {
-        // The NDK states both of these signed, and a negative one cast
-        // straight to usize sign-extends and then wraps the addition
-        // below — a window that passes the bounds check while sitting
-        // before the buffer. Convert fallibly, ahead of the empty-buffer
-        // test so that metadata this malformed is refused rather than
-        // read as "no output this time".
+        // The NDK states both of these signed. A negative one cast straight
+        // to usize would wrap the addition below into a window that passes
+        // the bounds check while sitting before the buffer. Converted ahead
+        // of the empty-buffer test so malformed metadata is refused rather
+        // than read as "no output this time".
         let (Ok(offset), Ok(len)) = (usize::try_from(info.offset), usize::try_from(info.size))
         else {
             return Err(DecodeError(format!(
@@ -184,10 +177,8 @@ impl McAudioDecoder {
             self.configured.1
         };
         let float_out = format.seen && format.pcm_encoding == ENCODING_PCM_FLOAT;
-        // The live format is the codec's own claim and gets the same
-        // bounds the configured one did, since it overrides it here and
-        // reaches the ring the same way. A working decoder cannot report
-        // this, so refusing costs nothing that a healthy track would want.
+        // The live format overrides the configured one, so it gets the
+        // same bounds. A working decoder never reports values past them.
         if sample_rate > MAX_SAMPLE_RATE || channels > MAX_CHANNELS {
             return Err(DecodeError(format!(
                 "implausible output geometry: {sample_rate} Hz / {channels} channels on {}",
@@ -195,14 +186,11 @@ impl McAudioDecoder {
             )));
         }
 
-        // Whole interleaved frames only, as the software PCM adapter also
-        // guarantees. The chunking below would drop a sub-sample tail
-        // silently, and a sample count short of a frame reaches the ring
-        // as a remainder it will never accept — the chunk then parks until
-        // the inert-consumer discard clears it, which is a stall per
-        // malformed buffer. Trimming here costs the same bytes without
-        // the stall, and without making a torn tail fatal to a track that
-        // is otherwise decoding.
+        // Whole interleaved frames only. A sample count short of a frame
+        // reaches the ring as a remainder it never accepts, and the chunk
+        // then parks until the inert-consumer discard clears it: a stall
+        // per malformed buffer. Trimming the torn tail here avoids the
+        // stall without failing an otherwise healthy track.
         let bytes_per_frame = if float_out { 4 } else { 2 } * channels.max(1) as usize;
         let len = len - len % bytes_per_frame;
         if len == 0 {
@@ -253,11 +241,10 @@ impl AudioDecoder for McAudioDecoder {
         if format.seen && format.sample_rate > 0 && format.channels > 0 {
             let sample_rate = format.sample_rate as u32;
             let channels = format.channels as u32;
-            // The bounds `read_output` holds the live format to, applied
-            // where the pipeline reads it: this is what sizes the ring
-            // and what the session publishes as its audio geometry, both
-            // of which happen before a buffer arrives for that refusal
-            // to catch. The configured pair is already bounded.
+            // The same bounds `read_output` applies. This value sizes the
+            // ring and is published as the session's audio geometry before
+            // any buffer arrives, so it is checked here too. The configured
+            // pair is already bounded.
             if sample_rate <= MAX_SAMPLE_RATE && channels <= MAX_CHANNELS {
                 return (sample_rate, channels);
             }
@@ -284,9 +271,8 @@ impl AudioDecoder for McAudioDecoder {
                 break;
             }
         }
-        // One slice per call under the cumulative budget (the video
-        // adapter's rationale): the caller stays responsive to flushes
-        // while `drain_dry` reports false.
+        // One slice per call under the cumulative budget, so the caller
+        // stays responsive to flushes while `drain_dry` reports false.
         if self.codec.draining() && !self.eos_out {
             if self.drain_waited < DRAIN_BUDGET {
                 self.drain_waited += DRAIN_SLICE;

@@ -1,8 +1,8 @@
 //! Decode the committed WebM fixtures' VP9/AV1 tracks through the
-//! platform decoder MFTs headless: pins the probe + sync-driving contract
+//! platform decoder MFTs headless, checking the probe and sync driving
 //! against the real Store-extension decoders. If an extension is not
-//! installed the row skips loudly — that absence is exactly what the
-//! engine reports as a diagnostic, not a driving bug.
+//! installed the row skips loudly; the engine reports that absence as a
+//! diagnostic.
 
 #![cfg(windows)]
 
