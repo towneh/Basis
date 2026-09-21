@@ -24,6 +24,7 @@ pub use pool::FramePool;
 pub use present::render_present;
 #[cfg(target_os = "android")]
 pub use present::render_take;
+pub use route::SLOW_VIDEO_DECODE_ENV;
 pub use sync::{SYNC_DEAD_BAND, SYNC_SEEK_THRESHOLD, SYNC_SLEW_PPM, SyncAction, ladder};
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};

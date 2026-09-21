@@ -67,8 +67,84 @@ pub struct VideoRoute {
     pub decode_device: Option<*mut std::ffi::c_void>,
 }
 
-#[cfg(windows)]
+/// Setting this to a number of milliseconds makes every routed video
+/// decoder take that long over each frame it yields: a decoder too slow
+/// for its stream, on demand. It is the lever for the rows that pin what
+/// slow video may cost, and for reproducing that by hand on a device.
+pub const SLOW_VIDEO_DECODE_ENV: &str = "BASIS_MEDIA_SLOW_VIDEO_DECODE_MS";
+
+struct SlowVideoDecoder {
+    inner: Box<dyn VideoDecoder>,
+    per_frame: std::time::Duration,
+}
+
+impl VideoDecoder for SlowVideoDecoder {
+    fn hardware_fell_back(&self) -> bool {
+        self.inner.hardware_fell_back()
+    }
+
+    fn submit(
+        &mut self,
+        annexb: &[u8],
+        pts_us: i64,
+    ) -> Result<media_decode::SubmitOutcome, media_decode::DecodeError> {
+        self.inner.submit(annexb, pts_us)
+    }
+
+    fn try_output(
+        &mut self,
+    ) -> Result<Option<media_decode::VideoFrame>, media_decode::DecodeError> {
+        let frame = self.inner.try_output()?;
+        if frame.is_some() {
+            std::thread::sleep(self.per_frame);
+        }
+        Ok(frame)
+    }
+
+    fn begin_drain(&mut self) -> Result<(), media_decode::DecodeError> {
+        self.inner.begin_drain()
+    }
+
+    fn drain_dry(&self) -> bool {
+        self.inner.drain_dry()
+    }
+
+    fn reset(&mut self) -> Result<(), media_decode::DecodeError> {
+        self.inner.reset()
+    }
+}
+
 pub fn open_video_decoder(
+    codec: media_demux::VideoCodec,
+    coded_width: u32,
+    coded_height: u32,
+    live: bool,
+    preference: DecodePreference,
+    codec_private: &[u8],
+) -> Result<VideoRoute, media_decode::DecodeError> {
+    let mut route = route_video_decoder(
+        codec,
+        coded_width,
+        coded_height,
+        live,
+        preference,
+        codec_private,
+    )?;
+    let slow_ms = std::env::var(SLOW_VIDEO_DECODE_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0);
+    if let Some(ms) = slow_ms {
+        route.decoder = Box::new(SlowVideoDecoder {
+            inner: route.decoder,
+            per_frame: std::time::Duration::from_millis(ms),
+        });
+    }
+    Ok(route)
+}
+
+#[cfg(windows)]
+fn route_video_decoder(
     codec: media_demux::VideoCodec,
     coded_width: u32,
     coded_height: u32,
@@ -191,7 +267,7 @@ fn open_windows_software(
 /// a missing platform decoder is a typed refusal, observable, not
 /// silent). The software-only preference has no rung here.
 #[cfg(target_os = "android")]
-pub fn open_video_decoder(
+fn route_video_decoder(
     codec: media_demux::VideoCodec,
     coded_width: u32,
     coded_height: u32,
@@ -228,7 +304,7 @@ pub fn open_video_decoder(
 /// H.264/H.265/VP9/VP8 are typed refusals here — observable, never
 /// silent. The hardware-only preference has no rung.
 #[cfg(not(any(windows, target_os = "android")))]
-pub fn open_video_decoder(
+fn route_video_decoder(
     codec: media_demux::VideoCodec,
     coded_width: u32,
     coded_height: u32,
