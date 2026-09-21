@@ -938,14 +938,15 @@ fn caption_lane_delivers_the_scripted_cues() {
 /// Paused is the sharp case, since nothing pulls afterwards either.
 ///
 /// Needs a span long enough to take real time to decode, which no checked-in
-/// fixture has: this reads the rig's clip, whose keyframe before 17 s is at
-/// 9.75 s. Run it with the rig up and `-- --ignored`.
+/// fixture has: this reads a clip from a test server, one whose keyframe
+/// before 17 s is at 9.75 s. Set `BASIS_MEDIA_TEST_IMAX_URL` to it and run
+/// with `-- --ignored`.
 #[test]
-#[ignore = "reads https://mr.town/vod/imax_51.mp4; run with the rig up"]
+#[ignore = "needs BASIS_MEDIA_TEST_IMAX_URL: a clip with its keyframe before 17 s at 9.75 s"]
 fn a_long_decode_forward_discards_no_audio() {
-    let mut session = Session::open(OpenRequest::new(
-        "https://mr.town/vod/imax_51.mp4".to_owned(),
-    ));
+    let url = std::env::var("BASIS_MEDIA_TEST_IMAX_URL")
+        .expect("set BASIS_MEDIA_TEST_IMAX_URL to the test server's imax_51.mp4");
+    let mut session = Session::open(OpenRequest::new(url));
     let shared = session.shared().clone();
     let diag = session.diag().clone();
     let ring_drops = || {

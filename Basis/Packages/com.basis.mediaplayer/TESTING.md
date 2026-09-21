@@ -361,7 +361,7 @@ the plugin, which is deliberate and is why this is not driven from a startup hoo
 
 | Row | What it proves | How to run |
 | --- | --- | --- |
-| Transport reaches the Console | `rtsp transport: …` — the fact that ruled out packet loss on the 2026-08-25 pass — no longer needs a DBWIN reader attached to see | play `rtsp://mr.town:8090/imax51`; the line appears within the first second |
+| Transport reaches the Console | `rtsp transport: …` — the fact that ruled out packet loss on the 2026-08-25 pass — no longer needs a DBWIN reader attached to see | play `rtsp://<test-host>:8090/imax51`; the line appears within the first second |
 | One copy per line | the drain is process-wide, not per-player: the ring is one queue for the whole plugin, so three players must not print everything three times | put three players in a scene, open a stream on one, count the `process` lines |
 | Level picks the Console severity | a refusal reads as a warning and a failure as an error, rather than everything arriving flat | open a bad URL: the `session error:` line is red. Note it uses the **unreported** error path — an engine failure is the stream's or the network's fault, not a client defect, and must not raise a crash report |
 | An overrun ring says so | the tail is bounded at 512 engine-side and drops its oldest, so a stall in the drain loses the *start* of what follows, not the end | leave a session erroring in a tight loop with the editor paused, then resume |
