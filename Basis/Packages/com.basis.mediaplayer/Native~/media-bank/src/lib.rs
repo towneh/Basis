@@ -82,24 +82,19 @@ pub struct BankConfig {
     ///
     /// VOD: the release anchor starts this far in the past, so the
     /// schedule runs a constant `startup_burst` early for the whole
-    /// generation — a phase shift at 1x rate, not a rate change. It fills
-    /// the decoder's first-output input depth at submit speed (fast
-    /// startup) and keeps the release phase far enough ahead of
-    /// presentation that the depth stays filled; the decoder's own
-    /// appetite (NotAccepting + channel backpressure) bounds what is
-    /// actually in flight.
+    /// generation. The rate stays 1x. The early phase fills the decoder's
+    /// first-output input depth at submit speed and keeps it filled; the
+    /// decoder's own appetite (NotAccepting plus channel backpressure)
+    /// bounds what is actually in flight.
     ///
     /// Live: during the startup hold, release runs ahead of the 1x line
-    /// from the first arrival by at most this much, so the decoder's
-    /// first-output input depth accumulates *while* the hold fills
-    /// instead of after it — a join costs ~max(hold, decoder priming)
-    /// rather than the sum. The presentation clock stays gated behind
-    /// the hold, and once presentation starts the schedule re-anchors
-    /// presentation-relative (see [`Bank::presentation_started`]), so
-    /// none of the banked jitter depth is spent: the released-ahead span
-    /// is in-flight decoder depth, counted as part of the buffer. Zero
-    /// disables the priming overlap and restores the strict
-    /// hold-then-1x startup.
+    /// from the first arrival by at most this much, so the decoder primes
+    /// while the hold fills and a join costs roughly max(hold, decoder
+    /// priming) rather than the sum. Presentation stays gated behind the
+    /// hold, and once it starts the schedule re-anchors
+    /// presentation-relative (see [`Bank::presentation_started`]), so the
+    /// released-ahead span counts as in-flight depth, not spent depth.
+    /// Zero disables the overlap: hold, then 1x.
     pub startup_burst: MediaTime,
     pub auto: AutoConfig,
 }
@@ -161,9 +156,9 @@ impl std::error::Error for BankConfigError {}
 #[derive(Debug)]
 pub enum PushOutcome {
     Accepted,
-    /// A cap would be exceeded (or, VOD, the read-ahead target is met):
-    /// backpressure — the event comes back so the pusher can retry after
-    /// release drains, without cloning AU payloads.
+    /// A cap would be exceeded (or, on VOD, the read-ahead target is met).
+    /// The event comes back so the pusher can retry after release drains,
+    /// without cloning AU payloads.
     Full(StreamEvent),
     /// Stale-generation event, dropped on sight.
     StaleGeneration,
@@ -200,8 +195,8 @@ enum Hold {
         since: Option<MediaTime>,
     },
     /// Live priming joins only: the hold has lifted (presentation may
-    /// start) but the schedule is not anchored yet — release keeps
-    /// running on the priming line until the engine reports the first
+    /// start) but the schedule is not anchored yet. Release keeps running
+    /// on the priming line until the engine reports the first
     /// presentation, which fixes the anchor presentation-relative.
     Primed {
         since: MediaTime,
@@ -358,8 +353,8 @@ impl Bank {
     }
 
     /// Media span arrived this generation, released or not. During a
-    /// priming join this is the viewer's protection at first frame —
-    /// released-ahead media is in-flight decoder depth, not spent depth.
+    /// priming join this is the viewer's protection at first frame, since
+    /// released-ahead media is still in flight in the decoder.
     fn arrived(&self) -> MediaTime {
         match (self.newest_dts, self.base_dts) {
             (Some(newest), Some(base)) => (newest - base).max(MediaTime::ZERO),
@@ -374,15 +369,13 @@ impl Bank {
     }
 
     /// What must have arrived for the hold to lift. Presentation starts at
-    /// hold-lift on a priming join, so the arrived span *is* the depth the
-    /// viewer joins with — for an explicitly configured depth it must be
-    /// the full depth (lag + cushion), not just the lag, or the join
-    /// silently sheds the cushion from the measured absorption. Auto lanes
-    /// hold to the estimator's lag only: Auto is an estimate, not a user
-    /// promise, and its cold-start philosophy is join-fast-grow-on-evidence
-    /// (the seed bucket's upper edge makes cold target_lag a hair above
-    /// zero, and +cushion would tax every Auto live join ~500 ms).
-    /// Target-zero lanes (the shallow posture) lift immediately.
+    /// hold-lift on a priming join, so the arrived span is the depth the
+    /// viewer joins with. An explicitly configured depth therefore holds
+    /// for lag plus cushion, or the join would silently shed the cushion.
+    /// Auto holds to the estimator's lag only: it joins fast and grows on
+    /// evidence, and adding the cushion would cost every Auto live join
+    /// about 500 ms (the seed bucket's upper edge puts a cold target_lag a
+    /// hair above zero). A zero target lifts immediately.
     fn hold_target(&self) -> MediaTime {
         let target = self.target_lag();
         if self.priming()
@@ -419,8 +412,8 @@ impl Bank {
     }
 
     /// Seek/reconnect: adopt the new generation, drop everything banked from
-    /// the old one, restart the startup hold. Auto's delay history survives —
-    /// the link did not change because the user sought.
+    /// the old one, restart the startup hold. Auto's delay history survives,
+    /// because a seek does not change the link.
     pub fn advance_generation(&mut self, generation: Generation) {
         self.generation = generation;
         self.queue.clear();
@@ -497,8 +490,8 @@ impl Bank {
 
         // The debt bound (live only): if delivery has fallen further behind
         // the release schedule than the decoder cushion absorbs, shift the
-        // anchor by the excess — the burst behind this AU is metered back to
-        // 1x and the surplus deepens the bank.
+        // anchor by the excess. The burst behind this AU is then metered
+        // back to 1x and the surplus deepens the bank.
         if self.cfg.liveness == Liveness::Live
             && let Some(anchor) = self.anchor
             && let Some(base) = self.base_dts
@@ -521,21 +514,18 @@ impl Bank {
                 // whether or not the lag cap let the schedule absorb it.
                 self.stall_total += shift;
             }
-            // Media that arrives ahead of the schedule deepens the bank
-            // without any anchor shift, and the join is where that
-            // happens: the anchor is fixed part-way through the source's
-            // opening burst, and the rest of the burst lands behind it.
-            // `lag` is the schedule's distance from the edge, which is
-            // `banked()` by definition, so it follows the depth upwards —
-            // beyond the cushion, which is the same dead zone the debt
-            // bound keeps in the other direction: within it, a high in
-            // `banked()` is arrival jitter, and tracking that would let
-            // every early burst ratchet the schedule earlier until
-            // arrivals read late. Decay then has the surplus to return,
-            // not the fraction the anchor happened to see. Downwards it is
+            // Media arriving ahead of the schedule deepens the bank with no
+            // anchor shift. That happens at the join: the anchor is fixed
+            // part-way through the source's opening burst and the rest of
+            // the burst lands behind it. `lag` is the schedule's distance
+            // from the edge, so it follows `banked()` upwards, less the
+            // cushion. Within the cushion a high `banked()` is arrival
+            // jitter (the same dead zone the debt bound keeps the other
+            // way), and tracking it would let each early burst ratchet the
+            // schedule earlier until arrivals read late. Downwards `lag` is
             // left alone: a delivery stall drains `banked()` while the
-            // schedule stays where it was, and the estimator needs `lag`
-            // to hold so the stall reads as a delay.
+            // schedule stays put, and the estimator needs `lag` to hold so
+            // the stall reads as a delay.
             let surplus = (self.banked() - self.cfg.decoder_cushion).max(MediaTime::ZERO);
             self.lag = self.lag.max(surplus).min(self.cfg.lag_cap);
         }
@@ -581,7 +571,7 @@ impl Bank {
 
     /// [`Bank::next_due`] under a release gate: the deadline for the first
     /// event the gate admits. `None` means "wait for a push or an
-    /// unblock" — an Eos barrier behind skipped events has no wall
+    /// unblock": an Eos barrier behind skipped events has no wall
     /// deadline of its own.
     pub fn next_due_gated(
         &mut self,
@@ -632,25 +622,23 @@ impl Bank {
         }
     }
 
-    /// Release the head event if it is due. The release path: no consumer
-    /// is fed faster than 1x + lead — on VOD the schedule's phase sits
+    /// Release the head event if it is due. No consumer is fed faster than
+    /// 1x plus the pace lead. On VOD the schedule's phase sits
     /// `startup_burst` early (a constant offset; the rate is still 1x and
     /// the decode channel bounds what is actually in flight).
     pub fn pop_due(&mut self, wall: MediaTime) -> Option<StreamEvent> {
         self.pop_due_gated(wall, &|_| false)
     }
 
-    /// [`Bank::pop_due`] under a release gate (per-track routing):
-    /// events the gate blocks are skipped — left queued, their relative
-    /// order intact — so one track's full decode chain never wedges the
-    /// other track's release. Only whole tracks may be blocked (the gate
-    /// sees every event), which is what keeps per-track order exact.
-    /// Eos is a barrier: it never overtakes a skipped event, so a
-    /// blocked track's AUs always reach their decoder before its drain
-    /// begins. The release cursor only advances on in-order (head)
-    /// pops — while a blocked track parks at the head, `banked()`, the
-    /// caps and decay all measure from the laggard, exactly as if
-    /// nothing had been released past it.
+    /// [`Bank::pop_due`] under a release gate (per-track routing).
+    /// Events the gate blocks are skipped and left queued in order, so one
+    /// track's full decode chain never wedges the other track's release.
+    /// Only whole tracks may be blocked (the gate sees every event), which
+    /// keeps per-track order exact. Eos is a barrier: it never overtakes a
+    /// skipped event, so a blocked track's AUs reach their decoder before
+    /// its drain begins. The release cursor advances only on head pops, so
+    /// while a blocked track parks at the head, `banked()`, the caps and
+    /// decay all measure from the laggard.
     pub fn pop_due_gated(
         &mut self,
         wall: MediaTime,
@@ -699,9 +687,9 @@ impl Bank {
                     }
                     // The join's one buffering moment ends here: anchor the
                     // 1x schedule now, with everything banked as the working
-                    // lag. VOD anchors `startup_burst` in the past — the
-                    // schedule phase that keeps the decoder's input depth
-                    // filled from the first frame.
+                    // lag. VOD anchors `startup_burst` in the past, the
+                    // phase that keeps the decoder's input depth filled from
+                    // the first frame.
                     self.hold = Hold::Released;
                     let burst = if self.cfg.liveness == Liveness::Vod {
                         self.cfg.startup_burst
@@ -753,11 +741,10 @@ impl Bank {
     /// so the schedule resumes 1x from wherever release actually reached
     /// and never pauses: released-ahead media is in-flight depth held by
     /// the decode channel, the frame pool and the audio ring, and the
-    /// remaining `arrived − released` is the bank's own lag.
-    /// Crediting only the cushion here instead would defer the
-    /// schedule by the difference, and one anchor governs both tracks, so
-    /// that pause starves the audio ring as well as the pool. No-op
-    /// outside a priming join.
+    /// remaining `arrived − released` is the bank's own lag. Any anchor
+    /// later than this would pause the schedule, and since one anchor
+    /// governs both tracks the pause would starve the audio ring as well as
+    /// the frame pool. No-op outside a priming join.
     ///
     /// The Auto estimator is unaffected: it observes `behind + lag`, and
     /// moving the anchor earlier grows `behind` by exactly what it takes
@@ -796,9 +783,8 @@ impl Bank {
     /// Whether the startup hold still gates presentation, advancing the
     /// hold state first. The presentation gate must ask the Bank
     /// directly: during a priming join the release thread can sit
-    /// blocked on a full decode channel — a channel only presentation
-    /// drains — so a gate fed by release-thread stores would deadlock
-    /// the join.
+    /// blocked on a full decode channel that only presentation drains, so
+    /// a gate fed by release-thread stores would deadlock the join.
     pub fn holding(&mut self, wall: MediaTime) -> bool {
         self.advance_hold(wall);
         matches!(self.hold, Hold::Filling { .. })
@@ -806,8 +792,8 @@ impl Bank {
 
     /// Decay: return surplus lag in bounded steps towards the target, at a
     /// rate the present clock's slew can track. Runs only while the bank
-    /// actually holds more than the target — give-back during a drought
-    /// would deepen the next stall.
+    /// actually holds more than the target, since giving lag back during a
+    /// drought would deepen the next stall.
     fn tick(&mut self, wall: MediaTime) {
         let last = self.last_decay.replace(wall);
         if self.hold != Hold::Released || self.downstream_parked {

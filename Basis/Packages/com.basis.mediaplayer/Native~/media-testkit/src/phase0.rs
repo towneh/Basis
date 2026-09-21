@@ -1,13 +1,13 @@
-//! The phase-0 impairment captures: recorded delivery-gap distributions from
-//! the 2026-08 live-buffering investigation, committed as fixtures so the
-//! measured sizing table is an executable test, not a memory.
+//! The recorded network-delay fixtures: delivery-gap distributions measured
+//! on a live VRCDN stream under network impairment, committed so the depth
+//! sizing table is an executable test.
 //!
-//! Each fixture was derived from a diagnostics capture of the earlier C
-//! player, named in the fixture's header: a starve of duration D happened
-//! after the player's jitter buffer had drained, so the underlying delivery
-//! gap is D + buffer. `analytic_stall_fraction` reproduces the investigation's
-//! sizing model — residual stall assuming the buffer refills between gaps —
-//! which is the table the Bank replay is measured against.
+//! Each fixture was derived from a diagnostics capture of the previous C
+//! player, named in the fixture's header. A starve of duration D happened
+//! after that player's jitter buffer had drained, so the underlying delivery
+//! gap is D + buffer. `analytic_stall_fraction` is the sizing model (residual
+//! stall assuming the buffer refills between gaps) that the Bank replay is
+//! measured against.
 
 use media_clock::MediaTime;
 
@@ -65,7 +65,7 @@ impl GapCapture {
     /// Residual stall at a candidate total depth, as a fraction of the run:
     /// `sum(max(0, gap - depth)) / duration`. Assumes the buffer refills
     /// between gaps, which holds in the jitter regime and is optimistic in
-    /// the throughput regime — exactly the published model's caveat.
+    /// the throughput regime.
     pub fn analytic_stall_fraction(&self, depth: MediaTime) -> f64 {
         let residual: i64 = self
             .gaps
@@ -104,8 +104,8 @@ impl GapCapture {
         )
     }
 
-    /// HTTP-TS, +300 ms RTT, 0.5% loss: the throughput regime — no depth
-    /// suffices, and the analytic model is knowingly optimistic here.
+    /// HTTP-TS, +300 ms RTT, 0.5% loss: the throughput regime. No depth
+    /// suffices, and the analytic model is optimistic here.
     pub fn ts_rtt300_loss05() -> Self {
         Self::parse(
             "ts-rtt300-loss05",

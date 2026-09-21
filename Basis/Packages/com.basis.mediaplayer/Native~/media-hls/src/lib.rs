@@ -1,15 +1,15 @@
 #![forbid(unsafe_code)]
 
 //! HLS: playlist-driven segment chaining over the TS and fMP4
-//! demuxers. `m3u8-rs` parses playlist bytes; everything schedulable is
-//! ours — variant choice, the live window cursor, refresh cadence,
-//! join point, discontinuity splices, seek-to-segment.
+//! demuxers. `m3u8-rs` parses playlist bytes; the scheduling is ours:
+//! variant choice, the live window cursor, refresh cadence, join point,
+//! discontinuity splices and seek-to-segment.
 //!
 //! TS segments feed one continuous `TsDemuxer` through a chaining source
 //! (segments may legally continue PES/GOP state across boundaries), which
 //! rebuilds only across stated discontinuities. fMP4 segments parse
-//! per-segment as `init + segment` — `tfdt` keeps their timestamps
-//! absolute, so no cross-segment correction exists to get wrong.
+//! per-segment as `init + segment`; `tfdt` keeps their timestamps
+//! absolute, so no cross-segment correction is needed.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -43,7 +43,7 @@ const MAX_SEGMENTS: usize = 65_536;
 /// i64 microseconds (fuzz-found overflow).
 const MAX_SEGMENT_SECONDS: f64 = 3600.0;
 /// Attempts per resource before the failure propagates (live segments are
-/// skipped instead — the window moves on without them).
+/// skipped instead, since the window moves on without them).
 const RESOURCE_ATTEMPTS: u32 = 3;
 /// Live refreshes with no window progress before the lane reads as dead.
 const STALE_REFRESHES: u32 = 40;
@@ -51,7 +51,7 @@ const STALE_REFRESHES: u32 = 40;
 /// live edge, expressed in whole segments.
 const LIVE_EDGE_SEGMENTS: usize = 3;
 
-/// `#EXTM3U` leads the playlist (BOM/whitespace tolerated) — the router's
+/// `#EXTM3U` leads the playlist (BOM/whitespace tolerated). The router's
 /// sniff for HLS lanes.
 pub fn looks_like_playlist(head: &[u8]) -> bool {
     let head = head.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(head);
@@ -77,15 +77,15 @@ fn is_fetchable_scheme(scheme: &str) -> bool {
 }
 
 /// Resolve a possibly relative playlist URI against its playlist's URL
-/// (or filesystem path — local fixtures play without a server).
+/// (or filesystem path, so local fixtures play without a server).
 ///
 /// A playlist may not change what kind of thing its resources are. One
 /// served over the network resolves everything through `Url::join`,
 /// which handles an absolute URI correctly on its own, and the result
-/// has to be fetchable or it is refused: without that, a `c:` or `file:`
-/// URI resolves to something the fetcher would have opened as a path.
-/// A playlist on disk may still name network resources — those are what
-/// the address gate exists for — but anything else must sit beside it.
+/// must be fetchable or it is refused: otherwise a `c:` or `file:` URI
+/// resolves to something the fetcher would open as a path. A playlist on
+/// disk may still name network resources (the address gate vets those),
+/// but anything else must sit beside it.
 fn resolve(base: &str, rel: &str) -> Result<String, DemuxError> {
     match url::Url::parse(base) {
         // A single-letter "scheme" is a Windows drive letter, not a URL.
@@ -124,17 +124,15 @@ fn resolve(base: &str, rel: &str) -> Result<String, DemuxError> {
             // components are walked, because `Path` only parses the
             // syntax of the platform it was compiled for: a Unix build
             // reads `C:\dir\clip.ts` as one ordinary filename and would
-            // accept a playlist written to attack a Windows client. One
-            // rule on every host beats a rule that changes shape under
-            // the reader.
-            // Defence in depth rather than the screen that catches these:
-            // a drive-shaped string parses as a URL whose scheme is the
-            // drive letter, so `c:\dir\clip.ts` and `C:/Windows/win.ini`
-            // are both refused by the unfetchable-scheme arm above and
-            // never arrive here. Only a string `Url::parse` rejects
-            // outright reaches this line, and no such string is
-            // drive-shaped — measured, not assumed. Do not read the
-            // check as load-bearing if that arm is ever reworked.
+            // accept a playlist written to attack a Windows client, so the
+            // same rule applies on every host.
+            // This is defence in depth. A drive-shaped string parses as a
+            // URL whose scheme is the drive letter, so `c:\dir\clip.ts` and
+            // `C:/Windows/win.ini` are refused by the unfetchable-scheme
+            // arm above. Only strings `Url::parse` rejects outright reach
+            // this line, and none of those is drive-shaped (checked, not
+            // assumed). If that arm is reworked, this check becomes the one
+            // that matters.
             if rel.contains('\\') || has_drive_prefix(rel) {
                 return Err(DemuxError::Parse(format!(
                     "playlist URI outside the playlist's directory: {rel:?}"
@@ -184,7 +182,7 @@ pub struct PlaylistWindow {
     pub ended: bool,
 }
 
-/// A parsed playlist of either kind — also the fuzz target's surface.
+/// A parsed playlist of either kind; also the fuzz target's surface.
 pub enum ParsedPlaylist {
     /// (bandwidth, resolved URI) per variant, best candidate first.
     Master(Vec<(u64, String)>),
@@ -544,7 +542,7 @@ impl Adapter {
     }
 }
 
-/// Fetch (or reuse) the init segment and parse `init + segment` — `tfdt`
+/// Fetch (or reuse) the init segment and parse `init + segment`; `tfdt`
 /// keeps the timestamps absolute across segments.
 fn build_fmp4_inner(
     scheduler: &Arc<Mutex<Scheduler>>,
@@ -674,8 +672,7 @@ impl HlsDemuxer {
     }
 
     /// Liveness as the playlist itself states it (`EXT-X-ENDLIST` ⇒ VOD).
-    /// In-protocol statement, not inference — the engine aligns the Bank
-    /// mode with it.
+    /// The engine aligns the Bank mode with it.
     pub fn is_live(&self) -> bool {
         self.scheduler.lock().expect("scheduler lock").live
     }

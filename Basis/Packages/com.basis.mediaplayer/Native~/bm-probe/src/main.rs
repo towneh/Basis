@@ -1,6 +1,6 @@
-//! `bm-probe`: the harness player. A CLI over the engine
-//! crates directly — no Unity, no C ABI in the loop — with null sinks in
-//! place of the GPU presenter: frames land as hashes.
+//! `bm-probe`: the harness player. A CLI over the engine crates directly
+//! (no Unity, no C ABI in the loop), with null sinks in place of the GPU
+//! presenter: frames land as hashes.
 
 #![forbid(unsafe_code)]
 
@@ -56,8 +56,7 @@ enum Command {
         allow_local: bool,
     },
     /// Timed headless run through the full engine pipeline, emitting the
-    /// diagnostics timeline as CSV — the capture recorder as a
-    /// first-class artefact.
+    /// diagnostics timeline as CSV.
     Play {
         /// Local MP4 path or http(s) URL.
         url: String,
@@ -90,7 +89,7 @@ enum Command {
         #[arg(long)]
         seek_to_ms: Option<u64>,
         /// A separate audio-only source to play against `url`, which is
-        /// then treated as video-only — the shape adaptive ladders serve
+        /// then treated as video-only: the shape adaptive ladders serve
         /// above their muxed rung. On-demand HTTP(S) and files only.
         #[arg(long)]
         audio_url: Option<String>,
@@ -124,9 +123,9 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
-    /// Print the engine-declared capability set as JSON — the
-    /// blob `bm_capabilities` serves, so format-selection rules are
-    /// testable without Unity.
+    /// Print the engine-declared capability set as JSON (the blob
+    /// `bm_capabilities` serves), so format-selection rules are testable
+    /// without Unity.
     Caps {
         /// Compact single-line output (the exact ABI blob) instead of
         /// pretty-printed.
@@ -139,13 +138,13 @@ enum Command {
         /// Fixture path (or a directory of fixtures).
         fixture: std::path::PathBuf,
     },
-    /// Replay a phase-0 impairment profile over a live lane (a TS file
-    /// paced to 1x, or a live URL) and grade the Bank against the sizing
-    /// model.
+    /// Replay a recorded network-delay profile over a live lane (a TS file
+    /// paced to 1x, or a live URL) and grade the Bank against the analytic
+    /// stall model.
     Impair {
         /// Local .ts path or live http(s) URL.
         url: String,
-        /// Profile name (a phase-0 capture, e.g. ts-rtt300-loss005).
+        /// Profile name (a media-testkit capture, e.g. ts-rtt300-loss005).
         #[arg(long)]
         profile: String,
         /// Seconds to run (default: the profile's analysed window).

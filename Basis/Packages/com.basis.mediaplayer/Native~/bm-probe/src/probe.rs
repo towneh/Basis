@@ -55,7 +55,7 @@ pub fn run(url: &str, decode: bool, allow_local: bool) -> ExitCode {
     }
 
     // Walk the format events (they front the stream), keeping the first AU
-    // for the decode phase — dropping it would cost a whole GOP.
+    // for the decode phase; dropping it would cost a whole GOP.
     let mut video: Option<(VideoCodec, u32, u32)> = None;
     let mut audio: Option<(AudioCodec, u32, u32)> = None;
     let mut first_au: Option<media_demux::Au> = None;

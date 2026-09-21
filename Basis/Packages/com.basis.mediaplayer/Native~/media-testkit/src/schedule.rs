@@ -1,5 +1,5 @@
 //! Synthetic arrival schedules: turn a recorded gap distribution into the
-//! per-AU arrival timeline a live TCP source would have produced — 1x
+//! per-AU arrival timeline a live TCP source would have produced: 1x
 //! delivery, halted during each gap, with the accumulated media arriving as
 //! a recovery burst when the gap ends.
 
@@ -31,9 +31,9 @@ impl ArrivalSchedule {
     /// recorded timeline even though the recording shows delivery resuming
     /// between them. They are laid out sequentially here, separated by at
     /// least one AU interval so each recovery burst lands (and refills the
-    /// bank) before the next outage begins: every gap stays a distinct
-    /// outage of its reconstructed duration, matching the per-gap
-    /// refill-between-gaps semantics the sizing model is built on.
+    /// bank) before the next outage begins. Every gap stays a distinct
+    /// outage of its reconstructed duration, matching the analytic model's
+    /// refill-between-gaps assumption.
     pub fn from_capture(capture: &GapCapture, au_interval: MediaTime, au_bytes: usize) -> Self {
         let mut gaps = capture.gaps.clone();
         gaps.sort_by_key(|g| g.start);

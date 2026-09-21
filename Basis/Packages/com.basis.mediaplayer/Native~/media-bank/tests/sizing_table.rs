@@ -1,16 +1,16 @@
-//! The measured sizing table as executable tests: the phase-0 capture
-//! replays (the recorded gap distributions from the VRCDN investigation)
-//! drive the Bank at each candidate depth, and the residual stall is held
-//! to the investigation's published numbers.
+//! The depth sizing table as executable tests: the recorded network-delay
+//! fixtures in `media-testkit` (gap distributions captured from a VRCDN
+//! stream under impairment) drive the Bank at each candidate depth, and the
+//! residual stall is held to the analytic figures.
 //!
 //! Two layers:
-//! - `media-testkit` pins the fixtures to the published analytic table
+//! - `media-testkit` pins the fixtures to the analytic table
 //!   (`sum(max(0, gap - depth))`, refill assumed between gaps).
 //! - Here, the Bank replays the same schedules behaviourally. The debt
 //!   bound refills between gaps and its growth persists until decay gives
-//!   it back, so the Bank may only ever do *better* than the constant-depth
-//!   analytic model — asserted as `bank ≤ analytic + quantisation`, with
-//!   the table's fully-absorbed cells asserted as genuinely stall-free.
+//!   it back, so the Bank may only do better than the constant-depth
+//!   analytic model. That is asserted as `bank ≤ analytic + quantisation`,
+//!   and the table's fully absorbed cells must be stall-free.
 
 use media_bank::{Bank, BankConfig, BufferDepth, Liveness, PushOutcome};
 use media_clock::{Generation, MediaTime};
@@ -21,8 +21,8 @@ use media_testkit::{ArrivalSchedule, GapCapture};
 const AU_INTERVAL: MediaTime = MediaTime::from_micros(33_366);
 const AU_BYTES: usize = 10_900;
 
-/// The C player's decoded-side cushion during the captures; using it keeps
-/// "total depth" directly comparable with the published table.
+/// The decoded-side cushion of the player the captures were recorded with;
+/// using it keeps "total depth" directly comparable with the analytic table.
 const CUSHION: MediaTime = MediaTime::from_millis(460);
 
 fn replay_cfg(depth_ms: u32) -> BankConfig {
@@ -35,8 +35,8 @@ fn replay_cfg(depth_ms: u32) -> BankConfig {
         // The table grades the steady-state schedule against the analytic
         // model, so the replay uses the strict hold-then-1x startup. The
         // priming join (burst > 0) needs the engine's presentation signal
-        // and channel backpressure to mean anything — its integrated
-        // startup is graded by the `bm-probe impair` rows instead.
+        // and channel backpressure to mean anything, so its startup is
+        // graded by the `bm-probe impair` rows instead.
         startup_burst: MediaTime::ZERO,
         ..BankConfig::default()
     }
@@ -76,7 +76,7 @@ fn replay(capture: &GapCapture, cfg: BankConfig) -> (f64, media_bank::BankMetric
     (stall, m)
 }
 
-/// One sizing-table lane: (capture, per-depth expected stall %, published).
+/// One sizing-table lane: (capture, per-depth analytic stall %).
 fn jitter_lanes() -> Vec<(GapCapture, Vec<(u32, f64)>)> {
     vec![
         (
@@ -156,7 +156,7 @@ fn bank_meets_the_sizing_table_on_the_jitter_lanes() {
 
 #[test]
 fn three_seconds_absorbs_the_jitter_regime_outright() {
-    // The sizing model's headline claim, asserted on both impaired TCP lanes.
+    // Three seconds of depth fully absorbs both impaired TCP lanes.
     for capture in [
         GapCapture::ts_rtt300_loss005(),
         GapCapture::rtspt_rtt300_loss005(),
@@ -183,8 +183,7 @@ fn clean_baseline_never_stalls_or_reanchors() {
 #[test]
 fn auto_self_tunes_depth_to_a_bad_link() {
     // The throughput-regime capture: no depth suffices, but Auto must grow
-    // the bank towards what the link demonstrates (the 5 s → 14.5 s
-    // observation, bounded here by the 10 s cap).
+    // the bank towards what the link demonstrates, up to the 10 s cap.
     let capture = GapCapture::ts_rtt300_loss05();
     let cfg = BankConfig {
         depth: BufferDepth::Auto,

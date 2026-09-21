@@ -1,6 +1,5 @@
-//! `bench`: the performance budgets measured mechanically —
-//! startup-to-first-frame and seek-to-settled for one lane, repeated and
-//! aggregated, so tuning happens against numbers instead of impressions.
+//! `bench`: startup-to-first-frame and seek-to-settled for one lane,
+//! repeated and aggregated, so tuning happens against numbers.
 
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
@@ -114,7 +113,7 @@ fn bench_run(options: &Options) -> Result<RunResult, String> {
     };
 
     // Phase 1: startup. Pull audio at the hardware cadence throughout, as
-    // the Unity audio thread will — an unpulled ring changes the clock
+    // the Unity audio thread does: an unpulled ring changes the clock
     // master and with it what "playing" means.
     let mut audio = AudioPull::default();
     while result.ttff.is_none() {

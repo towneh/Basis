@@ -72,7 +72,7 @@ proptest! {
     }
 
     /// Past the fast window the ceiling is the steady-state cap, whatever
-    /// the error. This is the half a single-phase row could not distinguish.
+    /// the error.
     #[test]
     fn steady_state_rate_bounded_by_the_slew_cap(schedule in slew_regime_schedule()) {
         let cfg = ClockConfig::default();
@@ -238,19 +238,14 @@ fn slew_wall_clamps_to_the_cap_and_ignores_audio_master() {
     assert_eq!(audio.rate_ppm(), 0, "audio master ignores slew_wall");
 }
 
-/// Convergence from an error the size the live join actually produces.
+/// Convergence from an error the size of a bad live join (690 ms). At the 2%
+/// cap alone that needs ~34.5 s to close.
 ///
-/// This is the row the fixed-rate law could not pass. At the 2% cap alone a
-/// 690 ms error needs ~34.5 s to close, and the measured Editor join took 45 s
-/// while shedding 2-3 frames a second throughout.
-///
-/// The bound here is 5 s rather than 1, and the arithmetic says why: the fast
-/// window is 1.2 s at 50% of wall rate, so it absorbs ~600 ms and leaves ~90 ms
-/// to clear at the steady cap. The residual is a function of how big the join
-/// error is, which is the presentation origin's problem and not the
-/// corrector's — sizing the fast window to swallow 690 ms would be tuning the
-/// controller around a defect rather than fixing it. See the companion row for
-/// the error size a corrected origin should produce.
+/// The bound is 5 s rather than 1: the fast window is 1.2 s at 50% of wall
+/// rate, so it absorbs ~600 ms and leaves ~90 ms to clear at the steady cap.
+/// A join error this large is for the presentation origin to avoid, not for
+/// the fast window to swallow. The companion row covers the error size a
+/// well-placed origin leaves.
 #[test]
 fn a_join_sized_error_converges_far_faster_than_the_cap_alone() {
     let at = converge_from(MediaTime::from_millis(690));
@@ -265,7 +260,7 @@ fn a_join_sized_error_converges_far_faster_than_the_cap_alone() {
     );
 }
 
-/// The error a corrected presentation origin should leave: both legs banked at
+/// The error a well-placed presentation origin leaves: both legs banked at
 /// the start point, so the clock begins close to its master. Sub-second.
 #[test]
 fn a_small_join_error_converges_within_a_second() {
@@ -297,18 +292,17 @@ fn converge_from(offset: MediaTime) -> MediaTime {
 }
 
 /// The correction decelerates as the error closes. A fixed-rate law runs at
-/// the cap right up to the dead band and then drops to zero, which is what
-/// produced the overshoot burst (11 events at one bound, then 13 at the other
-/// within 3 s). The discriminator is a strict decrease while the rate is still
-/// non-zero: a fixed-rate law never has one.
+/// the cap right up to the dead band and then drops to zero, overshooting
+/// into a limit cycle between the two bounds. The discriminator is a strict
+/// decrease while the rate is still non-zero: a fixed-rate law never has one.
 #[test]
 fn the_rate_falls_as_the_error_closes() {
     // The ceiling itself steps down when the fast window expires, and a
-    // fixed-rate law pinned to the ceiling therefore *also* shows a fall
-    // there. Only decreases observed while one ceiling is in force
-    // discriminate the two, so the error starts inside the proportional
-    // region — below `fast_slew_cap_ppm * slew_tau` — and the walk is
-    // bounded to the fast window.
+    // fixed-rate law pinned to the ceiling also shows a fall there. Only
+    // decreases observed under one ceiling discriminate the two, so the
+    // error starts inside the proportional region (below
+    // `fast_slew_cap_ppm * slew_tau`) and the walk stays inside the fast
+    // window.
     let cfg = ClockConfig::default();
     let mut c = clock_at_zero();
     let mut wall = MediaTime::ZERO;
@@ -391,7 +385,7 @@ fn a_hostile_ceiling_neither_panics_nor_reverses_the_clock() {
 }
 
 /// The fast window is bounded by wall time, but `rate_ppm` persists between
-/// observations — so a rate set just inside the window would keep running at
+/// observations, so a rate set just inside the window would keep running at
 /// the wide ceiling for as long as the master stays quiet. Closing the window
 /// must not wait for the next observation.
 #[test]

@@ -1,6 +1,6 @@
-//! Pin the committed phase-0 fixtures to the investigation's published
-//! sizing table: if a fixture is regenerated and its gap reconstruction
-//! drifts, this fails before any Bank behaviour is measured against it.
+//! Pin the committed network-delay fixtures to their analytic sizing table:
+//! if a fixture is regenerated and its gap reconstruction drifts, this
+//! fails before any Bank behaviour is measured against it.
 
 use media_clock::MediaTime;
 use media_testkit::GapCapture;

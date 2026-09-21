@@ -1,6 +1,5 @@
-//! `play`: a timed headless run through the full engine pipeline — the
-//! capture recorder as a first-class artefact, plus the headless
-//! audio lane the C harness never had.
+//! `play`: a timed headless run through the full engine pipeline, writing
+//! the diagnostics capture and, optionally, the decoded audio.
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -58,17 +57,16 @@ pub fn run(options: &Options) -> ExitCode {
     let mut user_data: std::collections::BTreeMap<[u8; 16], (u64, u64)> =
         std::collections::BTreeMap::new();
     let mut audio_epoch: Option<Instant> = None;
-    // The rate the schedule below was last anchored at. A session can change it
-    // — a track switch, or a new generation after a seek — and the budget is
+    // The rate the schedule below was last anchored at. A session can change
+    // it (a track switch, or a new generation after a seek), and the budget is
     // counted in that rate's frames, so the two have to move together.
     let mut scheduled_rate = 0u32;
     // Frames the host asked for, served or not. Unity's OnAudioFilterRead
     // hands over a fixed buffer and zero-fills whatever the ring could not
     // serve, so an underrun costs wall-clock time that never comes back.
-    // Pacing off frames *served* instead lets the consumer catch its own
-    // shortfall up on the next pass, which drains the ring at exactly the
-    // rate the producer fills it and hides every underrun this harness
-    // exists to find.
+    // Pacing off frames served would let the consumer catch its own
+    // shortfall up on the next pass, draining the ring at exactly the rate
+    // the producer fills it and hiding every underrun.
     let mut budget_frames = 0u64;
     // The same demand, counted since the schedule was last anchored. Separate
     // from the total above because the two want opposite things at a pause: the
@@ -76,10 +74,9 @@ pub fn run(options: &Options) -> ExitCode {
     // summary's silence figure is the session's and must not.
     let mut scheduled_frames = 0u64;
     // Unity's DSP quantum, sized by the session's real channel count. A
-    // flat sample count reads as a different frame count per geometry —
-    // 341 frames on 5.1 against 1024 on mono — so the cadence stops
-    // matching the host's the moment the lane is not the one it was
-    // written for.
+    // flat sample count reads as a different frame count per geometry (341
+    // frames on 5.1 against 1024 on mono), and the cadence would stop
+    // matching the host's.
     const DSP_FRAMES: usize = 1024;
     let mut audio_buf = vec![0.0f32; DSP_FRAMES];
     let mut sized_for = 0u32;
@@ -133,18 +130,17 @@ pub fn run(options: &Options) -> ExitCode {
         drain_user_data(&px, &mut user_data);
 
         // Pull audio at the hardware cadence, as the Unity audio thread
-        // will.
+        // does.
         let rate = shared.audio_rate.load(Ordering::Relaxed);
         let channels = shared.audio_channels.load(Ordering::Relaxed).max(1);
         if rate > 0 && state == State::Playing as u32 {
             // Anchored at the moment playback started at this rate, and re-anchored
             // whenever either changes. Left running across a span that issued no
-            // pulls — buffering, a seek — the elapsed time banks as overdue demand
-            // and comes back as a block every 2 ms until the schedule catches up,
-            // which is the drain-as-fast-as-the-ring-fills shape this pacing exists
-            // to avoid. A rate *decrease* is worse than untidy: the budget was
-            // counted in the old rate's frames, so the subtraction below goes
-            // negative, wraps, and stays due forever.
+            // pulls (buffering, a seek), the elapsed time would bank as overdue
+            // demand and come back as a block every 2 ms until the schedule caught
+            // up, draining the ring as fast as it fills. A rate decrease is worse:
+            // the budget was counted in the old rate's frames, so the subtraction
+            // below would go negative, wrap, and stay due forever.
             if audio_epoch.is_none() || scheduled_rate != rate {
                 audio_epoch = Some(Instant::now());
                 scheduled_frames = 0;
@@ -155,10 +151,10 @@ pub fn run(options: &Options) -> ExitCode {
                 sized_for = channels;
             }
             let epoch = *audio_epoch.get_or_insert_with(Instant::now);
-            // Saturating as well as re-anchored. The reset above is what keeps the
-            // two terms in the same rate; this keeps a wrap unrepresentable even if
-            // some later path reaches here without one, because the failure it
-            // produces is silent and permanent rather than loud.
+            // Saturating as well as re-anchored. The reset above keeps the two
+            // terms in the same rate; this keeps a wrap impossible even if some
+            // path reaches here without one, since that failure would be silent
+            // and permanent.
             let due = (epoch.elapsed().as_micros() as u64 * u64::from(rate) / 1_000_000)
                 .saturating_sub(scheduled_frames);
             if due as usize >= DSP_FRAMES {

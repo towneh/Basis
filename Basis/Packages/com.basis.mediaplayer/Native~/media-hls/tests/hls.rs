@@ -396,12 +396,11 @@ fn playlist_sniff_tolerates_bom_and_whitespace() {
     assert!(!looks_like_playlist(&[0x47, 0x40, 0x00, 0x10]));
 }
 
-/// Fuzz-found (first hls_playlist campaign): a hostile EXTINF duration
-/// must be a typed cap refusal, not a MediaTime overflow in the
-/// cumulative-duration folds. Stated on a playlist that is otherwise
-/// well-formed, so the duration is what the refusal is about — the
-/// pinned campaign input below carries several hostile shapes at once
-/// and is not a witness for any one of them.
+/// Fuzz-found (`hls_playlist` target): a hostile EXTINF duration must be a
+/// typed cap refusal, not a MediaTime overflow in the cumulative-duration
+/// folds. The playlist is otherwise well-formed so that the duration is
+/// what the refusal is about; the pinned fuzz input below carries several
+/// hostile shapes at once and does not isolate any one of them.
 #[test]
 fn hostile_extinf_duration_is_a_cap_refusal() {
     let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:2679\n\
@@ -413,11 +412,11 @@ fn hostile_extinf_duration_is_a_cap_refusal() {
     }
 }
 
-/// The campaign input itself: whatever the parser makes of it, the
-/// answer is a typed error rather than a panic or an unbounded
-/// allocation. Which refusal fires is not pinned — the input carries a
-/// hostile duration, a corrupt tag and a garbage URI together, and the
-/// first one reached is an implementation detail that has moved before.
+/// The fuzz input itself: whatever the parser makes of it, the answer is a
+/// typed error rather than a panic or an unbounded allocation. Which
+/// refusal fires is not pinned: the input carries a hostile duration, a
+/// corrupt tag and a garbage URI together, and which is reached first is
+/// an implementation detail.
 #[test]
 fn the_pinned_campaign_input_refuses_without_panicking() {
     let bytes = std::fs::read(
@@ -437,12 +436,11 @@ fn the_pinned_campaign_input_refuses_without_panicking() {
 /// relative name rather than handing the fetcher a path to disown. A
 /// plain relative URI, with or without a `./`, still resolves.
 ///
-/// Every row here holds on every host, which is the point of the list
-/// rather than an accident of it. `Path` parses only the syntax of the
+/// Every row holds on every host. `Path` parses only the syntax of the
 /// platform it was built for, so a Unix build reads the Windows rows as
 /// ordinary filenames and would take a playlist written to attack a
-/// Windows client; those shapes are screened as text so that the answer
-/// does not depend on who is running the test.
+/// Windows client; those shapes are screened as text so the answer does
+/// not depend on the host.
 #[test]
 fn a_disk_playlist_refuses_a_uri_outside_its_directory() {
     let local_base = "/srv/fixtures/index.m3u8";
@@ -479,8 +477,8 @@ fn a_disk_playlist_refuses_a_uri_outside_its_directory() {
     }
 }
 
-/// A playlist named without a directory — `bm-probe play index.m3u8`
-/// from inside the fixture directory — resolves its segments against the
+/// A playlist named without a directory (`bm-probe play index.m3u8` from
+/// inside the fixture directory) resolves its segments against the
 /// current directory explicitly. The fetcher is built confined to a
 /// directory and judges what it is handed against that root, so a bare
 /// name coming back here would be disowned there and the playlist would
@@ -505,8 +503,8 @@ fn a_playlist_named_without_a_directory_resolves_against_the_current_one() {
 /// has to be one the fetcher can actually go and get, so a scheme that
 /// would instead land on its filesystem arm is refused at resolution.
 /// The drive-letter forms are the ones that matter on Windows: `c://x`
-/// carries the `://` that used to mark a URI as absolute and pass it
-/// through untouched, and `c:/x` reads as a one-character scheme.
+/// carries a `://` that a naive absolute-URI check would pass through
+/// untouched, and `c:/x` reads as a one-character scheme.
 #[test]
 fn a_network_playlist_cannot_change_a_uri_to_an_unfetchable_scheme() {
     let playlist = |uri: &str| {
@@ -546,7 +544,7 @@ fn a_network_playlist_cannot_change_a_uri_to_an_unfetchable_scheme() {
     }
 }
 
-/// A playlist on disk may still name network resources — that is an
+/// A playlist on disk may still name network resources: that is an
 /// ordinary local fixture pointing at a CDN, and the address gate vets
 /// it at the fetcher. Only the schemes that would reach the filesystem
 /// arm are refused.
@@ -580,7 +578,7 @@ fn a_disk_playlist_may_still_name_network_resources() {
 }
 
 /// The scheduler's notes are drained once, before playback starts, so
-/// nothing empties them again for the life of a live session — and a live
+/// nothing empties them again for the life of a live session, and a live
 /// session records one on every window jump and every segment it has to
 /// skip. Over hours that is unbounded growth on the demux thread, so the
 /// collection is capped like the demuxers' own.

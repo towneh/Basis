@@ -1,7 +1,7 @@
 //! The live priming join: during the startup hold, release runs ahead of
-//! 1x into the decoder — bounded by `startup_burst` beyond the 1x line
-//! from the first arrival — so the decoder's first-output input depth
-//! accumulates while the hold fills. Presentation stays gated behind the
+//! 1x into the decoder, at most `startup_burst` beyond the 1x line from the
+//! first arrival, so the decoder's first-output input depth accumulates
+//! while the hold fills. Presentation stays gated behind the
 //! hold (the engine's job, driven by the `holding` metric), and the 1x
 //! schedule anchors presentation-relative when the engine signals the
 //! first presentation. A zero burst restores the strict hold-then-1x
@@ -48,7 +48,7 @@ fn pop_all(bank: &mut Bank, wall: MediaTime) -> usize {
 }
 
 /// 1x arrivals release on arrival during the hold (the priming overlap),
-/// and the hold lifts at the full configured depth — presentation starts
+/// and the hold lifts at the full configured depth. Presentation starts
 /// at hold-lift on a priming join, so the arrived span is the viewer's
 /// protection and must be the whole depth, cushion included.
 #[test]
@@ -78,7 +78,7 @@ fn priming_releases_on_arrival_and_holds_to_full_depth() {
 }
 
 /// A backlog burst (the HLS live join shape) releases only `startup_burst`
-/// ahead of the 1x line from the first arrival — the cap is a moving line,
+/// ahead of the 1x line from the first arrival. The cap is a moving line,
 /// so release never wedges on a stream whose priming needs outlast the
 /// burst, and a huge backlog cannot flood the decode channels.
 #[test]
@@ -111,10 +111,9 @@ fn priming_cap_is_a_moving_one_x_line() {
 /// The presentation signal fixes the schedule presentation-relative at
 /// the whole released span, so release carries straight on at 1x. The
 /// released-ahead media is in-flight depth downstream, so the bank's own
-/// lag is what is left un-released — near zero on a join that released
-/// everything it took. Crediting only the cushion would defer the
-/// schedule by the difference, and since one anchor governs both tracks
-/// that pause takes the audio ring down with the pool.
+/// lag is what is left unreleased: near zero on a join that released
+/// everything it took. A pause here would starve the audio ring along with
+/// the frame pool, since one anchor governs both tracks.
 #[test]
 fn presentation_anchor_continues_the_schedule_without_a_pause() {
     let config = cfg(3000, 2000);
@@ -131,8 +130,7 @@ fn presentation_anchor_continues_the_schedule_without_a_pause() {
         i += 1;
         assert!(i < 200, "hold never lifted");
     }
-    // Everything that arrived was released: well past the 500ms cushion,
-    // which is the case that used to stall.
+    // Everything that arrived was released, well past the 500ms cushion.
     let primed = wall;
     assert!(
         primed > MediaTime::from_millis(1500),
@@ -168,9 +166,9 @@ fn presentation_anchor_continues_the_schedule_without_a_pause() {
     assert_eq!(pop_all(&mut bank, due + quantum), 1);
 }
 
-/// A target-zero lane (the shallow posture: depth = cushion) never
-/// holds — the gate opens on the first arrival and release tracks the
-/// edge, so the sub-second join is untouched.
+/// A target-zero lane (depth = cushion) never holds: the gate opens on
+/// the first arrival and release tracks the edge, so the sub-second join
+/// is untouched.
 #[test]
 fn target_zero_lifts_immediately_and_releases_at_the_edge() {
     let mut bank = Bank::new(cfg(500, 2000), Generation(0)).unwrap();
@@ -246,7 +244,7 @@ fn priming_join_keeps_the_debt_bound() {
     assert!(m.stall_total > MediaTime::ZERO);
 }
 
-/// Auto lanes hold to the estimator's lag only — the cold seed makes
+/// Auto lanes hold to the estimator's lag only. The cold seed makes
 /// target_lag a hair above zero, and a full-depth hold would tax every
 /// Auto live join by the cushion. The hold must lift within the first
 /// few arrivals.

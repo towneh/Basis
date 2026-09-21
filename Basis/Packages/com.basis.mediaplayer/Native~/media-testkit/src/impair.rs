@@ -1,6 +1,6 @@
 //! The deterministic impairment source: seeded delay/gap schedules
-//! wrapped around any [`ByteSource`] — the lost shim, rebuilt where it
-//! belongs. A wrapped source stalls its reads inside each gap window and
+//! wrapped around any [`ByteSource`]. A wrapped source stalls its reads
+//! inside each gap window and
 //! delivers normally between them; composition with [`PacedSource`] turns
 //! a local file into a 1x live edge with a recorded impairment on top.
 //!
@@ -59,13 +59,13 @@ pub struct ImpairProfile {
 }
 
 impl ImpairProfile {
-    /// A phase-0 capture's gaps as wall windows. Reconstructed gaps carry
+    /// A recorded capture's gaps as wall windows. Reconstructed gaps carry
     /// their drain lead-in, so clustered gaps can overlap on the recorded
     /// timeline even though delivery resumed between them; laid out
-    /// verbatim they fuse into super-outages the recording contradicts.
-    /// They are laid out sequentially instead, separated by `separation`
-    /// so each recovery burst lands before the next outage begins — the
-    /// same semantics as [`crate::ArrivalSchedule::from_capture`].
+    /// verbatim they would fuse into longer outages than the recording
+    /// shows. They are laid out sequentially instead, separated by
+    /// `separation` so each recovery burst lands before the next outage
+    /// begins, as in [`crate::ArrivalSchedule::from_capture`].
     pub fn from_capture(capture: &GapCapture, separation: MediaTime) -> Self {
         let mut gaps = capture.gaps.clone();
         gaps.sort_by_key(|g| g.start);
@@ -84,8 +84,8 @@ impl ImpairProfile {
     }
 
     /// The analytic residual stall for this profile's windows inside
-    /// `[0, window)` at a candidate total depth — the sizing model,
-    /// restricted to a bounded run.
+    /// `[0, window)` at a candidate total depth: the sizing model restricted
+    /// to a bounded run.
     pub fn analytic_stall_fraction(&self, depth: MediaTime, window: MediaTime) -> f64 {
         let residual: i64 = self
             .windows
@@ -168,7 +168,7 @@ impl ByteSource for ImpairedSource {
     }
 }
 
-/// Serves the wrapped source at a fixed byte rate from its own origin —
+/// Serves the wrapped source at a fixed byte rate from its own origin, so
 /// a local file becomes a 1x live edge. Reads block until the requested
 /// range has "arrived".
 pub struct PacedSource {

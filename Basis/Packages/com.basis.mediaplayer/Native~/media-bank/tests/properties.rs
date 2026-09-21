@@ -115,7 +115,7 @@ proptest! {
         }
     }
 
-    /// L4: release feeds no consumer faster than 1x + lead, ever — allowing
+    /// Release never feeds a consumer faster than 1x plus the lead, allowing
     /// for decay running the schedule at most `decay_rate` fast.
     #[test]
     fn release_never_beats_one_x_plus_lead(run in runs()) {
@@ -280,7 +280,7 @@ fn discontinuity_splices_the_timeline() {
     assert_eq!(bank.metrics().stall_total, MediaTime::ZERO);
 }
 
-/// VOD: the startup burst is an anchor phase shift — everything inside
+/// VOD: the startup burst is an anchor phase shift. Everything inside
 /// `burst + lead` of the join point is due immediately, and the schedule
 /// keeps running exactly that far ahead (still 1x) further out.
 #[test]
@@ -336,10 +336,9 @@ fn vod_startup_burst_shifts_the_release_phase() {
     );
 }
 
-// The live startup with a non-zero burst is the priming join — its
-// semantics (release ahead of 1x during the hold, presentation-relative
-// anchoring) are pinned in tests/priming.rs. The properties here pin the
-// strict burst-zero startup and the steady-state schedule.
+// The live startup with a non-zero burst is the priming join, pinned in
+// tests/priming.rs. The properties here pin the strict burst-zero startup
+// and the steady-state schedule.
 
 /// The VOD phase shift re-applies across generations (seeks).
 #[test]

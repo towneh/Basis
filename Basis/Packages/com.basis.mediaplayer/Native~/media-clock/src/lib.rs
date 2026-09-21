@@ -130,19 +130,18 @@ pub enum Master {
     Wall,
 }
 
-/// Ladder parameters. Defaults: 20 ms dead
-/// band (Media3's figure), 2% slew cap (validated on the C VOD branch, well
-/// under the ~6% audibility bound), 700 ms snap threshold (the C live
-/// branch's resync figure). The correction is proportional with the cap as a
-/// ceiling, and carries a wider cap for a short window after a snap or a
-/// master adoption — the C live branch's two-phase shape, which is what makes
-/// a join converge in seconds rather than tens of seconds.
 /// The widest a slew ceiling may be. `ClockConfig`'s fields are public, so a
 /// ceiling is caller-supplied: a negative one inverts the correction, and one
 /// at or beyond 1x lets a negative correction stop or reverse `now()`, which
 /// nothing downstream of a monotonic clock survives.
 const MAX_SLEW_PPM: i64 = 999_999;
 
+/// Ladder parameters. Defaults: 20 ms dead band (Media3's figure), 2% slew
+/// cap (well under the ~6% at which a rate change becomes noticeable), and a
+/// 700 ms snap threshold (the previous C player's live resync figure). The
+/// correction is proportional with the cap as a ceiling, and a wider cap
+/// applies for a short window after a snap or a master adoption, so a join
+/// converges in seconds rather than tens of seconds.
 #[derive(Debug, Clone)]
 pub struct ClockConfig {
     pub dead_band: MediaTime,
@@ -151,9 +150,9 @@ pub struct ClockConfig {
     /// Time constant of the proportional correction: the rate offset is the
     /// error divided by this, so an uncapped correction closes the error
     /// exponentially with this constant rather than arriving at full rate and
-    /// overshooting. 0.25 s is the C live branch's figure.
+    /// overshooting. 0.25 s matches the previous C player's live correction.
     pub slew_tau: MediaTime,
-    /// The cap in force for `fast_window` after a snap or a master adoption —
+    /// The cap in force for `fast_window` after a snap or a master adoption,
     /// the two moments where the clock is knowingly far from its master and a
     /// steady-state cap would take tens of seconds to close the gap. Audio is
     /// master and is never rate-adjusted, so the whole correction lands on the
@@ -168,8 +167,8 @@ pub struct ClockConfig {
     /// and miss slots, wobbling a consumed-frames playhead by ±40 ms
     /// around the true position); the filter keeps that wobble from
     /// reaching frame due-times while genuine offsets still converge.
-    /// The snap rung always acts on the raw error — a real discontinuity
-    /// must never wait out a filter.
+    /// The snap rung always acts on the raw error, so a real discontinuity
+    /// never waits out the filter.
     pub master_filter: Option<MediaTime>,
 }
 
@@ -282,9 +281,8 @@ impl MediaClock {
         }
     }
 
-    /// Switch master selection (audio-only seeks and mute transitions were a
-    /// C bug family; this is explicit state). Switching never moves `now`;
-    /// switching to `Wall` also clears any running slew.
+    /// Switch master selection. Switching never moves `now`; switching to
+    /// `Wall` also clears any running slew.
     pub fn set_master(&mut self, wall: MediaTime, master: Master) {
         self.rebase(wall);
         self.master = master;
@@ -338,8 +336,8 @@ impl MediaClock {
         }
     }
 
-    /// Advance the filtered error towards `raw` with gain `dt / (tau + dt)`
-    /// — a first-order low-pass that is exact under irregular observation
+    /// Advance the filtered error towards `raw` with gain `dt / (tau + dt)`:
+    /// a first-order low-pass that is exact under irregular observation
     /// cadence. The first observation after a reset seeds the estimate
     /// directly, so a fresh timeline's initial correction is not delayed.
     fn filter_error(&mut self, wall: MediaTime, raw: MediaTime, tau: MediaTime) -> MediaTime {
@@ -361,7 +359,7 @@ impl MediaClock {
     /// External soft-target slew under the wall master (the sync ladder on
     /// masterless lanes): rebase so `now` never jumps, then run at
     /// 1x + `ppm`, clamped to the slew cap. Ignored under the audio
-    /// master — there the correction rides the audio playhead and
+    /// master, where the correction rides the audio playhead and
     /// `observe_master` carries the clock along.
     pub fn slew_wall(&mut self, wall: MediaTime, ppm: i64) {
         if self.master != Master::Wall {
@@ -407,7 +405,7 @@ impl MediaClock {
 
     /// Close out an expired fast window. `rate_ppm` persists between
     /// observations, so a rate set just inside the window keeps running at the
-    /// wide ceiling until the next observation arrives — unbounded if the
+    /// wide ceiling until the next observation arrives, indefinitely if the
     /// master goes quiet. Rebasing first means the position already reported
     /// at the old rate stands, and only the rate from here changes.
     ///

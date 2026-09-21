@@ -1,7 +1,7 @@
 //! Seeded RNG for deterministic impairment schedules, so every schedule is
 //! replayable from its seed.
 
-/// xorshift64* — tiny, deterministic, good enough for schedule generation.
+/// xorshift64*: tiny, deterministic, good enough for schedule generation.
 /// Not a statistical or cryptographic RNG.
 #[derive(Debug, Clone)]
 pub struct Xorshift64Star {

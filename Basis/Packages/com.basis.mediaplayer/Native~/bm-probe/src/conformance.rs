@@ -185,8 +185,8 @@ fn check_fixture(path: &Path) -> Result<String, String> {
         }
         if lpcm {
             // LPCM has no canonical packetisation (we emit per PES, ffmpeg
-            // re-chunks), so per-packet comparisons are meaningless — but
-            // emitting nothing at all is still a regression.
+            // re-chunks), so per-packet comparisons are meaningless, but
+            // emitting nothing at all is still a failure.
             if ours_audio.is_empty() {
                 return Err("no LPCM frames emitted".into());
             }

@@ -1,7 +1,7 @@
-//! The gated release (per-track-aware routing): a blocked track's
-//! events are skipped in place — order intact, Eos a barrier — while the
-//! other track keeps releasing, and the release cursor stays with the
-//! laggard so banked()/lag grade exactly as an ungated release would.
+//! The gated release (per-track routing): a blocked track's events are
+//! skipped in place (order intact, Eos a barrier) while the other track
+//! keeps releasing, and the release cursor stays with the laggard so
+//! banked()/lag read exactly as an ungated release would.
 
 use media_bank::{Bank, BankConfig, BufferDepth, Liveness, PushOutcome};
 use media_clock::{Generation, MediaTime};
@@ -117,7 +117,7 @@ fn eos_never_overtakes_a_blocked_event() {
     };
     assert_eq!(v.track, VIDEO);
     // The audio AU is blocked and Eos must not pass it: nothing pops,
-    // and there is no wall deadline to wait on — only an unblock helps.
+    // and there is no wall deadline to wait on; only an unblock helps.
     assert!(bank.pop_due_gated(wall, &audio_blocked).is_none());
     assert!(bank.next_due_gated(wall, &audio_blocked).is_none());
 
@@ -185,7 +185,7 @@ fn next_due_reads_past_a_blocked_head() {
     ));
     // Ungated, the head (audio, due now) sets the deadline.
     assert_eq!(bank.next_due(wall), Some(wall));
-    // Gated, the deadline is the first admitted event's — the video AU's
+    // Gated, the deadline is the first admitted event's: the video AU's
     // priming line (rel 3 s against a 2 s burst = due at t+1 s).
     assert_eq!(
         bank.next_due_gated(wall, &audio_blocked),

@@ -1,5 +1,5 @@
-//! The master-filter rung: DSP-callback jitter measured on Quest Pro
-//! (2026-08-15 frame captures) must not reach frame due-times, while
+//! The master-filter rung: DSP-callback jitter of the kind measured on
+//! Quest Pro must not reach frame due-times, while
 //! genuine offsets, discontinuities and generation changes correct
 //! exactly as on the unfiltered ladder.
 
@@ -28,12 +28,12 @@ struct Delivery {
     frames: i64,
 }
 
-/// The Quest Pro capture pattern (rtspt stereo lane, tenth session):
-/// 512-sample buffers at 24 kHz (21.3 ms nominal). Jitter comes in
-/// multi-second episodes — callbacks alternating ~14/28 ms
-/// (double-buffer bursts) and every 15th slot missed outright (a ~42 ms
-/// gap, ~320 ms period) with the next pull catching up — separated by
-/// quiet phases of uniform cadence. The episode boundaries are where the
+/// The callback pattern captured on Quest Pro playing a stereo RTSP-over-TCP
+/// stream: 512-sample buffers at 24 kHz (21.3 ms nominal). Jitter comes in
+/// multi-second episodes, separated by quiet phases of uniform cadence.
+/// Within an episode callbacks alternate ~14/28 ms (double-buffer bursts)
+/// and every 15th slot is missed outright (a ~42 ms gap, ~320 ms period),
+/// with the next pull catching up. The episode boundaries are where the
 /// raw ladder moves the clock.
 fn quest_delivery_schedule(duration_us: i64) -> Vec<Delivery> {
     const SLOT_US: i64 = 21_333;
@@ -89,9 +89,9 @@ fn measured_playhead(deliveries: &[Delivery], wall_us: i64) -> Option<i64> {
 }
 
 /// Run the capture pattern for 15 s, observing every 4 ms (the audio
-/// thread's cadence). Returns the clock's post-settle wander — how far
-/// `now(wall) - wall` moved over the measured window, i.e. how much the
-/// jitter dragged frame due-times — plus the snap count.
+/// thread's cadence). Returns the clock's post-settle wander (how far
+/// `now(wall) - wall` moved over the measured window, which is how far the
+/// jitter dragged frame due-times) and the snap count.
 fn run_quest_pattern(c: &mut MediaClock, settle_us: i64) -> (i64, usize) {
     let deliveries = quest_delivery_schedule(15_000_000);
     let mut snaps = 0;
@@ -120,12 +120,12 @@ fn run_quest_pattern(c: &mut MediaClock, settle_us: i64) -> (i64, usize) {
 }
 
 /// Filtered ladder: once converged onto the playhead's standing offset,
-/// episode onsets and callback jitter move the clock — and with it every
-/// frame's due time — by only a couple of ms across the whole run (the
-/// band-edge walk at the first episode onset), safely under half a 72 Hz
-/// vsync (6.9 ms): presentation holds the ideal cadence through the
-/// episodes. The raw ladder walks the full alternation
-/// amplitude (~7 ms) on the same trace.
+/// episode onsets and callback jitter move the clock (and every frame's due
+/// time with it) by only a couple of ms across the whole run, the band-edge
+/// walk at the first episode onset. That is under half a 72 Hz vsync
+/// (6.9 ms), so presentation holds its cadence through the episodes. The
+/// raw ladder walks the full alternation amplitude (~7 ms) on the same
+/// trace.
 #[test]
 fn filter_holds_due_times_through_callback_jitter() {
     let mut c = clock(Some(FILTER_TAU));
@@ -139,9 +139,9 @@ fn filter_holds_due_times_through_callback_jitter() {
 
 /// The same trace on the raw ladder: each episode onset swings one side
 /// of the alternation past the dead band, and the resulting slew walks
-/// the clock by most of the jitter amplitude — frame due-times slide
-/// across vsync boundaries, which is the judder the capture measured.
-/// Pinned so the A/B stays visible.
+/// the clock by most of the jitter amplitude. Frame due-times slide across
+/// vsync boundaries, which is the judder seen on the device. Pinned so the
+/// comparison with the filtered ladder stays visible.
 #[test]
 fn raw_ladder_wanders_on_the_same_trace() {
     let mut c = clock(None);
@@ -154,7 +154,7 @@ fn raw_ladder_wanders_on_the_same_trace() {
 }
 
 /// A genuine standing offset still converges through the filter: slew
-/// engages, closes to the dead band, and stays quiet — no flapping at
+/// engages, closes to the dead band, and stays quiet, with no flapping at
 /// the band edge on a clean-cadence master.
 #[test]
 fn filter_converges_on_genuine_offset() {

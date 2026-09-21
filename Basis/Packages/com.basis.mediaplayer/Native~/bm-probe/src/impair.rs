@@ -1,9 +1,10 @@
 //! `impair`: run a live source through a deterministic impairment schedule
-//! and grade the Bank against the sizing model. A phase-0 profile
-//! replays the recorded delivery gaps of the VRCDN investigation on top of
-//! any lane — a local TS file (paced to 1x) or a real live URL — and the
-//! run passes when the session survives and the measured stall stays
-//! within the analytic model's residual for the configured depth.
+//! and grade the Bank against the analytic stall model. A profile replays
+//! the delivery gaps recorded from a VRCDN stream (the `media-testkit`
+//! fixtures) on top of any lane, either a local TS file paced to 1x or a
+//! real live URL. The run passes when the session survives and the measured
+//! stall stays within the analytic model's residual for the configured
+//! depth.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -113,10 +114,10 @@ pub fn run(options: &Options) -> ExitCode {
             .unwrap_or_else(|| "Auto".into()),
     );
 
-    // Synthetic audio pull at the hardware cadence (the play command's
-    // discipline: a frame budget anchored at the Playing transition, sized
-    // by the session's real rate and channel count — under- or over-pulling
-    // races the audio-master clock and manufactures pipeline backpressure).
+    // Synthetic audio pull at the hardware cadence, as in `play`: a frame
+    // budget anchored at the Playing transition and sized by the session's
+    // real rate and channel count. Pulling too much or too little races the
+    // audio-master clock and manufactures pipeline backpressure.
     let start = Instant::now();
     let mut audio_buf = vec![0f32; 2048];
     let mut audio_frames = 0u64;
@@ -166,7 +167,7 @@ pub fn run(options: &Options) -> ExitCode {
     };
 
     // Grade against the analytic model at the *achieved* total depth
-    // (target lag + decoder cushion, matching the sizing table's axis),
+    // (target lag + decoder cushion, the analytic table's depth axis),
     // over the gaps that fell inside the run window.
     let (metrics, cushion) = {
         let bank = px.bank.bank.lock().expect("bank lock");
@@ -195,14 +196,13 @@ pub fn run(options: &Options) -> ExitCode {
     );
 
     // Pass: session alive and presentation genuinely flowed (at least
-    // ~10 fps averaged over the non-stalled, post-startup window — a total
+    // ~10 fps averaged over the non-stalled, post-startup window, so a total
     // starve cannot pass vacuously). On the deterministic file lane the
-    // measured stall must additionally stay within the sizing model's
-    // residual plus decode/present noise; over a real network the model's
-    // instant-recovery assumption doesn't hold (TCP slow-start after each
-    // idle window, bounded socket buffers), so the model comparison is
-    // reported for judgment and survival is the gate — real-network
-    // validation is the release-gate layer, not a model-conformance one.
+    // measured stall must also stay within the model's residual plus
+    // decode/present noise. Over a real network the model's instant-recovery
+    // assumption does not hold (TCP slow-start after each idle window,
+    // bounded socket buffers), so there the comparison is only reported and
+    // survival is the gate.
     let flowing_secs =
         (elapsed.as_secs_f64() * (1.0 - analytic.min(1.0)) - depth.as_micros() as f64 / 1e6 - 3.0)
             .max(0.0);

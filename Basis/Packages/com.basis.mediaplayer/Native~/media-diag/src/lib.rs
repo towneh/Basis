@@ -51,8 +51,8 @@ fn process_wall_us() -> i64 {
 
 /// One line in the process log: a session's structured event or a free-text
 /// diagnostic, in the one shape. `session` is 0 for a line that belongs to
-/// no session, which is most of them worth having — the failures that cost
-/// the most to diagnose happen before a handle exists or after it closes.
+/// no session, which covers many of the most useful ones: the failures that
+/// cost most to diagnose happen before a handle exists or after it closes.
 #[derive(Debug, Clone)]
 pub struct LogRecord {
     pub wall_us: i64,
@@ -104,9 +104,9 @@ pub fn log(line: &str) {
     log_at(Level::Info, line);
 }
 
-/// [`log`] at a stated severity. The line goes to the platform sink as it
-/// always has *and* into the process log, so a host with no console still
-/// has the free text — on a user's machine the sink alone is unreachable.
+/// [`log`] at a stated severity. The line goes to the platform sink and
+/// into the process log, so a host with no console still has the free
+/// text; on a user's machine the sink alone is unreachable.
 pub fn log_at(level: Level, line: &str) {
     push_log_record(LogRecord {
         wall_us: process_wall_us(),
@@ -186,8 +186,8 @@ impl Stage {
     }
 }
 
-/// In rate, occupancy, out rate — plus the failure counters no stage ships
-/// without. All relaxed atomics: single-writer per counter, readers take
+/// In rate, occupancy and out rate, plus the drop and error counters every
+/// stage carries. All relaxed atomics: single-writer per counter, readers take
 /// snapshots.
 #[derive(Debug, Default)]
 pub struct StageCounters {
@@ -247,11 +247,8 @@ pub enum EventCode {
     Discontinuity = 11,
     CapabilityProbe = 12,
     Error = 13,
-    // 14 is retired. It reported the video-led join's pre-join audio
-    // shed, which no longer exists: every live session is audio-leading,
-    // so the first banked audio is the join and nothing precedes it.
-    // Codes carry explicit discriminants and are stable, so 14 stays
-    // spent rather than being reused.
+    // 14 is retired. Codes carry explicit discriminants and are stable,
+    // so a retired value is never reused.
     /// The ring's serve-side trim engaged: banked audio crossed the
     /// high-water mark and excess frames were discarded to keep the
     /// serve on the media timeline (a source delivering more samples
@@ -262,7 +259,7 @@ pub enum EventCode {
     /// released. Detail carries the target error and the applied rate.
     SyncSlew = 16,
     /// Shared-playback soft target: the error crossed the seek
-    /// threshold — the last rung, never the first. Detail carries the
+    /// threshold (the last rung, never the first). Detail carries the
     /// error and the landed target.
     SyncSeek = 17,
     /// A free-text diagnostic ([`log`]). Detail is the whole line: this
@@ -345,7 +342,7 @@ pub struct SessionDiag {
     stages: [StageCounters; STAGE_COUNT],
     events: Mutex<Vec<DiagEvent>>,
     event_cap: usize,
-    /// Events lost to the cap — visible, never silent.
+    /// Events lost to the cap, counted so the loss is visible.
     events_dropped: AtomicU64,
     /// Frames discarded by the audio ring's serve-side trim. Session
     /// level rather than a field on `Stage::AudioRing`, whose `drops`
@@ -528,12 +525,11 @@ impl CaptureRecorder {
         // path's only loss channel with no stage field of its own, and
         // reconstructing it from in/out/occupancy is error-prone.
         let _ = write!(h, ",audio_trimmed_frames");
-        // Also appended after the stage block, and for the same reason: the
-        // A/V offset is a relationship between the present and audio-ring
-        // stages rather than a counter belonging to either. Without it here
-        // nothing headless can see the offset's shape over time — it reached
-        // only the ABI snapshot and the managed frame capture, which is how a
-        // presentation lag came to be read as a clock error.
+        // Also appended after the stage block: the A/V offset is a
+        // relationship between the present and audio-ring stages rather
+        // than a counter belonging to either. It is here so a headless run
+        // can see the offset's shape over time, which neither the ABI
+        // snapshot nor the managed frame capture gives it.
         let _ = write!(h, ",av_offset_us");
         // The Bank's schedule block, appended last. The stage counters say
         // how much the Bank holds; these say whether it is meant to be
@@ -610,7 +606,7 @@ mod tests {
     use super::*;
 
     /// The column contract is stable: this failing means downstream
-    /// analysis tooling breaks — append columns, never rename or reorder.
+    /// analysis tooling breaks. Append columns; never rename or reorder.
     #[test]
     fn column_contract_is_stable() {
         let header = CaptureRecorder::header();
@@ -850,8 +846,8 @@ mod tests {
     static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     /// The sink and the capture behind it are process-wide and the harness
-    /// runs rows in parallel, so a row touching either takes this first —
-    /// otherwise one row's lines land in another row's expectations.
+    /// runs rows in parallel, so a row touching either takes this first, or
+    /// one row's lines land in another row's expectations.
     static GLOBALS: Mutex<()> = Mutex::new(());
 
     fn capture(line: &str) {
@@ -926,8 +922,8 @@ mod tests {
         assert!(rec.write_csv(FlushFails).is_err());
     }
 
-    /// Nothing was written, so nothing can have failed on the way out —
-    /// bar the flush, which still has to be made and reported.
+    /// Nothing was written, so only the flush can fail, and it still has to
+    /// be made and reported.
     #[test]
     fn an_empty_capture_still_flushes() {
         let rec = CaptureRecorder::default();

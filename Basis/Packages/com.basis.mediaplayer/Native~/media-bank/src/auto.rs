@@ -1,8 +1,8 @@
 //! Auto depth: the debt bound grows actual lag to what the link
-//! demonstrates; decay shrinks it back towards this estimator's target — a
+//! demonstrates; decay shrinks it back towards this estimator's target: a
 //! quantile over a histogram of recent delivery delays with exponential
-//! forgetting (the NetEQ shape: 20 ms buckets, 0.95 quantile, 0.983 forget
-//! factor). Sizing comes from measured delay variance, never RTT; an
+//! forgetting (WebRTC NetEQ's shape: 20 ms buckets, 0.95 quantile, 0.983
+//! forget factor). Sizing comes from measured delay variance, never RTT; an
 //! RTT-derived value is only the cold-start seed before any delays exist.
 
 use media_clock::MediaTime;
@@ -10,8 +10,8 @@ use media_clock::MediaTime;
 #[derive(Debug, Clone)]
 pub struct AutoConfig {
     /// Total depth assumed before the link has demonstrated anything. The
-    /// engine may seed this from measured RTT at open; the default is the
-    /// Low-latency preset — Auto starts modest and grows on evidence.
+    /// engine may seed this from measured RTT at open. The default is the
+    /// Low-latency preset: Auto starts modest and grows on evidence.
     pub cold_start_depth: MediaTime,
     /// Floor for the target depth.
     pub min_depth: MediaTime,
