@@ -1,17 +1,23 @@
-# librist (pinned) — build staging
+# librist
 
-Staging area for the librist static that `media-rist` links when built with
-the `rist` cargo feature (spec §5.5 / §9: librist pinned and watched, behind
-its build flag).
+Where the librist static library that `media-rist` links is staged, for builds
+with the `rist` feature. Without it, the engine builds with no RIST support.
 
-- **Pin: librist v0.2.11** (https://code.videolan.org/rist/librist), BSD-2-Clause,
-  with its bundled mbedTLS (Apache-2.0) linked into the archive. No local patches.
-- `include/librist/` — the pinned tag's public headers, **committed** so the
-  hand-written FFI declarations and the layout-check shim in
-  `media-rist/csrc/` always compile against the exact pinned API.
-- `win-x64/rist.lib`, `linux-x64/librist.a` — built from source by
-  `tools/build-librist.ps1`, **not committed** (gitignored).
+- Pinned to librist v0.2.11 (https://code.videolan.org/rist/librist),
+  BSD-2-Clause, with its bundled mbedTLS (Apache-2.0) linked into the archive.
+  No local patches.
+- `include/librist/` holds the pinned version's public headers, committed so
+  `media-rist`'s FFI declarations and the layout check in `media-rist/csrc/`
+  compile against the exact API.
+- The libraries are built from source and not committed:
 
-To change the pin: pass `-LibristRef` to the build script, re-stage the
-headers, and re-run the `media-rist` layout test (`cargo test -p media-rist
---features librist`) — it fails the build if the struct layout moved.
+  | Platform | File | Script |
+  | --- | --- | --- |
+  | Windows x64 | `win-x64/rist.lib` | `tools/build-librist.ps1` |
+  | Linux x64 | `linux-x64/librist.a` | `tools/build-librist.sh` |
+  | Android arm64 | `android-arm64/librist.a` | `tools/build-librist-android.sh` |
+
+To move the pin, pass the new tag to the scripts (`-LibristRef`, or
+`LIBRIST_REF` for the shell scripts), which also re-stage the headers, then run
+`cargo test -p media-rist --features librist`, which fails if the struct
+layout changed.
