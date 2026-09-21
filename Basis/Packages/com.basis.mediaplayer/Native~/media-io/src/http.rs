@@ -4,7 +4,10 @@
 //! gate, and pins the connection to the vetted set (`resolve_to_addrs`)
 //! with Host/SNI carried by the URL — the resolve-then-reconnect TOCTOU
 //! is closed by construction. Redirects are handled manually so each
-//! hop re-runs the same vetting and re-pins.
+//! hop re-runs the same vetting and re-pins, on every request and not
+//! only the first: a server may answer any ranged read with a redirect,
+//! and each read walks from the URL the caller opened rather than from
+//! wherever an earlier walk ended.
 //!
 //! Reads on a range-capable server are chunked ranged requests under a
 //! per-request timeout, so a stalled link surfaces as a typed error rather
@@ -125,8 +128,16 @@ pub async fn vet_url_async(
 }
 
 pub struct HttpSource {
-    client: reqwest::Client,
+    /// The URL the caller opened. Every request after the open starts its
+    /// walk here rather than at [`Self::url`]: a redirector handing out
+    /// short-lived signed targets has to be asked again for a fresh one,
+    /// and the target a previous chain settled on is the thing that
+    /// expires first.
+    origin: Url,
+    /// Where the latest walk landed, for reporting only.
     url: Url,
+    clients: PinnedClients,
+    gate: Arc<dyn AddressGate>,
     limits: IoLimits,
     len: Option<u64>,
     ranges: bool,
@@ -229,97 +240,85 @@ impl HttpSource {
         if url.len() > limits.max_url_len {
             return Err(IoError::new(IoErrorKind::Cap, "URL length cap exceeded"));
         }
-        let mut current =
+        let origin =
             Url::parse(url).map_err(|e| IoError::new(IoErrorKind::Url, format!("{url}: {e}")))?;
 
-        for _hop in 0..=limits.max_redirects {
-            let probe_end = limits.chunk_bytes - 1;
-            let (client, response) = awaiting(
-                &cancel,
+        let mut clients = PinnedClients::default();
+        let probe_end = limits.chunk_bytes - 1;
+        let (current, response) = awaiting(
+            &cancel,
+            IoErrorKind::Connect,
+            "open cancelled",
+            follow(
+                &mut clients,
+                &origin,
+                &limits,
+                gate.as_ref(),
+                Some((0, probe_end)),
                 IoErrorKind::Connect,
-                "open cancelled",
-                pinned_get(
-                    &current,
-                    &limits,
-                    gate.as_ref(),
-                    Some((0, probe_end)),
-                    IoErrorKind::Connect,
-                ),
-            )?;
+            ),
+        )?;
 
-            let status = response.status().as_u16();
-            if REDIRECT_STATUSES.contains(&status) {
-                let location = response
-                    .headers()
-                    .get("location")
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| {
-                        IoError::new(IoErrorKind::Redirect, format!("{status} without Location"))
-                    })?;
-                current = current
-                    .join(location)
-                    .map_err(|e| IoError::new(IoErrorKind::Redirect, format!("{location}: {e}")))?;
-                continue;
-            }
-            if !response.status().is_success() {
-                return Err(IoError {
-                    kind: IoErrorKind::Http,
-                    status: Some(status),
-                    detail: format!("GET {current}"),
-                });
-            }
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            return Err(IoError {
+                kind: IoErrorKind::Http,
+                status: Some(status),
+                detail: format!("GET {current}"),
+            });
+        }
 
-            if status == 206 {
-                // On a 206 the total can only come from Content-Range: a
-                // range-capping proxy makes Content-Length the part, not
-                // the whole. A 206 that states no total still paces as
-                // on-demand, it just reports an unknown size.
-                let len = content_range_total(&response);
-                let finite = len.is_some() || response.content_length().is_some();
-                let end = response.content_length().map(|n| n.min(limits.chunk_bytes));
-                return Ok(Self {
-                    client,
-                    url: current,
-                    limits,
-                    len,
-                    ranges: true,
-                    rangeable: true,
-                    finite,
-                    stream: Some(StreamState::new(response, 0, end)),
-                    cancel,
-                });
-            }
-
-            // No range support: a 200 answers with the whole entity from
-            // byte 0, so this response is the sequential stream and the
-            // open is done on the one connection it already holds.
-            let len = response.content_length();
-            // A server can decline this range request and still honour
-            // ranges generally; the advertised header is the second arm.
-            let advertises_ranges = response
-                .headers()
-                .get("accept-ranges")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"));
+        if status == 206 {
+            // On a 206 the total can only come from Content-Range: a
+            // range-capping proxy makes Content-Length the part, not
+            // the whole. A 206 that states no total still paces as
+            // on-demand, it just reports an unknown size.
+            let len = content_range_total(&response);
+            let finite = len.is_some() || response.content_length().is_some();
+            let end = response.content_length().map(|n| n.min(limits.chunk_bytes));
             return Ok(Self {
-                client,
+                origin,
                 url: current,
+                clients,
+                gate,
                 limits,
                 len,
-                ranges: false,
-                rangeable: advertises_ranges,
-                finite: len.is_some(),
-                stream: Some(StreamState::new(response, 0, None)),
+                ranges: true,
+                rangeable: true,
+                finite,
+                stream: Some(StreamState::new(response, 0, end)),
                 cancel,
             });
         }
-        Err(IoError::new(
-            IoErrorKind::Redirect,
-            format!("redirect cap ({}) exceeded", limits.max_redirects),
-        ))
+
+        // No range support: a 200 answers with the whole entity from
+        // byte 0, so this response is the sequential stream and the
+        // open is done on the one connection it already holds.
+        let len = response.content_length();
+        // A server can decline this range request and still honour
+        // ranges generally; the advertised header is the second arm.
+        let advertises_ranges = response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"));
+        Ok(Self {
+            origin,
+            url: current,
+            clients,
+            gate,
+            limits,
+            len,
+            ranges: false,
+            rangeable: advertises_ranges,
+            finite: len.is_some(),
+            stream: Some(StreamState::new(response, 0, None)),
+            cancel,
+        })
     }
 
-    /// The URL the source actually reads from (after redirects).
+    /// Where the latest redirect walk landed. Reads do not start here;
+    /// each one walks from the URL the caller opened.
     pub fn final_url(&self) -> &Url {
         &self.url
     }
@@ -351,21 +350,31 @@ impl HttpSource {
         Ok((stream.response, self.url))
     }
 
+    /// One GET walked from the URL the caller opened, every hop vetted as
+    /// the open's were.
+    fn request(&mut self, range: Option<(u64, u64)>) -> Result<reqwest::Response, IoError> {
+        let (landed, response) = awaiting(
+            &self.cancel,
+            IoErrorKind::Read,
+            "read cancelled",
+            follow(
+                &mut self.clients,
+                &self.origin,
+                &self.limits,
+                self.gate.as_ref(),
+                range,
+                IoErrorKind::Read,
+            ),
+        )?;
+        self.url = landed;
+        Ok(response)
+    }
+
     fn reopen_at(&mut self, offset: u64) -> Result<(), IoError> {
         self.stream = None;
         if self.ranges {
             let last = offset + self.limits.chunk_bytes - 1;
-            let response = awaiting(
-                &self.cancel,
-                IoErrorKind::Read,
-                "read cancelled",
-                send_get(
-                    &self.client,
-                    &self.url,
-                    Some((offset, last)),
-                    IoErrorKind::Read,
-                ),
-            )?;
+            let response = self.request(Some((offset, last)))?;
             let status = response.status().as_u16();
             if status != 206 {
                 return Err(IoError {
@@ -380,12 +389,7 @@ impl HttpSource {
         }
 
         // Sequential fallback: restart and discard forward to the offset.
-        let response = awaiting(
-            &self.cancel,
-            IoErrorKind::Read,
-            "read cancelled",
-            send_get(&self.client, &self.url, None, IoErrorKind::Read),
-        )?;
+        let response = self.request(None)?;
         if !response.status().is_success() {
             return Err(IoError {
                 kind: IoErrorKind::Read,
@@ -500,19 +504,76 @@ fn awaiting<T>(
     })
 }
 
-/// Build the pinned client for `url` and send one GET through it. The
-/// client comes back alongside the response because the source keeps it
-/// for every later positioned read.
-async fn pinned_get(
-    url: &Url,
+/// The pinned client for each host a source has been sent to. A ranged
+/// source asks again every chunk and every request walks from the URL the
+/// caller opened, so without these a redirected source would pay a resolve
+/// and a handshake per hop per chunk. A client held here only ever connects
+/// to the addresses that were vetted when it was built.
+#[derive(Default)]
+struct PinnedClients {
+    by_host: Vec<(String, reqwest::Client)>,
+}
+
+impl PinnedClients {
+    async fn for_url(
+        &mut self,
+        url: &Url,
+        limits: &IoLimits,
+        gate: &dyn AddressGate,
+    ) -> Result<reqwest::Client, IoError> {
+        // The screen that needs no network runs for a known host too: the
+        // scheme belongs to the URL, not to the host.
+        vet_target(url, gate)?;
+        let host = url.host_str().unwrap_or_default();
+        if let Some((_, client)) = self.by_host.iter().find(|(known, _)| known == host) {
+            return Ok(client.clone());
+        }
+        let client = build_pinned_client(url, limits, gate).await?;
+        // One walk's worth of hosts is the most a source uses at once.
+        if self.by_host.len() > limits.max_redirects as usize {
+            self.by_host.remove(0);
+        }
+        self.by_host.push((host.to_string(), client.clone()));
+        Ok(client)
+    }
+}
+
+/// Send one GET to `origin` and follow what it answers, one hop at a time
+/// so that each target is vetted and pinned before anything is sent to it.
+/// Returns the first response that is not a redirect, whatever its status,
+/// with the URL that gave it.
+async fn follow(
+    clients: &mut PinnedClients,
+    origin: &Url,
     limits: &IoLimits,
     gate: &dyn AddressGate,
     range: Option<(u64, u64)>,
     kind: IoErrorKind,
-) -> Result<(reqwest::Client, reqwest::Response), IoError> {
-    let client = build_pinned_client(url, limits, gate).await?;
-    let response = send_get(&client, url, range, kind).await?;
-    Ok((client, response))
+) -> Result<(Url, reqwest::Response), IoError> {
+    let mut current = origin.clone();
+    for _hop in 0..=limits.max_redirects {
+        let client = clients.for_url(&current, limits, gate).await?;
+        let response = send_get(&client, &current, range, kind).await?;
+
+        let status = response.status().as_u16();
+        if !REDIRECT_STATUSES.contains(&status) {
+            return Ok((current, response));
+        }
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                IoError::new(IoErrorKind::Redirect, format!("{status} without Location"))
+            })?;
+        current = current
+            .join(location)
+            .map_err(|e| IoError::new(IoErrorKind::Redirect, format!("{location}: {e}")))?;
+    }
+    Err(IoError::new(
+        IoErrorKind::Redirect,
+        format!("redirect cap ({}) exceeded", limits.max_redirects),
+    ))
 }
 
 /// One GET. No request carries a total timeout: a body is read at the

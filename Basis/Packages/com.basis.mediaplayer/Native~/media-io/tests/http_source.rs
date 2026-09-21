@@ -835,3 +835,239 @@ fn seekability_reads_ranges_and_length_not_guesses() {
             .is_seekable()
     );
 }
+
+/// What a scripted server does with one ranged request.
+enum Answer {
+    Serve,
+    Redirect(String),
+    Gone,
+}
+
+/// A range server on `ip` that asks `script` what to do with each request,
+/// telling it how many came before and where this one's range starts. The
+/// log is every range start it was asked for, in order.
+fn spawn_scripted_server(
+    ip: &str,
+    body: Vec<u8>,
+    script: impl Fn(usize, usize) -> Answer + Send + Sync + 'static,
+) -> (String, Arc<Mutex<Vec<usize>>>) {
+    let listener = TcpListener::bind((ip, 0)).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let seen = Arc::clone(&log);
+    let script = Arc::new(script);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let seen = Arc::clone(&seen);
+            let script = Arc::clone(&script);
+            let body = body.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(spec) = line.to_ascii_lowercase().strip_prefix("range: bytes=")
+                        {
+                            let mut parts = spec.split('-');
+                            let start: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            let end: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            range = start.zip(end);
+                        }
+                    }
+                    let Some((start, end)) = range else { return };
+                    let before = {
+                        let mut seen = seen.lock().expect("log lock");
+                        seen.push(start);
+                        seen.len() - 1
+                    };
+                    let response = match script(before, start) {
+                        Answer::Serve => {
+                            let stop = (end + 1).min(body.len());
+                            let mut r = format!(
+                                "HTTP/1.1 206 Partial Content\r\n\
+                                 Content-Range: bytes {start}-{}/{}\r\n\
+                                 Content-Length: {}\r\n\r\n",
+                                stop - 1,
+                                body.len(),
+                                stop - start
+                            )
+                            .into_bytes();
+                            r.extend_from_slice(&body[start..stop]);
+                            r
+                        }
+                        Answer::Redirect(to) => redirect(&to),
+                        Answer::Gone => b"HTTP/1.1 410 Gone\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                    };
+                    if stream.write_all(&response).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (format!("http://{ip}:{port}"), log)
+}
+
+const REDIRECT_CHUNK: usize = 64 * 1024;
+
+fn patterned(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+fn open_chunked(url: &str, gate: Arc<dyn media_io::AddressGate>) -> HttpSource {
+    HttpSource::open(
+        url,
+        IoLimits {
+            chunk_bytes: REDIRECT_CHUNK as u64,
+            ..IoLimits::default()
+        },
+        gate,
+        CancelToken::new(),
+    )
+    .expect("the opening chunk is served without a redirect")
+}
+
+fn read_through(source: &mut HttpSource, body: &[u8]) -> Result<(), String> {
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut pos = 0usize;
+    while pos < body.len() {
+        let n = source
+            .read_at(pos as u64, &mut buf)
+            .map_err(|e| e.to_string())?;
+        assert!(n > 0, "the body ended early at {pos}");
+        assert_eq!(&buf[..n], &body[pos..pos + n], "bytes continue at {pos}");
+        pos += n;
+    }
+    Ok(())
+}
+
+/// A CDN node that starts redirecting part-way through a file has not
+/// refused the request, it has said where the bytes are. The origin here
+/// serves the open itself and answers every later chunk request with a 302
+/// to a second server.
+#[test]
+fn a_redirected_chunk_request_is_followed() {
+    let body = patterned(3 * REDIRECT_CHUNK);
+    let (target, target_log) =
+        spawn_scripted_server("127.0.0.1", body.clone(), |_, _| Answer::Serve);
+    let to = format!("{target}/media");
+    let (origin, origin_log) =
+        spawn_scripted_server("127.0.0.1", body.clone(), move |before, _| match before {
+            0 => Answer::Serve,
+            _ => Answer::Redirect(to.clone()),
+        });
+
+    let mut source = open_chunked(&format!("{origin}/media"), Arc::new(AllowAllGate));
+    read_through(&mut source, &body).expect("the redirected chunks read back");
+
+    assert_eq!(
+        *target_log.lock().expect("log lock"),
+        vec![REDIRECT_CHUNK, 2 * REDIRECT_CHUNK],
+        "the second server served every chunk after the first, at the byte asked for"
+    );
+    assert_eq!(
+        *origin_log.lock().expect("log lock"),
+        vec![0, REDIRECT_CHUNK, 2 * REDIRECT_CHUNK]
+    );
+    assert!(source.final_url().as_str().starts_with(&target));
+}
+
+/// Loopback is the whole of 127/8, so a second loopback address stands in
+/// for the host a gate refuses while the origin stays reachable.
+struct OnlyLocalhost;
+
+impl media_io::AddressGate for OnlyLocalhost {
+    fn permit(&self, ip: std::net::IpAddr) -> bool {
+        ip == std::net::IpAddr::from([127, 0, 0, 1])
+    }
+}
+
+/// A redirect met mid-file names a host the server chose, exactly as one
+/// met at the open does, so it goes through the same gate before anything
+/// is sent to it.
+#[test]
+fn a_redirected_chunk_request_is_vetted() {
+    let body = patterned(2 * REDIRECT_CHUNK);
+    let (refused, refused_log) =
+        spawn_scripted_server("127.0.0.2", body.clone(), |_, _| Answer::Serve);
+    let to = format!("{refused}/media");
+    let (origin, _) =
+        spawn_scripted_server("127.0.0.1", body.clone(), move |before, _| match before {
+            0 => Answer::Serve,
+            _ => Answer::Redirect(to.clone()),
+        });
+
+    let mut source = open_chunked(&format!("{origin}/media"), Arc::new(OnlyLocalhost));
+    let err = read_through(&mut source, &body).expect_err("the hop is refused");
+    assert!(err.starts_with("Blocked:"), "the gate refused it: {err}");
+    assert!(
+        refused_log.lock().expect("log lock").is_empty(),
+        "nothing was sent to the refused host"
+    );
+
+    // The same chain with a gate that allows the hop, so the refusal above
+    // is the gate's and not the fixture's.
+    let mut source = open_chunked(&format!("{origin}/media"), Arc::new(AllowAllGate));
+    read_through(&mut source, &body).expect("an allowed hop reads through");
+}
+
+#[test]
+fn a_redirect_loop_on_a_chunk_request_stops_at_the_cap() {
+    let body = patterned(2 * REDIRECT_CHUNK);
+    let (origin, origin_log) =
+        spawn_scripted_server("127.0.0.1", body.clone(), |before, _| match before {
+            0 => Answer::Serve,
+            _ => Answer::Redirect("/media".to_string()),
+        });
+
+    let mut source = open_chunked(&format!("{origin}/media"), Arc::new(AllowAllGate));
+    let err = read_through(&mut source, &body).expect_err("the loop is given up on");
+    assert!(err.starts_with("Redirect:"), "the cap refused it: {err}");
+
+    let hops = IoLimits::default().max_redirects as usize + 1;
+    assert_eq!(
+        origin_log.lock().expect("log lock").len(),
+        1 + hops,
+        "one request for the open and one walk's worth for the chunk"
+    );
+}
+
+/// A redirector that hands out short-lived targets has to be asked again
+/// each time: the target a previous walk settled on is the thing that
+/// expires first. Each target here serves one request and answers 410 from
+/// then on, and the origin names a different one each time it is asked.
+#[test]
+fn every_chunk_request_walks_from_the_url_that_was_opened() {
+    let body = patterned(3 * REDIRECT_CHUNK);
+    let one_use = |before: usize, _: usize| match before {
+        0 => Answer::Serve,
+        _ => Answer::Gone,
+    };
+    let (first, _) = spawn_scripted_server("127.0.0.1", body.clone(), one_use);
+    let (second, _) = spawn_scripted_server("127.0.0.1", body.clone(), one_use);
+    let targets = [format!("{first}/media"), format!("{second}/media")];
+    let (origin, origin_log) =
+        spawn_scripted_server("127.0.0.1", body.clone(), move |before, _| match before {
+            0 => Answer::Serve,
+            n => Answer::Redirect(targets[(n - 1) % targets.len()].clone()),
+        });
+
+    let mut source = open_chunked(&format!("{origin}/media"), Arc::new(AllowAllGate));
+    read_through(&mut source, &body).expect("each chunk is asked of the origin again");
+
+    assert_eq!(
+        *origin_log.lock().expect("log lock"),
+        vec![0, REDIRECT_CHUNK, 2 * REDIRECT_CHUNK],
+        "the origin saw every chunk request"
+    );
+}
