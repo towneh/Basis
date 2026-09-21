@@ -218,6 +218,11 @@ public enum BmEventCode : uint
     /// this is the channel that works before a session exists and after it
     /// closes, so it carries no more structure than the words.</summary>
     Log = 18,
+    /// <summary>The video decoder fell too far behind the clock and video is
+    /// being discarded up to the next keyframe so it can rejoin the sound,
+    /// which is unaffected. The signal that this source is more than the
+    /// device can decode.</summary>
+    LateVideoSkip = 19,
 }
 
 /// <summary>How much a diagnostic matters, mirroring the engine's own set.

@@ -41,6 +41,81 @@ const DECODE_TICK: Duration = Duration::from_millis(4);
 /// A consumer pull within this window keeps audio as the clock master.
 const AUDIO_LIVENESS: MediaTime = MediaTime::from_millis(500);
 
+/// A video access unit this far behind the playing clock when the decoder
+/// comes to take it cannot be shown in time, and nor can anything that
+/// needs it: video is discarded from there to the next keyframe. Access
+/// units reach the decoder ahead of the clock by the release lead, so one
+/// arriving late means the decoder has been too slow for long enough to
+/// spend that lead, and a brief stall a healthy decoder catches up from
+/// never reaches it. Left alone the backlog fills the decode channel, the
+/// gated track closes the Bank to both tracks and audio starves. ExoPlayer
+/// discards source video to the next keyframe at the same figure.
+const LATE_VIDEO_SKIP: MediaTime = MediaTime::from_millis(500);
+/// Decoded frames in a row, each too late to be shown and later than the
+/// one before, that mean the decoder is losing ground rather than making
+/// it up. See [`FallingBehind`].
+const LATE_FRAMES_BEFORE_SKIP: u32 = 5;
+/// A skip is reported at most this often.
+const LATE_VIDEO_LOG_EVERY: Duration = Duration::from_secs(5);
+
+/// Whether the decoder is losing ground, judged from what comes out of it.
+///
+/// The access-unit test above is slow to fire on a decoder that is only a
+/// little short of its stream: it has the whole release lead to spend
+/// first, and spends seconds of it decoding frames that are already too
+/// late to show. The frames themselves say so sooner. One late frame says
+/// nothing, since a decoder coming back from a stall is late and catching
+/// up; a run of them each later than the last is a decoder that will not.
+#[derive(Default)]
+struct FallingBehind {
+    last: Option<MediaTime>,
+    run: u32,
+}
+
+impl FallingBehind {
+    /// Note how far behind the clock a decoded frame came out. True once
+    /// the run is long enough to act on.
+    fn observe(&mut self, late: MediaTime) -> bool {
+        let losing =
+            late > crate::pool::MAX_PRESENT_LATE && self.last.is_none_or(|last| late > last);
+        self.run = if losing { self.run + 1 } else { 0 };
+        self.last = Some(late);
+        self.run >= LATE_FRAMES_BEFORE_SKIP
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// How far behind the clock `pts` is, where that means anything: against a
+/// playing clock of this generation. A parked one is a pause or a seek
+/// landing, where the span ahead of the floor is decoded late on purpose.
+fn behind_the_clock(
+    px: &PipelineShared,
+    generation: Generation,
+    pts: MediaTime,
+) -> Option<MediaTime> {
+    let clock = px.clock.lock().expect("clock lock");
+    (clock.is_playing() && clock.generation() == generation).then(|| clock.now(px.wall.now()) - pts)
+}
+
+fn report_late_video(
+    px: &PipelineShared,
+    reported: &mut Option<std::time::Instant>,
+    behind: MediaTime,
+) {
+    if reported.is_none_or(|at| at.elapsed() >= LATE_VIDEO_LOG_EVERY) {
+        *reported = Some(std::time::Instant::now());
+        px.diag.event(
+            px.wall.now(),
+            EventCode::LateVideoSkip,
+            Stage::Decode,
+            format!("{behind} behind the clock, discarding to the next keyframe"),
+        );
+    }
+}
+
 /// `seek_floor_us` when the generation presents from wherever it starts.
 pub(crate) const NO_FLOOR: i64 = i64::MIN;
 /// The most a seek will decode forward from its keyframe to reach the
@@ -1804,6 +1879,11 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     let mut eos_after_drain = false;
     let mut current_coded: Option<(media_demux::VideoCodec, u32, u32)> = None;
     let mut current_private: Vec<u8> = Vec::new();
+    // Discarding late video up to the next keyframe.
+    let mut skipping_late = false;
+    let mut falling_behind = FallingBehind::default();
+    let mut rejoin_pending = false;
+    let mut late_reported: Option<std::time::Instant> = None;
 
     loop {
         if px.stopping() {
@@ -1840,6 +1920,27 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 Ok(Some(frame)) => {
                     if let Some(frame) = unseen.filter(px, frame) {
                         px.shared.frames_decoded.fetch_add(1, Ordering::Relaxed);
+                        let pts = MediaTime::from_micros(frame.pts_us());
+                        match behind_the_clock(px, generation, pts) {
+                            Some(late) if !skipping_late && !draining => {
+                                if falling_behind.observe(late) {
+                                    falling_behind.clear();
+                                    report_late_video(px, &mut late_reported, late);
+                                    // A keyframe already waiting is where
+                                    // video rejoins; anything else goes.
+                                    if pending_au.as_ref().is_some_and(|au| !au.key) {
+                                        pending_au = None;
+                                        px.diag
+                                            .stage(Stage::Decode)
+                                            .drops
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    skipping_late = pending_au.is_none();
+                                    rejoin_pending = pending_au.is_some();
+                                }
+                            }
+                            _ => falling_behind.clear(),
+                        }
                         match px.pool.try_publish(frame, generation.0) {
                             Ok(()) => {
                                 px.diag
@@ -1864,6 +1965,20 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         return;
                     }
                 }
+            }
+        }
+        // Video rejoins at a keyframe with an empty decoder. A decoder is a
+        // queue: what went in ahead of the skip comes out ahead of the
+        // keyframe, later than it already was, and holds the keyframe's own
+        // output back by as long as that takes to drain.
+        if rejoin_pending {
+            rejoin_pending = false;
+            pending_frame = None;
+            if let Some(active) = decoder.as_mut()
+                && let Err(e) = active.reset()
+            {
+                px.fail(EngineError::decode(e));
+                return;
             }
         }
 
@@ -2086,12 +2201,33 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     .stage(Stage::Decode)
                     .in_count
                     .fetch_add(1, Ordering::Relaxed);
+                if au.key {
+                    rejoin_pending = skipping_late;
+                    skipping_late = false;
+                } else if !skipping_late
+                    && let Some(behind) = behind_the_clock(px, generation, au.pts)
+                    && behind > LATE_VIDEO_SKIP
+                {
+                    skipping_late = true;
+                    falling_behind.clear();
+                    report_late_video(px, &mut late_reported, behind);
+                }
+                if skipping_late {
+                    px.diag
+                        .stage(Stage::Decode)
+                        .drops
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if decoder.is_some() {
                     pending_au = Some(au);
                 }
             }
             Ok(MediaMsg::Flush { generation: new }) => {
                 generation = new;
+                skipping_late = false;
+                rejoin_pending = false;
+                falling_behind.clear();
                 draining = false;
                 eos_after_drain = false;
                 pending_au = None;
@@ -2865,6 +3001,47 @@ mod tests {
             Admit::Show,
             "a seek that takes no floor closes the span the last one left open"
         );
+    }
+
+    /// Frames each later than the last are a decoder losing ground, and a
+    /// run of them is acted on.
+    #[test]
+    fn a_decoder_losing_ground_is_noticed_after_a_run_of_late_frames() {
+        let mut falling = FallingBehind::default();
+        let mut noticed = None;
+        for n in 0..10 {
+            if falling.observe(MediaTime::from_millis(60 + 22 * n)) {
+                noticed = Some(n + 1);
+                break;
+            }
+        }
+        assert_eq!(noticed, Some(i64::from(LATE_FRAMES_BEFORE_SKIP)));
+    }
+
+    /// A decoder coming back from a stall is late and catching up: it is
+    /// left to, however late it starts.
+    #[test]
+    fn a_decoder_catching_up_is_left_alone() {
+        let mut falling = FallingBehind::default();
+        for n in 0..30 {
+            assert!(!falling.observe(MediaTime::from_millis(900 - 30 * n)));
+        }
+    }
+
+    /// Lateness inside what may still be shown is not falling behind,
+    /// whichever way it is heading, and it breaks a run.
+    #[test]
+    fn frames_that_can_still_be_shown_are_not_falling_behind() {
+        let mut falling = FallingBehind::default();
+        for n in 0..30 {
+            assert!(!falling.observe(MediaTime::from_millis(n)));
+        }
+        let mut falling = FallingBehind::default();
+        for n in 0..i64::from(LATE_FRAMES_BEFORE_SKIP) - 1 {
+            assert!(!falling.observe(MediaTime::from_millis(60 + 22 * n)));
+        }
+        assert!(!falling.observe(MediaTime::from_millis(10)));
+        assert!(!falling.observe(MediaTime::from_millis(200)));
     }
 
     /// A seek decodes forward to its target only while that is cheap

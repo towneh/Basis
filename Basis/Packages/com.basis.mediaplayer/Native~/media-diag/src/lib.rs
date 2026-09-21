@@ -269,6 +269,14 @@ pub enum EventCode {
     /// is the channel that works before a session exists and after it
     /// closes, so it carries no more structure than the words.
     Log = 18,
+    /// The video decoder has fallen too far behind the clock for what it
+    /// is decoding to be shown in time, and video is being discarded up to
+    /// the next keyframe so that it can rejoin the sound. Sound is
+    /// unaffected. Detail carries how far behind it was. Raised once per
+    /// episode and rate-limited, so a decoder that stays too slow does not
+    /// flood the log: it is the signal that this source is more than the
+    /// device can decode.
+    LateVideoSkip = 19,
 }
 
 impl EventCode {
@@ -286,7 +294,8 @@ impl EventCode {
             | EventCode::UrlBlocked
             | EventCode::Discontinuity
             | EventCode::SnapCorrection
-            | EventCode::AudioTrim => Level::Warn,
+            | EventCode::AudioTrim
+            | EventCode::LateVideoSkip => Level::Warn,
             EventCode::StateChange
             | EventCode::SlewCorrection
             | EventCode::Seek
