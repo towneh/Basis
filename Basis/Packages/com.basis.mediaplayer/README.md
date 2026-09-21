@@ -1,35 +1,35 @@
 # Basis Media Player
 
-Live and on-demand video — and audio-only media — for Basis. A Rust engine
+Live and on-demand video, and audio-only media, for Basis. A Rust engine
 demuxes and decodes, using the operating system's hardware codecs where they
-exist, and presents **zero-copy** into a Unity texture. No transcode server, no
-`UnityEngine.Video.MediaPlayer`.
+exist, and presents **zero-copy** into a Unity texture. It needs neither a
+transcode server nor `UnityEngine.Video.MediaPlayer`.
 
-- **Windows (PC / VR)** — Media Foundation for H.264, HEVC, VP9 and AAC/MP3,
-  through a D3D11VA hardware decoder with a software rung behind it. AV1
-  decodes in software. NV12 to BGRA happens in a D3D11 pixel shader into a
-  texture Unity samples.
-- **Android (Quest)** — MediaCodec decodes; frames arrive as
+- **Windows (PC / VR):** Media Foundation for H.264, HEVC, VP9, AV1 and
+  AAC/MP3, through a D3D11VA hardware decoder with a software rung behind it;
+  AV1's software rung is rav1d. NV12 to BGRA happens in a D3D11 pixel shader
+  into a texture Unity samples.
+- **Android (Quest):** MediaCodec decodes; frames arrive as
   `AHardwareBuffer`s, imported into Vulkan and converted by a compute pass into
   a Unity `RenderTexture`.
-- **Linux** — builds and runs, software decode only. No hardware path yet.
+- **Linux:** builds and runs, software decode only. No hardware path yet.
 
 The demux and protocol layer is the same code on every platform, and it is
-`#![forbid(unsafe_code)]`. What has to be unsafe — the platform decoder FFI and
-the GPU interop — is a small surface behind a typed boundary.
+`#![forbid(unsafe_code)]`. What has to be unsafe (the platform decoder FFI and
+the GPU interop) is a small surface behind a typed boundary.
 
 ## Supported URLs
 
 | Scheme | Use | Example |
 |---|---|---|
-| `rtsp://` | PC/VR low latency — UDP first, TCP-interleaved fallback | `rtsp://stream.vrcdn.live/live/vrcdn` |
+| `rtsp://` | PC/VR low latency: UDP first, TCP-interleaved fallback | `rtsp://stream.vrcdn.live/live/vrcdn` |
 | `rtspt://` | TCP-interleaved pinned, for hosts or networks where UDP never works | `rtspt://stream.vrcdn.live/live/vrcdn` |
 | `rist://` | RIST live ingest (UDP, loss recovery, optional AES) | `rist://stream.example:5000?secret=KEY&aes-type=128` |
-| `whep://` / `wheps://` | WHEP — WebRTC receive, sub-second join | `whep://stream.example:8889/live/whep` |
-| `https://….mp4` | MP4 over HTTPS — fragmented (live), or progressive VOD (faststart or trailing moov, seekable) | `https://stream.vrcdn.live/live/vrcdn.live.mp4` |
+| `whep://` / `wheps://` | WHEP: WebRTC receive, sub-second join | `whep://stream.example:8889/live/whep` |
+| `https://….mp4` | MP4 over HTTPS: fragmented (live), or progressive VOD (faststart or trailing moov, seekable) | `https://stream.vrcdn.live/live/vrcdn.live.mp4` |
 | `https://….ts` | MPEG-TS over HTTPS | `https://stream.vrcdn.live/live/vrcdn.live.ts` |
 | `https://….m3u8` | HLS, VOD or live, TS or fragmented-MP4 segments | `https://stream.example/live/index.m3u8` |
-| `https://….webm` | WebM — VP9 or AV1 video, Opus audio; Cues-indexed files seek | `https://stream.example/vod/clip.webm` |
+| `https://….webm` | WebM: VP9 or AV1 video, Opus audio; Cues-indexed files seek | `https://stream.example/vod/clip.webm` |
 | `https://….mkv` | Matroska, same codecs | `https://stream.example/vod/clip.mkv` |
 | `https://….flac` `.mp3` `.aac` `.opus` `.wav` | Audio-only, direct | `https://stream.example/audio/track.flac` |
 | `file://` or an absolute path | Local file | `C:\media\clip.mp4` |
@@ -38,12 +38,13 @@ Containers are chosen by sniffing the bytes, not the extension, so an
 extensionless CDN URL routes correctly.
 
 **Codecs.** Video: H.264 everywhere, HEVC on Windows, VP9 and VP8 where the
-platform decoder has them, AV1 in software on desktop. Audio: AAC, MP3, FLAC,
+platform decoder has them, AV1 on desktop (in hardware where the GPU has an AV1
+profile, in software where it does not). Audio: AAC, MP3, FLAC,
 Opus and integer PCM, up to 7.1 channels. PCM covers both RIFF/WAVE files and
 the LPCM carried in Blu-ray-style MPEG-TS.
 
-Some of these are refusals rather than degradations, which is deliberate — a
-typed error beats a black screen:
+Some of these are refusals rather than degradations, deliberately: a typed
+error tells you what went wrong, where a black screen does not.
 
 - **HEVC over MPEG-TS is refused outright.** TS carries no dimensions ahead of
   decode and the platform HEVC decoder faults on sizeless input.
@@ -52,18 +53,18 @@ typed error beats a black screen:
 - **AV1 refuses on Quest Pro**, which has no AV1 decoder of any kind.
 
 `BasisMediaPlayer.EngineCapabilities` reports what this machine actually
-probed — containers, transports, codecs, and for each video codec whether the
+probed: containers, transports, codecs, and for each video codec whether the
 route is hardware or software and up to what resolution and frame rate.
 
 ## Live vs on-demand
 
-A live source is presented at the live edge; an on-demand one is paced to real
-time, so a file that arrives faster than it plays doesn't fast-forward. The
+A live source is presented at the live edge. An on-demand one is paced to real
+time, and a file that arrives faster than it plays does not fast-forward. The
 player works out which from the source itself, and almost always gets it right:
 a source that states a length and serves byte ranges is on-demand, and anything
 else is a live edge. Range support is judged on an actual `206` answer rather
-than an advertised header, so a server that honours ranges without saying so is
-still recognised.
+than an advertised header, which catches a server that honours ranges without
+saying so.
 
 Most sources never reach that test. `rtsp://`, `rtspt://`, `whep://` and
 `rist://` are live by transport, an HLS playlist settles it with
@@ -80,9 +81,9 @@ inspector because it should not normally be touched:
 | `Vod` | Force real-time pacing with read-ahead |
 
 Set one only to overrule a server whose headers mislead. The misread that does
-happen is one-directional — an on-demand file served with neither a length nor
-ranges reads as live — and the engine records a diagnostic event when it
-decides that way, so it shows up in a capture rather than as a mystery.
+happen goes one way: an on-demand file served with neither a length nor ranges
+reads as live. The engine records a diagnostic event when it decides that way,
+and it shows up in a capture rather than as a mystery.
 
 The jitter buffer is a viewer setting rather than an authored one, because what
 it trades off is that viewer's own connection against how soon they see a frame,
@@ -95,37 +96,46 @@ the player you have selected and pins it there. Per player because one scene can
 hold both a source next door, where the point is the latency a shallow buffer
 buys, and one from the far side of the world that only plays smoothly with depth
 behind it. Either way the change re-opens the affected sessions at the position
-they are at, so it can be tuned while watching, and nobody else's playback moves. Buffering, pacing and clock drift
-are modelled rather than tuned by feel, and the model is held to recorded
-delivery-gap captures from impaired live streams, committed as fixtures and run
-as tests.
+they are at. It can be tuned while watching, and nobody else's playback moves.
+
+Buffering, pacing and clock drift are modelled rather than tuned by feel, and
+the model is held to recorded delivery-gap captures from impaired live streams,
+committed as fixtures and run as tests.
 
 Live playback is audio-leading. A join starts on the first audio rather than
 waiting for a video keyframe, which on a long-GOP lane is the difference between
 two seconds and ten, and the picture arrives shortly after against the running
-clock. Audio is the master throughout: it is never rate-adjusted, time-stretched
-or discarded to let the picture catch up, so the video clock carries the whole
-correction. On-demand playback is unaffected, its two legs arriving together.
+clock. Within a player, audio is the master: it is never rate-adjusted,
+time-stretched or discarded to let the picture catch up, and the video clock
+carries the whole correction. On-demand playback is unaffected, its two legs
+arriving together. Keeping several viewers in step with each other is the one
+case where the sound is adjusted, described under **Shared playback**.
 
 ## Seeking
 
 `Seek(double seconds)` requests an absolute position. Sources that report a
 duration are seekable; a duration is necessary but not sufficient, since a
-transport that cannot reposition still refuses. Playback resumes from the
-keyframe at or before the target, so it lands at or shortly before where you
-asked. Seeking a live source is refused.
+transport that cannot reposition still refuses. Seeking a live source is
+refused.
 
-How exactly it lands depends on what the container offers. MP4, Matroska and
-HLS have an index and land on a keyframe. WAV has no keyframes and no index it
-needs — the offset is arithmetic — so it lands on the exact frame. MP3 and Ogg
-Opus have neither, so they estimate: MP3 through its Xing table where the file
+A video seek shows the frame you asked for. Decoding has to start at a
+keyframe, so the player starts at the one before the target and decodes
+forward without showing anything until it reaches the target. If that keyframe
+is more than 12 seconds back, it shows the keyframe instead, which keeps a
+seek from sitting in Buffering for long on a file with very long gaps between
+keyframes.
+
+How the keyframe is found depends on what the container offers. MP4, Matroska
+and HLS have an index to look it up in. WAV has no keyframes and needs no
+index, since the offset is arithmetic, and it lands on the exact frame. MP3 and
+Ogg Opus have neither and estimate: MP3 through its Xing table where the file
 has one and a constant-bitrate guess where it does not, Ogg by bisecting on
 granule positions. Both report the landing at the request and resume near it,
 which is what every player does with these formats. Raw FLAC reads its own
-frame headers back, so it reports the exact instant playback resumes at:
-through a SEEKTABLE where the file carries one, by bisecting over confirmed
+frame headers back and reports the exact instant playback resumes at, found
+through a SEEKTABLE where the file carries one and by bisecting over confirmed
 frame headers where it does not. Raw ADTS states neither a length nor a frame
-count, so it estimates from a byte rate measured over its leading frames and
+count; it estimates from a byte rate measured over its leading frames and
 rounds the landing down to a frame.
 
 ```csharp
@@ -150,16 +160,16 @@ a source someone had split themselves.
 
 ## Page URLs and the resolver
 
-The player opens **stream** URLs. It does not itself turn a **page** URL — a
-YouTube or Twitch watch page — into a stream. That is a separate, optional
+The player opens **stream** URLs. It does not itself turn a **page** URL (a
+YouTube or Twitch watch page) into a stream. That is a separate, optional
 resolver package which registers itself on `BasisMediaUrlRouter`; the player
 has no reference to it.
 
 `OpenUserUrl(url)` is the entry point that steers: a directly-playable URL
 opens straight through, anything else is offered to the registered resolvers in
 priority order until one takes ownership. With none installed every URL opens
-directly, which is the same behaviour as having no integration at all — so
-stream URLs keep working and page URLs stop resolving.
+directly, the same as having no integration at all: stream URLs keep working
+and page URLs stop resolving.
 
 `playOnStart` uses `OpenUserUrl`, so an authored page URL resolves rather than
 failing to open.
@@ -197,13 +207,14 @@ internal static class MyResolverInstaller
 out: the stream URL and its audio leg, the liveness, subtitle tracks, and
 display metadata (title, uploader, thumbnail, duration).
 
-- **Async resolves must guard against stale loads.** Capture
+- An async resolve must guard against stale loads. Capture
   `player.LoadGeneration` before starting and drop the result if it no longer
   matches when the work finishes; otherwise a slow resolve of an earlier URL
   overwrites a newer load.
-- **Main thread only.** The resolver list is unsynchronised.
-- **Routing, never trust.** A resolver decides *how* a URL loads, not whether
-  it is allowed.
+- Register and resolve on the main thread only. The resolver list is
+  unsynchronised.
+- A resolver decides *how* a URL loads, not whether it is allowed. The
+  player's URL security still applies to whatever it opens.
 
 ## Usage
 
@@ -219,7 +230,7 @@ positioned speakers instead of one stereo output.
 
 ### One source, two platforms
 
-A feed is often published differently per platform — RTSP is lowest latency on
+A feed is often published differently per platform: RTSP is lowest latency on
 desktop, and Quest wants MPEG-TS over HTTPS from the same source. Set
 `androidUrl` and an Android build uses it instead of `url`:
 
@@ -228,14 +239,14 @@ url         rtsp://stream.vrcdn.live/live/vrcdn
 androidUrl  https://stream.vrcdn.live/live/vrcdn.live.ts
 ```
 
-Empty means the same URL everywhere, so there is no mode to get wrong. The
-editor always takes `url`, whatever the build target is set to, so entering
+Empty means the same URL everywhere. The editor always takes `url`, whatever
+the build target is set to, so entering
 play mode never silently exercises the other one. `ResolvedUrl` reports which
 applies.
 
 `Basis > Tools > Media Player > Insert Player (existing scene)` drops the shipped
 prefab into the scene you are working in, stereo or multi-channel, exactly as it
-ships — set its URL and it is wired. The `Test Scene` menu beside it is the other
+ships; set its URL and it is wired. The `Test Scene` menu beside it is the other
 job: it replaces the open scene with a pass-ready one and arms the captures.
 
 **A player with no audio component beside it is silent, deliberately.** The
@@ -248,12 +259,12 @@ possible at all.
 
 Frames reach the world through one of two sinks:
 
-- **`BasisVideoMaterialOutput`** — binds the frame to one or more `Renderer`
+- **`BasisVideoMaterialOutput`** binds the frame to one or more `Renderer`
   material properties (`_BaseMap` on URP, `_MainTex` on legacy, per
   `TexturePropertyName`). `TargetRenderer` plus every entry in
   `AdditionalTargets` is driven from the same texture, so one player can feed
   several screens.
-- **`BasisVideoDisplay`** — binds it to a uGUI `RawImage`, optionally driving
+- **`BasisVideoDisplay`** binds it to a uGUI `RawImage`, optionally driving
   an `AspectRatioFitter` from the reported `VideoSize`.
 
 Aspect, stereo-eye selection and flips are applied as a **UV scale and offset**
@@ -285,15 +296,15 @@ nothing breaks if the package folder moves.
 
 #### Aspect
 
-`AspectMode` compares the source's aspect against the **display aspect** — the
-shape of the surface being drawn on, not the shape of the video:
+`AspectMode` compares the source's aspect against the **display aspect**: the
+shape of the surface being drawn on, not the shape of the video.
 
 | `AspectMode` | Behaviour | Safe on any material? |
 |---|---|---|
 | `Original` (default) | Sample untransformed; the mesh or `RectTransform` stretches the frame to its own shape | yes |
 | `Stretch` | Same as `Original` | yes |
-| `FitInside` | Letterbox or pillarbox — whole source visible, bars on the remaining axis | **no** — needs the shader above |
-| `FitOutside` | Crop to fill — no bars, edges of the source lost | yes |
+| `FitInside` | Letterbox or pillarbox: whole source visible, bars on the remaining axis | **no**, it needs the shader above |
+| `FitOutside` | Crop to fill: no bars, edges of the source lost | yes |
 | `PixelPerfect` | Crop to fill, insetting on the opposite axis to `FitOutside` | yes |
 
 `DisplayAspectOverride` supplies the display aspect directly. Left at 0 it is
@@ -325,7 +336,7 @@ normal content; it is there for a source genuinely encoded upside-down.
 
 Anything bound as the screen material needs to expose the texture property
 named in `TexturePropertyName` and transform the sampled UV by that property's
-ST — `TRANSFORM_TEX(input.uv, _BaseMap)` — since that is where aspect, stereo
+ST (`TRANSFORM_TEX(input.uv, _BaseMap)`), since that is where aspect, stereo
 eye and flips arrive. That covers every aspect mode except `FitInside`, which
 also needs UVs outside `[0,1]` rendered black before sampling.
 
@@ -350,7 +361,7 @@ GameObject; anything above it is handed silence. The inspector flags an output
 whose filters are above its tap, with a button that fixes the order.
 
 Each source's own `Volume` and `Mute` fold into that tap's gain, so they behave
-as they would for a clip and stay per-output — on a surround rig you can trim
+as they would for a clip and stay per-output: on a surround rig you can trim
 one speaker without touching the rest. `BasisMediaPlayerAudio`'s `VolumeGain`
 and `Mute` are the player-wide pair, and the client's main volume scales the
 lot; all three multiply.
@@ -361,15 +372,15 @@ the spatialiser to run *after* the tap, so **Spatialize Post Effects** stays
 ticked and **Bypass Effects** unticked; with either the wrong way round the
 spatialiser processes silence and the tap overwrites the result.
 
-Per-source analysers — AudioLink and anything else built on
-`AudioSource.GetOutputData` — can't see audio a script generates, so they read
+Per-source analysers (AudioLink and anything else built on
+`AudioSource.GetOutputData`) can't see audio a script generates, and read
 silence from a tap-driven output. `BasisMediaAudioChannel.AnalysisFeed`
 switches that output to a streaming `AudioClip` written once a frame, which
 those APIs can read back. It costs that output a small delay, so set it on the
 analyser's own `AudioSource` rather than on a speaker you listen to.
 
 **Channel ceilings depend on the codec.** FLAC carries a full 7.1. AAC caps at
-5.1. Opus is mono or stereo — the multi-stream layouts are refused rather than
+5.1. Opus is mono or stereo; the multi-stream layouts are refused rather than
 half-decoded. A multichannel source played through a single stereo output is
 downmixed with ITU BS.775 coefficients, with headroom against clipping.
 
@@ -386,8 +397,8 @@ Sidecar subtitles arrive at the same overlay through the same caption state.
 `SetSubtitleTracks` supplies them (a resolver usually does this) and
 `SelectSubtitleTrack(index)` picks one; selecting a track suppresses the in-band
 feed and reverting to -1 brings it straight back. Sidecar fetches go out over
-`UnityWebRequest`, so they are checked against the client's URL security before
-the request is made — the engine's own vetting doesn't cover them.
+`UnityWebRequest`, and are checked against the client's URL security before the
+request is made, because the engine's own vetting doesn't cover them.
 
 ### In-band user data
 
@@ -409,13 +420,13 @@ player.UserDataReceived += (ptsUs, uuid, payload) =>
 };
 ```
 
-Every UUID is delivered and the consumer filters, so the player carries no
-particular application's identity. Messages arrive in timestamp order; a seek
-drops whatever was queued from the old position, and a loop drops what the
+Every UUID is delivered and the consumer filters, which keeps any particular
+application's identity out of the player. Messages arrive in timestamp order; a
+seek drops whatever was queued from the old position, and a loop drops what the
 previous pass left behind. Messages are held until due whether or not anyone is
-subscribed, so a subscriber that attaches mid-session receives everything still
-to come and nothing already past. The engine holds up to 64 KiB
-per message and refuses larger ones, and a stream carrying more than this lane
+subscribed: a subscriber that attaches mid-session receives everything still to
+come and nothing already past. The engine holds up to 64 KiB per message and
+refuses larger ones, and a stream carrying more than this lane
 can hold loses oldest first.
 
 Writing a consumer, in short:
@@ -448,8 +459,8 @@ first thing to check.
 
 A container can carry several audio tracks: one per language on a film, or one
 per capture device on a screen recording. Where it does, `AudioTracks` lists
-them in container order with whatever the container states — an ISO 639
-language, and for Matroska a track name — and `SelectAudioTrack(index)` plays
+them in container order with whatever the container states (an ISO 639
+language, and for Matroska a track name), and `SelectAudioTrack(index)` plays
 one. The Media Players panel shows the list as a dropdown.
 
 A source with a single audio track reports an empty list rather than a list of
@@ -478,15 +489,71 @@ may take control is authored on the component:
 | `AnyoneCanControl` | Clients holding no control permission also get the playback controls in the menu |
 | `PositionHeartbeatSeconds` | How often the owner broadcasts its playhead. 0 turns the heartbeat off |
 
-Followers do not jump to the owner's position. The playhead is handed to the
-engine as a target, which converges through a dead band, then a rate slew of a
-couple of percent, and only seeks when it is more than a couple of seconds out,
-so ordinary drift is corrected without anything audible. Live sources are not
-position-synced at all — there is no shared timeline to land on, and how far
-behind the live edge a viewer may sit is bounded by `maxDivergenceMs` instead.
-
 A page URL is shared as the page URL, never as the stream a resolver produced
-from it: those are per-client and expire, so each client resolves for itself.
+from it. Resolved streams are per-client and expire, and each client resolves
+the page for itself.
+
+#### What viewers experience with a video
+
+The owner's play, pause, seek and stop reach everyone, and a seek made while
+paused shows everyone the new frame without starting anyone playing. Reaching
+the end is each client's own: nobody is held back for anyone else.
+
+While playing, the owner sends its position every `PositionHeartbeatSeconds`
+(3 by default), and each follower corrects towards it in three steps:
+
+| How far out | What the follower does |
+| --- | --- |
+| Up to 150 ms | Nothing |
+| 150 ms to 2 s | Plays up to 2% fast or slow until it is back within 150 ms. Nothing jumps, but while it lasts the follower's sound is slightly faster or slower and a little higher or lower in pitch, by up to a third of a semitone |
+| More than 2 s | Jumps straight to the owner's position |
+
+Followers stay within 150 ms of the owner, and in testing usually within a
+frame or two. A pause stops each viewer where it is, as close to the owner as
+it was while playing.
+
+#### What viewers experience with a live stream
+
+Position is not synced on a live stream, which has no shared timeline. Each
+viewer plays from the live edge at the depth their own connection needs. Two
+viewers can end up a second or more apart, and nothing pulls them together. A
+live stream cannot be paused or scrubbed by anyone; changing the URL and
+stopping still reach everyone. `maxDivergenceMs` sets how far behind the live
+edge a viewer is allowed to fall on a poor connection: past it, playback
+stutters rather than falling further behind.
+
+#### Joining late
+
+A client that arrives while something is playing opens the same source and
+lands at the owner's position; if the owner is paused, it lands paused on the
+owner's frame and starts when the owner does. It usually lands a fraction of a
+second behind, the time it took to open, and closes the gap over the next half
+minute at the 2% rate above. A page URL has to be resolved on the joiner first,
+which can take a few seconds; the joiner then jumps to where the owner has got
+to.
+
+#### Getting back in step by hand
+
+Two buttons in the Media Players panel restart playback in the right place:
+
+| Button | Where | What it does |
+| --- | --- | --- |
+| **Resync Everyone** | The playback tab, for anyone who may drive the player | Takes control and reloads the source for everyone, you included, at your current position and play or pause state. No confirmation |
+| **Local Resync** | My Settings, for anyone | Reloads only your own playback, landing wherever the owner is. With no owner present, another viewer answers instead; if nobody answers within three seconds, it reloads where you already are |
+
+#### When the owner leaves or stalls
+
+If the owner leaves, followers keep playing on their own rather than freezing,
+and anyone still in the room tells a newcomer what is playing. If the owner's
+own playback stalls, followers carry on instead of being pulled back to a
+frozen position, and follow again once the owner moves.
+
+#### What each viewer keeps to themselves
+
+Volume, captions and their language and opacity, the audio track, the buffer
+depth, and the hardware or software decode preference are all per viewer:
+changing them never moves anyone else's playback. So is how far behind the
+live edge each viewer sits.
 
 ### The Media Players panel
 
@@ -495,9 +562,9 @@ only when there is one. Pick a player and it offers the URL and transport
 controls with a scrubber, the viewer's own settings (volume, captions and their
 opacity, subtitle track), an audio-track dropdown when the source carries more
 than one, an admin tab carrying the permission flags above for clients holding
-`*`, and a debug readout behind the Advanced toggle. The
-playback tab is shown only to clients that may actually drive the player, and
-appears and disappears as that changes.
+`*`, and a debug readout behind the Advanced toggle. The playback tab is shown
+only to clients that may actually drive the player, and appears and disappears
+as that changes.
 
 ### How many play at once
 
@@ -506,8 +573,8 @@ props could carry one: anyone can spawn more, and every open session costs the
 viewer bandwidth, memory and decode work whether they are looking at it or not.
 
 `Settings > Developer > Media Player` carries the cap. It defaults to the
-per-platform session counts the engine is budgeted and measured for — 2 on
-Android, 3 elsewhere — and 0 lifts it entirely.
+per-platform session counts the engine is budgeted and measured for (2 on
+Android, 3 elsewhere), and 0 lifts it entirely.
 
 Beyond the cap the furthest players go dormant. Dormant is a closed session
 rather than a paused one, since a paused session still holds its buffer, frame
@@ -534,8 +601,8 @@ setting, deliberately not a serialised inspector field: it describes the
 machine, not the world, and a serialised field would drift into prefabs.
 
 `BasisMediaPlayerDiagnostics` records a per-frame capture of what the engine
-cannot see from the inside — presentation cadence, pull rates, position
-against wall clock. `Basis > Debug > Media Player` shows the same live.
+cannot see from the inside: presentation cadence, pull rates, position against
+wall clock. `Basis > Debug > Media Player` shows the same live.
 `Native~/TESTING.md` documents the column contracts and the healthy band for
 each figure.
 
@@ -558,53 +625,29 @@ so a release can be reproduced without a particular dev box.
 
 Building on Windows needs NASM on PATH (rav1d's x86 assembly) and, for the
 `rist` feature, meson and ninja for `tools/build-librist.ps1`. Android builds
-through the NDK that ships with Unity — see `tools/android-env.ps1` — and its
+through the NDK that ships with Unity (see `tools/android-env.ps1`), and its
 `rist` feature needs `tools/build-librist-android.sh`, which cross-builds
 librist against that same NDK.
 
 ## Known limits
 
-- **No RTMP.** The C player had a minimal RTMP client; this engine does not.
-  Use RTSP, HLS or MPEG-TS over HTTPS.
-- **WebM/Matroska seek** needs a Cues index and a range-capable host.
+- **No RTMP.** Use RTSP, HLS or MPEG-TS over HTTPS.
+- **WebM/Matroska without a Cues index** still seeks, but not to the exact
+  frame: the sound resumes at the target straight away, and the picture holds
+  until the next keyframe after it.
 - **HLS** picks the highest-bandwidth rendition and stays there; there is no
-  adaptive switching. Encrypted playlists (`EXT-X-KEY`), byte-range segments
-  and I-frame-only playlists are refused.
-- **WHEP** reports packet loss but does not request retransmission or a
-  keyframe, so a lossy path recovers only at the next natural keyframe.
-- **Shared playback is not enforced by the server.** Media travels on the
-  general scene relay, which the server does not inspect, so the check that a
-  control message came from the owner happens on receipt rather than in
-  transit. There is no retention either: a player whose owner has left gives a
-  late joiner nothing until someone takes control.
+  adaptive switching, and no way to choose a rendition by hand. Encrypted
+  playlists (`EXT-X-KEY`), byte-range segments and I-frame-only playlists are
+  refused.
+- **WHEP** asks for lost packets to be resent where the server supports it,
+  but never asks for a keyframe, so loss that resending cannot cover waits for
+  the next natural keyframe.
+- **Shared playback is not enforced by the server.** Its messages travel on the
+  general scene relay, which the server does not inspect. The server keeps no
+  media state either. A late joiner is told what is playing by the owner or,
+  once the owner has left, by anyone still in the room; when the room empties,
+  the state goes with it.
 - **Projection modes** `Equirect360`, `VR180` and `Fisheye` set a shader
   keyword no bundled shader implements, so they render flat.
 - **`Picture`** needs a shader declaring the `_Basis*` floats, which the
   bundled one doesn't.
-
-## Not yet ported from the C player
-
-Listed for anyone coming from the C player. Some of these were never working
-there either, and some are deliberate:
-
-- **Bitrate selection.** Choosing a rung of an adaptive ladder by hand. Note
-  that the C player did not do this either: the managed side was there, but the
-  engine entry points it called were never exported, so the control was always
-  hidden.
-- **The playlist component.** Parked rather than pending. The C player's was an
-  example script, and it did not network the playlist itself — only the URL it
-  landed on — so on a shared player every client raced to advance at the end of
-  an entry. Nobody has asked for it. Sequencing sources is a handful of lines
-  against `Ended` and `OpenUserUrl`, and a world that wants it can own the
-  policy rather than inherit a half-shared one.
-- **Host trust.** A client asked to load a URL by whoever controls the player
-  does so without asking its viewer. Address-level security still applies —
-  private and loopback addresses are refused — so this is an arbitrary *public*
-  URL, not a way into a local network. The C player did not gate this either;
-  it is on the list because shared playback makes it worth fixing rather than
-  because something was lost.
-- **Windows ARM64 binaries.** The C player shipped one, though it linked a stub
-  decoder that never produced a frame, so nothing played there either.
-
-Audio track selection was on this list and is now available — see
-**Choosing an audio track** above.
