@@ -145,8 +145,7 @@ fn presented(px: &PipelineShared, pts: MediaTime, generation: u64) {
         .stage(Stage::Present)
         .out_count
         .fetch_add(1, Ordering::Relaxed);
-    px.shared
-        .position_us
+    px.presented_pts_us
         .store(pts.as_micros(), Ordering::Relaxed);
     crate::pipeline::note_presented(px, generation);
     px.shown_generation.store(generation, Ordering::Relaxed);

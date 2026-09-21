@@ -566,10 +566,35 @@ fn a_paused_seek_between_keyframes_shows_the_target() {
         shared.state.load(Ordering::Relaxed),
         shared.position_us.load(Ordering::Relaxed),
     );
-    let shown = shared.position_us.load(Ordering::Relaxed);
+    // The frame on screen, which is its own reading: position is the
+    // clock's, and a parked clock sits on the target whatever was shown.
+    let shown = session.pipeline().presented_pts_us.load(Ordering::Relaxed);
     assert!(
         (TARGET_US..=TARGET_US + FRAME_US).contains(&shown),
         "paused on {shown}, not on the frame at {TARGET_US}"
+    );
+    session.close();
+}
+
+/// Position is the clock's and not the picture's: it moves between frames.
+/// Read from presented frames it could only ever take a frame's pts, about
+/// thirty values a second on this fixture, and it would stand still
+/// whenever the picture did, taking captions, user data and shared
+/// playback with it.
+#[test]
+fn position_is_the_clocks_and_moves_between_frames() {
+    let mut session = open_playing();
+    let shared = session.shared().clone();
+    let mut seen = std::collections::BTreeSet::new();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(1) {
+        seen.insert(shared.position_us.load(Ordering::Relaxed));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        seen.len() > 60,
+        "position took {} values in a second of 30 fps video",
+        seen.len()
     );
     session.close();
 }

@@ -405,6 +405,7 @@ impl Session {
             clock_playing: AtomicBool::new(false),
             decode_preference: request.decode_preference,
             presented_generation: AtomicU64::new(pipeline::NO_GENERATION),
+            presented_pts_us: AtomicI64::new(i64::MIN),
             shown_generation: AtomicU64::new(pipeline::NO_GENERATION),
             transport: Mutex::new(()),
             pause_wanted: AtomicBool::new(false),

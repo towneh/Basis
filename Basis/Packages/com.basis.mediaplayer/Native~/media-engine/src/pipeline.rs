@@ -170,12 +170,13 @@ impl UnseenSpan {
 fn av_offset_us(
     playhead: Option<MediaTime>,
     presented_this_generation: bool,
-    position_us: i64,
+    presented_pts_us: i64,
 ) -> i32 {
     match playhead {
-        Some(ph) if presented_this_generation => (position_us - ph.as_micros())
-            .clamp(i64::from(i32::MIN) + 1, i64::from(i32::MAX))
-            as i32,
+        Some(ph) if presented_this_generation && presented_pts_us != i64::MIN => {
+            (presented_pts_us - ph.as_micros()).clamp(i64::from(i32::MIN) + 1, i64::from(i32::MAX))
+                as i32
+        }
         _ => i32::MIN,
     }
 }
@@ -335,6 +336,10 @@ pub struct PipelineShared {
     /// timestamp, so a write from a retired timeline cannot be mistaken for
     /// the current one's.
     pub presented_generation: std::sync::atomic::AtomicU64,
+    /// The pts of the frame last presented, µs. What is on screen, as
+    /// distinct from the session position, which is the clock's: the A/V
+    /// offset is this against the audio playhead.
+    pub presented_pts_us: std::sync::atomic::AtomicI64,
     /// The generation whose frame last reached the output, or
     /// [`NO_GENERATION`]. Unlike `presented_generation` it is never armed
     /// by a clock start, so it answers "is the landed picture on screen".
@@ -1090,6 +1095,7 @@ pub fn run_demux_leg(
                     px.shared
                         .position_us
                         .store(start.as_micros(), Ordering::Relaxed);
+                    px.presented_pts_us.store(i64::MIN, Ordering::Relaxed);
                     pending = None;
                     eos_reached = false;
                     carries_eos = false;
@@ -1934,8 +1940,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                             .stage(Stage::Present)
                             .out_count
                             .fetch_add(1, Ordering::Relaxed);
-                        px.shared
-                            .position_us
+                        px.presented_pts_us
                             .store(lease.pts.as_micros(), Ordering::Relaxed);
                         note_presented(px, lease.generation);
                         px.shown_generation
@@ -2365,28 +2370,13 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     px.leave_buffering();
                 }
             } else if state == State::Playing as u32
-                && (!px.video_active.load(Ordering::Relaxed)
-                    || px
-                        .diag
-                        .stage(Stage::Present)
-                        .out_count
-                        .load(Ordering::Relaxed)
-                        == 0)
+                && !px.video_active.load(Ordering::Relaxed)
+                && px.pause_wanted.load(Ordering::Relaxed)
             {
                 // This thread's own Buffering → Playing can slip past a
                 // pause request, and with no picture to land on, only the
                 // ring can vouch for the generation.
-                if !px.video_active.load(Ordering::Relaxed)
-                    && px.pause_wanted.load(Ordering::Relaxed)
-                {
-                    px.settle_pause(Some(generation));
-                }
-                // Once video presents, the presented pts owns position.
-                let wall = px.wall.now();
-                let now = px.clock.lock().expect("clock lock").now(wall);
-                px.shared
-                    .position_us
-                    .store(now.as_micros(), Ordering::Relaxed);
+                px.settle_pause(Some(generation));
             }
         }
 
@@ -2396,9 +2386,9 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             let playhead = px.audio_shared.playhead(wall);
             // Diagnostic A/V offset. Both terms are read here, one tick, so
             // the figure is a real difference rather than two samples taken
-            // a frame apart by a poller. Only meaningful once a frame has
-            // presented: before that `position_us` is the clock, and the
-            // difference would be the ladder's own error read twice.
+            // a frame apart by a poller. It is the presented pts against the
+            // playhead and never the session position, which is the clock's:
+            // that difference would be the ladder's own error read twice.
             px.shared.av_offset_us.store(
                 av_offset_us(
                     playhead,
@@ -2415,7 +2405,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         px.presented_generation.load(Ordering::Relaxed),
                         px.shared.generation.load(Ordering::Relaxed),
                     ),
-                    px.shared.position_us.load(Ordering::Relaxed),
+                    px.presented_pts_us.load(Ordering::Relaxed),
                 ),
                 Ordering::Relaxed,
             );
@@ -2485,6 +2475,26 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     _ => {}
                 }
                 last_correction = correction;
+            }
+        }
+
+        // Position is the clock's, whatever is or is not on screen (§6.4):
+        // captions, SEI user data and shared playback are timed against it,
+        // and a picture that stops must not stop them. A parked clock reads
+        // where it was parked, so a pause or a seek landing holds position
+        // there. It stays at its last reading once the session has ended.
+        {
+            let state = px.state();
+            if state != State::Ended as u32 && state != State::Error as u32 {
+                let now = px
+                    .clock
+                    .lock()
+                    .expect("clock lock")
+                    .now(px.wall.now())
+                    .as_micros();
+                let duration = px.shared.duration_us.load(Ordering::Relaxed);
+                let position = if duration > 0 { now.min(duration) } else { now };
+                px.shared.position_us.store(position, Ordering::Relaxed);
             }
         }
 
