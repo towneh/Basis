@@ -61,8 +61,8 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 undocumented_unsafe_blocks = "deny"
 
 # Size levers for the plugin-size budget: fat LTO + one codegen unit.
-# debug stays on — MSVC debuginfo lives in the .pdb, and the Android lane
-# strips at staging so the target/ artefact keeps symbolication info.
+# debug stays on: MSVC debuginfo lives in the .pdb, and the Android lane
+# strips at staging, so the target/ artefact keeps symbolication info.
 # panic stays "unwind": the ABI's catch_unwind fences depend on it.
 [profile.release]
 debug = true
