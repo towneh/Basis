@@ -69,6 +69,8 @@ pub struct SharedTexturePresenter {
     keyed: IDXGIKeyedMutex,
     shared_handle: HANDLE,
     pass: gpu::ConvertPass,
+    /// Set when the host renders with Direct3D 12 (`enable_d3d12_handoff`).
+    d3d12: Option<crate::win_d3d12::Producer>,
 }
 
 // SAFETY: the presenter is owned and driven by one decode thread at a
@@ -196,6 +198,7 @@ impl SharedTexturePresenter {
                 keyed,
                 shared_handle,
                 pass,
+                d3d12: None,
             })
         }
     }
@@ -203,6 +206,38 @@ impl SharedTexturePresenter {
     /// Process-wide NT handle value for `ID3D11Device1::OpenSharedResource1`.
     pub fn shared_handle(&self) -> u64 {
         self.shared_handle.0 as usize as u64
+    }
+
+    /// Publish every converted frame to a Direct3D 12 consumer as well:
+    /// see `win_d3d12`. The D3D11 consumer protocol is not used afterwards.
+    pub fn enable_d3d12_handoff(&mut self) -> Result<(), PresentError> {
+        // SAFETY: reading the description of a live owned texture.
+        let desc = unsafe {
+            let mut desc = Default::default();
+            self._texture.GetDesc(&mut desc);
+            desc
+        };
+        self.d3d12 = Some(crate::win_d3d12::Producer::new(
+            &self.device,
+            &self.context,
+            desc.Width,
+            desc.Height,
+        )?);
+        Ok(())
+    }
+
+    /// What a Direct3D 12 consumer opens, once `enable_d3d12_handoff` ran.
+    pub fn d3d12_handoff(&self) -> Option<std::sync::Arc<crate::win_d3d12::Handoff>> {
+        self.d3d12.as_ref().map(|p| p.handoff())
+    }
+
+    /// Block until every frame published to the Direct3D 12 handoff has
+    /// finished on the decode device. Test use: the render path never waits.
+    pub fn wait_for_d3d12_publishes(&self) -> Result<(), PresentError> {
+        match self.d3d12.as_ref() {
+            Some(producer) => producer.wait_published(),
+            None => Ok(()),
+        }
     }
 
     /// Convert and write one frame. Returns `false` if the consumer still owns
@@ -253,6 +288,9 @@ impl SharedTexturePresenter {
     }
 
     fn convert(&mut self, color: ColorInfo) -> Result<bool, PresentError> {
+        if self.d3d12.is_some() {
+            return self.convert_d3d12(color);
+        }
         match acquire_sync(&self.keyed, 0, 4)? {
             Acquire::TimedOut => Ok(false),
             Acquire::Acquired => {
@@ -266,6 +304,37 @@ impl SharedTexturePresenter {
                 Ok(true)
             }
         }
+    }
+
+    /// The Direct3D 12 path: nothing takes key 1 on this texture, so the
+    /// producer releases the key it acquired, and the frame leaves through
+    /// a shared slot instead.
+    fn convert_d3d12(&mut self, color: ColorInfo) -> Result<bool, PresentError> {
+        let Some(producer) = self.d3d12.as_mut() else {
+            return Ok(false);
+        };
+        let Some(slot) = producer.claim() else {
+            return Ok(false);
+        };
+        match acquire_sync(&self.keyed, 0, 4) {
+            Ok(Acquire::Acquired) => {}
+            other => {
+                producer.unclaim(slot);
+                return other.map(|_| false);
+            }
+        }
+        self.pass.draw(&self.context, color);
+        let published = producer.publish(slot, &self._texture);
+        // SAFETY: Flush and ReleaseSync on live owned interfaces; the
+        // mutex is held from the acquire above.
+        unsafe {
+            self.context.Flush();
+            d3d(self.keyed.ReleaseSync(0), "ReleaseSync(0)")?;
+        }
+        if published.is_err() {
+            producer.unclaim(slot);
+        }
+        published.map(|()| true)
     }
 }
 

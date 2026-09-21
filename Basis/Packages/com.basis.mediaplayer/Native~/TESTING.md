@@ -11,7 +11,7 @@ area you change.
   components; the first `cargo` command installs them.
 - **cargo-deny and cargo-vet:** `cargo install --locked cargo-deny cargo-vet`.
 - **Windows:** PowerShell 7, NASM on `PATH`, and a GPU with hardware video
-  decode for the Direct3D 11 and Media Foundation tests. Set `CARGO_TARGET_DIR`
+  decode for the Direct3D 11, Direct3D 12 and Media Foundation tests. Set `CARGO_TARGET_DIR`
   to a short path such as `C:/bm-target` to stay under Windows' path-length
   limit.
 - **Optional:** `ffprobe` for the conformance check; librist built into
@@ -65,7 +65,7 @@ with `--release` for timing):
 | `media-engine/tests/` | Whole sessions (mostly Windows) |
 | `media-io`, `media-hls`, `media-rtp`, `media-rtsp`, `media-whep` `tests/` | Network sources against local scripted servers |
 | `media-bank/tests/`, `media-clock/tests/` | Buffering and the clock, including property tests |
-| `media-present/tests/` | The Direct3D 11 conversion pass |
+| `media-present/tests/` | The Direct3D 11 conversion pass and the Direct3D 12 handoff |
 | `media-ffi/tests/` | The plugin boundary |
 | `media-testkit/` | Recorded network-delay profiles and the impairment source |
 | `fixtures/`, `tools/gen-*.py` | Test media and the scripts that generate it |
@@ -163,6 +163,7 @@ connection. Set **Liveness** to Live for those.
 | Clock correction law | Clock correction is proportional to the error, capped wide for 1.2 s after a snap then at 2%, with out-of-range ceilings bounded. | `cargo test -p media-clock` | CI |
 | GPU conversion pass | The D3D11 NV12-to-BGRA pass matches the CPU reference for every colour matrix and range, on synthetic sweeps and decoded frames. | `cargo test -p media-present --test gpu_pass` | CI, Windows |
 | Shared-texture handle lifetime | The presenter always closes its shared texture handle; the consumer reopens on a handle change, retrying failed opens up to eight times. | `cargo test -p media-present --test gpu_pass dropping_the_presenter`; by hand: play an HLS ladder whose renditions change resolution across a discontinuity and check the picture stays live | CI, Windows; by hand |
+| Direct3D 12 handoff | Converted frames reach a D3D12 texture unchanged; the newest finished frame is copied, never an older one after it; a slot with a copy pending is not converted over; a destination of another size is refused; no copy is recorded while the host cannot give its next frame-fence value; a dropped consumer keeps its objects until its last copy completes. | `cargo test -p media-present --test d3d12_handoff` | CI, Windows |
 | Multichannel interleave order | Multichannel PCM is interleaved in WAV channel-mask order (FL FR C LFE BL BR), checked with a 5.1 tone-per-speaker fixture. | `cargo test -p media-engine --test session multichannel_interleave` | CI, Windows |
 | PTS-annotated ring serve | Ring timestamp markers track media time, audio over 300 ms late is trimmed in bounded steps, and an on-time full ring is not. | `cargo test -p media-engine --lib audio`; live: `bm-probe play <a live RTSP stream> --duration 75` | CI; by hand |
 | Audio ring generation swap | Audio ring resets are atomic with the consumer swap, and a refused decoder retires its producer and consumer. | `cargo test -p media-engine --lib audio` | CI |

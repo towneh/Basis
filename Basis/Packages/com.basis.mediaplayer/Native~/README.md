@@ -21,7 +21,7 @@ the built binaries are committed in `../Runtime/Plugins/`.
 | `media-whep` | WHEP (WebRTC receive) |
 | `media-rist` | RIST, through librist |
 | `media-decode` | The decoder trait, with `decode-mf` (Windows), `decode-mediacodec` (Android) and `decode-sw` (FLAC, Opus, AV1, PCM) |
-| `media-present` | Frame hand-off to Unity: Direct3D 11 on Windows, Vulkan on Android |
+| `media-present` | Frame hand-off to Unity: Direct3D 11 and 12 on Windows, Vulkan on Android |
 | `media-diag` | Counters, the event log and the capture writer |
 | `media-testkit` | Recorded network-delay profiles for tests |
 | `bm-probe` | A command-line player for running the engine without Unity |
