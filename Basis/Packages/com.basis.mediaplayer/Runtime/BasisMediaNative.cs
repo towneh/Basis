@@ -2,7 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// ABI v2 bindings for basis_media. Probe <see cref="bm_abi_version"/>
+/// ABI v4 bindings for basis_media. Probe <see cref="bm_abi_version"/>
 /// first and refuse a mismatch loudly; every other export takes the
 /// generational session handle.
 /// </summary>
@@ -115,7 +115,7 @@ public static class BasisMediaNative
 
     /// <summary>
     /// Register the Unity output texture (from GetNativeTexturePtr).
-    /// D3D11: a BGRA32 Texture2D. Vulkan/Android: a linear RGBA32
+    /// Direct3D 11 or 12: a BGRA32 Texture2D. Vulkan/Android: a linear RGBA32
     /// RenderTexture with enableRandomWrite, created before this call.
     /// </summary>
     [DllImport(Dll)] public static extern int bm_session_set_output_texture(ulong handle, IntPtr texture);

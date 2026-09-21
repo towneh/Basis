@@ -6,7 +6,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 
 /// <summary>
-/// Playback component over the basis_media engine (ABI v2; D3D11 on
+/// Playback component over the basis_media engine (ABI v4; Direct3D 11 or 12 on
 /// Windows, Vulkan on Android).
 ///
 /// Poll-driven: one snapshot per frame, one render event per frame once
@@ -185,7 +185,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     /// <summary>Whether row 0 of <see cref="Texture"/> is the top of the
     /// picture, so a sink sampling with v=0 at the bottom has to flip.
-    /// D3D11 hands over a top-left-origin texture; the Android convert
+    /// Direct3D hands over a top-left-origin texture; the Android convert
     /// pass already writes rows in Unity's Vulkan sampling
     /// orientation.</summary>
     public bool OutputFrameIsTopLeftOrigin
@@ -722,9 +722,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             return;
         }
 #else
-        if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D11)
+        if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D11
+            && SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D12)
         {
-            BasisDebug.LogError($"[BasisMedia] needs D3D11, running on {SystemInfo.graphicsDeviceType}", BasisDebug.LogTag.Video);
+            BasisDebug.LogError($"[BasisMedia] needs Direct3D 11 or 12, running on {SystemInfo.graphicsDeviceType}", BasisDebug.LogTag.Video);
             State = BmState.Error;
             return;
         }

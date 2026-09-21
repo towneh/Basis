@@ -15,11 +15,12 @@ needs building.
 
 | Platform | Graphics API | Video | Audio |
 | --- | --- | --- | --- |
-| Windows x64 | Direct3D 11 | H.264, HEVC, VP9 and AV1 in hardware where the GPU supports them; H.264, VP9 and AV1 also in software | AAC, MP3, FLAC, Opus, PCM |
+| Windows x64 | Direct3D 11 or 12 | H.264, HEVC, VP9 and AV1 in hardware where the GPU supports them; H.264, VP9 and AV1 also in software | AAC, MP3, FLAC, Opus, PCM |
 | Android arm64 (Quest) | Vulkan | H.264, HEVC, VP8, VP9 and AV1 where the device has a hardware decoder | AAC, MP3, FLAC, Opus, PCM |
 
-On other graphics APIs (Direct3D 12, OpenGL ES) the player logs `needs D3D11`
-or `needs Vulkan` and does not play. It does not play on Linux.
+On other graphics APIs (Vulkan on Windows, OpenGL ES) the player logs
+`needs Direct3D 11 or 12` or `needs Vulkan` and does not play. It does not play
+on Linux.
 
 ## Getting started
 
@@ -326,7 +327,7 @@ SEI survives repackaging but not re-encoding.
   without inspecting them and keeps no media state.
 - 360°, VR180 and fisheye video show flat, and `Picture` needs a custom
   shader.
-- No playback on Linux or Direct3D 12.
+- No playback on Linux, or on Vulkan under Windows.
 
 ## Building the engine
 

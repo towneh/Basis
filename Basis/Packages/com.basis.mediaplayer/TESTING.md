@@ -156,6 +156,18 @@ newer than the managed side prints as a number.
 | Overrun | Error in a loop with the editor paused, then resume | The oldest lines are dropped |
 | Frame budget | Set `EventDrainPerTick` to 8 and `DrainPerFrame` to 4, provoke a burst | Every line arrives, over several frames. Restore |
 
+## Direct3D 11 and 12
+
+Start the Editor or a build once with `-force-d3d11` and once with
+`-force-d3d12`, and run each row on both. The log names the API in use: the
+project's `Logs/Editor.log` for the Editor, `Player.log` for a build, or the
+file given with `-logFile <path>`.
+
+| Row | Do | Expect |
+| --- | --- | --- |
+| Playback | Play a video with sound, seek forwards and back, pause, resume | Picture and sound throughout, seeks land on their target, the pause holds its frame, and no `consumer open failed` line |
+| Render-thread cost | With `BasisMediaPlayerDiagnostics` recording, leave a minute of playback untouched, then a minute with the player idle | Mean frame time within 0.1 ms of the idle minute, and no more than three extra frames over 33 ms. If either misses, run both minutes again; a second miss is a regression |
+
 ## Still needs a person
 
 Picture and sound quality in a headset on the live transports, and everything
