@@ -1,6 +1,5 @@
-//! `bm-probe`: the harness player. A CLI over the engine crates directly
-//! (no Unity, no C ABI in the loop), with null sinks in place of the GPU
-//! presenter: frames land as hashes.
+//! `bm-probe`: runs the media engine from the command line, without Unity
+//! or the C ABI. Decoded frames are hashed rather than shown.
 
 #![forbid(unsafe_code)]
 
@@ -33,7 +32,10 @@ impl From<Decode> for media_engine::DecodePreference {
 }
 
 #[derive(Parser)]
-#[command(name = "bm-probe", about = "Basis media engine harness player")]
+#[command(
+    name = "bm-probe",
+    about = "Run the Basis media engine without Unity: probe, play, benchmark and test sources"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -41,43 +43,44 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open a source and report container, codec, capabilities and
-    /// first-frame timing.
+    /// Open a file or URL and report its container, codecs and the time to
+    /// the first frame.
     Probe {
-        /// Local MP4 path or http(s) URL.
+        /// A local file or an http(s) URL, in any container the engine reads.
         url: String,
-        /// Also decode to the first frame and report timing (Windows,
-        /// Media Foundation).
+        /// Also decode up to the first frame and time it (Windows only).
         #[arg(long)]
         decode: bool,
-        /// Permit sources that resolve to private/loopback addresses (the
-        /// local test rig).
+        /// Allow sources on private or loopback addresses, such as a test
+        /// server on this machine. They are refused by default.
         #[arg(long)]
         allow_local: bool,
     },
-    /// Timed headless run through the full engine pipeline, emitting the
-    /// diagnostics timeline as CSV.
+    /// Play a source through the whole engine for a set time, then print a
+    /// summary. Optionally write the diagnostics capture as CSV.
     Play {
-        /// Local MP4 path or http(s) URL.
+        /// Anything the player opens: a local file, http(s) (including HLS),
+        /// rtsp:// (rtspt:// for RTSP over TCP), rist://, or whep:// and
+        /// wheps:// for WHEP.
         url: String,
         /// Seconds to run.
         #[arg(long, default_value_t = 10)]
         duration: u64,
-        /// Write the capture timeline (one row per sample interval).
+        /// Write the diagnostics capture here, one row per sample interval
+        /// (columns described in DIAGNOSTICS.md).
         #[arg(long)]
         csv: Option<std::path::PathBuf>,
         /// Capture sample interval, milliseconds.
         #[arg(long, default_value_t = 100)]
         interval_ms: u64,
-        /// Write decoded audio as raw interleaved f32 (the headless audio
-        /// lane).
+        /// Write the decoded audio here as raw interleaved 32-bit float.
         #[arg(long)]
         audio_out: Option<std::path::PathBuf>,
         /// Permit sources that resolve to private/loopback addresses.
         #[arg(long)]
         allow_local: bool,
-        /// Force the live path. Liveness is inferred from the source by
-        /// default; this overrules it.
+        /// Treat the source as live. By default the engine decides from the
+        /// source itself.
         #[arg(long)]
         live: bool,
         /// Which of the container's audio tracks to bind, by index into
@@ -88,9 +91,10 @@ enum Command {
         /// capture and the summary then cover the landing as well.
         #[arg(long)]
         seek_to_ms: Option<u64>,
-        /// A separate audio-only source to play against `url`, which is
-        /// then treated as video-only: the shape adaptive ladders serve
-        /// above their muxed rung. On-demand HTTP(S) and files only.
+        /// A separate audio-only source to play alongside `url`, which is
+        /// then treated as video-only. This is how YouTube and other
+        /// adaptive sources serve their higher qualities. Files and
+        /// on-demand http(s) only.
         #[arg(long)]
         audio_url: Option<String>,
         /// Which decode routes the session may take: hardware with a
@@ -98,10 +102,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Decode::Fallback)]
         decode: Decode,
     },
-    /// Measure the performance budgets for one lane: startup-to-first-frame and
-    /// seek-to-settled, repeated and aggregated.
+    /// Time how long a source takes to show its first frame and to settle
+    /// after a seek, averaged over several runs.
     Bench {
-        /// Local path or http(s) URL.
+        /// Anything the player opens, as for `play`.
         url: String,
         /// Runs to aggregate over.
         #[arg(long, default_value_t = 3)]
@@ -116,47 +120,51 @@ enum Command {
         /// Open as a live source (no seek phase).
         #[arg(long)]
         live: bool,
-        /// Skip the seek phase (lanes whose demuxer refuses seeks).
+        /// Skip the seek phase, for sources that cannot seek (such as raw
+        /// MPEG-TS).
         #[arg(long)]
         no_seek: bool,
         /// Per-phase timeout, seconds.
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
-    /// Print the engine-declared capability set as JSON (the blob
-    /// `bm_capabilities` serves), so format-selection rules are testable
-    /// without Unity.
+    /// Print what this machine can decode, as the JSON the engine reports
+    /// through `bm_capabilities`.
     Caps {
-        /// Compact single-line output (the exact ABI blob) instead of
-        /// pretty-printed.
+        /// Print it on one line, exactly as the ABI returns it.
         #[arg(long)]
         compact: bool,
     },
-    /// Demux a fixture and diff the AU stream against the ffprobe oracle
-    /// (codec, count, timestamps, payload MD5). The per-PR CI gate.
+    /// Check that a fixture demuxes to exactly what ffprobe reads from it:
+    /// codec, packet count, timestamps and payload MD5. Needs ffprobe on
+    /// PATH; the gate runs it over `fixtures/`.
     Conformance {
-        /// Fixture path (or a directory of fixtures).
+        /// A fixture file, or a folder of them.
         fixture: std::path::PathBuf,
     },
-    /// Replay a recorded network-delay profile over a live lane (a TS file
-    /// paced to 1x, or a live URL) and grade the Bank against the analytic
-    /// stall model.
+    /// Play a source through a recorded bad-network profile and check that
+    /// playback survives. For a local file it must also stall no more than
+    /// the buffer depth predicts. Prints IMPAIR PASS or IMPAIR FAIL.
     Impair {
-        /// Local .ts path or live http(s) URL.
+        /// A local .ts file (played back at 1x, like a live stream) or a
+        /// live http(s) URL.
         url: String,
-        /// Profile name (a media-testkit capture, e.g. ts-rtt300-loss005).
+        /// One of the recorded profiles: ts-clean, ts-rtt600-loss0,
+        /// ts-rtt300-loss005, rtspt-rtt300-loss005 or ts-rtt300-loss05
+        /// (transport, added round trip in ms, packet loss: loss005 is
+        /// 0.05%).
         #[arg(long)]
         profile: String,
-        /// Seconds to run (default: the profile's analysed window).
+        /// Seconds to run. Defaults to the length of the recorded profile.
         #[arg(long)]
         duration: Option<u64>,
-        /// Explicit buffer depth in ms (default: Auto).
+        /// Buffer depth in ms. Defaults to Auto.
         #[arg(long)]
         depth_ms: Option<u32>,
         /// Permit sources that resolve to private/loopback addresses.
         #[arg(long)]
         allow_local: bool,
-        /// Write the capture timeline.
+        /// Write the diagnostics capture here.
         #[arg(long)]
         csv: Option<std::path::PathBuf>,
     },
