@@ -841,6 +841,9 @@ enum Answer {
     Serve,
     Redirect(String),
     Gone,
+    /// A 206 for a range that starts this many bytes after the one asked
+    /// for, stated honestly in its `Content-Range`.
+    Shifted(usize),
 }
 
 /// A range server on `ip` that asks `script` what to do with each request,
@@ -890,8 +893,13 @@ fn spawn_scripted_server(
                         seen.push(start);
                         seen.len() - 1
                     };
-                    let response = match script(before, start) {
-                        Answer::Serve => {
+                    let answer = script(before, start);
+                    let start = match answer {
+                        Answer::Shifted(by) => start + by,
+                        _ => start,
+                    };
+                    let response = match answer {
+                        Answer::Serve | Answer::Shifted(_) => {
                             let stop = (end + 1).min(body.len());
                             let mut r = format!(
                                 "HTTP/1.1 206 Partial Content\r\n\
@@ -1069,5 +1077,48 @@ fn every_chunk_request_walks_from_the_url_that_was_opened() {
         *origin_log.lock().expect("log lock"),
         vec![0, REDIRECT_CHUNK, 2 * REDIRECT_CHUNK],
         "the origin saw every chunk request"
+    );
+}
+
+/// A proxy that rewrites ranges answers 206 as well, for bytes that start
+/// somewhere else. The status cannot tell the two apart, and served as they
+/// come those bytes would reach the demuxer as the ones it asked for.
+#[test]
+fn a_ranged_answer_that_starts_elsewhere_is_refused() {
+    let body = patterned(3 * REDIRECT_CHUNK);
+    let (origin, _) = spawn_scripted_server("127.0.0.1", body.clone(), |before, _| match before {
+        0 => Answer::Serve,
+        _ => Answer::Shifted(512),
+    });
+
+    let mut source = open_chunked(&format!("{origin}/media"), Arc::new(AllowAllGate));
+    let err = read_through(&mut source, &body).expect_err("the shifted part is refused");
+    assert!(err.starts_with("Read:"), "a read error: {err}");
+    assert!(
+        err.contains(&format!("bytes {}-", REDIRECT_CHUNK + 512)),
+        "the refusal names the range that was stated: {err}"
+    );
+}
+
+/// The opening probe asks from byte 0 and is held to it the same way: a
+/// part that starts anywhere else would be installed as the head of the
+/// file.
+#[test]
+fn an_opening_answer_that_starts_elsewhere_is_refused() {
+    let body = patterned(2 * REDIRECT_CHUNK);
+    let (origin, _) = spawn_scripted_server("127.0.0.1", body, |_, _| Answer::Shifted(512));
+
+    let err = HttpSource::open(
+        &format!("{origin}/media"),
+        IoLimits::default(),
+        Arc::new(AllowAllGate),
+        CancelToken::new(),
+    )
+    .map(|_| ())
+    .expect_err("the shifted part is refused");
+    assert_eq!(err.kind, IoErrorKind::Http);
+    assert!(
+        err.detail.contains("bytes 512-"),
+        "the refusal names the range that was stated: {err}"
     );
 }

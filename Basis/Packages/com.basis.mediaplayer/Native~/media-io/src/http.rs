@@ -269,6 +269,7 @@ impl HttpSource {
         }
 
         if status == 206 {
+            require_part_at(&response, 0, &current, IoErrorKind::Http)?;
             // On a 206 the total can only come from Content-Range: a
             // range-capping proxy makes Content-Length the part, not
             // the whole. A 206 that states no total still paces as
@@ -383,6 +384,7 @@ impl HttpSource {
                     detail: format!("ranged GET at {offset} for {}", self.url),
                 });
             }
+            require_part_at(&response, offset, &self.url, IoErrorKind::Read)?;
             let end = response.content_length().map(|n| offset + n);
             self.stream = Some(StreamState::new(response, offset, end));
             return Ok(());
@@ -628,6 +630,58 @@ fn content_range_total(response: &reqwest::Response) -> Option<u64> {
     total.parse().ok()
 }
 
+/// Refuse a 206 whose part does not start at `offset`. The status does not
+/// say where the part starts: a proxy that rewrites ranges answers 206
+/// too, and so does a `multipart/byteranges` body, and either would be
+/// served as the bytes at `offset`.
+fn require_part_at(
+    response: &reqwest::Response,
+    offset: u64,
+    url: &Url,
+    kind: IoErrorKind,
+) -> Result<(), IoError> {
+    if content_range_first(response) == Some(offset) {
+        return Ok(());
+    }
+    let stated = response
+        .headers()
+        .get("content-range")
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+    Err(IoError::new(
+        kind,
+        format!("ranged GET at {offset} for {url} answered with Content-Range {stated:?}"),
+    ))
+}
+
+/// The first byte a 206 says its body starts at, out of
+/// `bytes <first>-<last>/<total>`. `None` for anything that is not that
+/// shape with coherent bounds; the total may be `*`.
+fn content_range_first(response: &reqwest::Response) -> Option<u64> {
+    let value = response.headers().get("content-range")?.to_str().ok()?;
+    parse_content_range_first(value)
+}
+
+fn parse_content_range_first(value: &str) -> Option<u64> {
+    let (unit, spec) = value.trim().split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (range, total) = spec.split_once('/')?;
+    let (first, last) = range.split_once('-')?;
+    let number = |s: &str| -> Option<u64> {
+        // `parse` alone takes a leading `+`, which the grammar does not.
+        s.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| s.parse().ok())?
+    };
+    let (first, last) = (number(first)?, number(last)?);
+    let coherent = match total {
+        "*" => first <= last,
+        total => first <= last && last < number(total)?,
+    };
+    coherent.then_some(first)
+}
+
 fn discard_until(
     stream: &mut StreamState,
     cancel: &CancelToken,
@@ -645,4 +699,29 @@ fn discard_until(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_content_range_first as first;
+
+    #[test]
+    fn content_range_states_its_first_byte_or_nothing() {
+        assert_eq!(first("bytes 0-99/200"), Some(0));
+        assert_eq!(first(" BYTES 4096-8191/* "), Some(4096));
+        for refused in [
+            "",
+            "bytes",
+            "bytes */200",
+            "bytes 5-4/200",
+            "bytes 0-200/200",
+            "bytes +5-9/200",
+            "bytes -9/200",
+            "items 0-99/200",
+            "not-a-range/123",
+            "bytes 0-99",
+        ] {
+            assert_eq!(first(refused), None, "{refused:?}");
+        }
+    }
 }
