@@ -1931,7 +1931,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         // no render events (headless sessions, a non-rendering app).
         if playing
             && !px.present.consumer_live(wall)
-            && let Some(mut lease) = px.pool.take_due(now)
+            && let Some(mut lease) = px.pool.take_due(now, now)
         {
             if sink.ready() {
                 match sink.present(px, &mut lease) {

@@ -93,8 +93,10 @@ impl PresentShared {
 
     /// Session time the selection grades against: mirrored clock plus one
     /// vsync of lookahead — the frame chosen now is the one that should be
-    /// on screen during the *upcoming* refresh. `None` while parked.
-    pub fn selection_target(&self, wall: MediaTime) -> Option<MediaTime> {
+    /// on screen during the *upcoming* refresh. Returned beside the clock's
+    /// own reading, which is what lateness is measured from. `None` while
+    /// parked.
+    pub fn selection_target(&self, wall: MediaTime) -> Option<(MediaTime, MediaTime)> {
         let offset = self.clock_offset_us.load(Ordering::Relaxed);
         if offset == i64::MIN {
             return None;
@@ -103,7 +105,8 @@ impl PresentShared {
             .interval_us
             .load(Ordering::Relaxed)
             .clamp(LOOKAHEAD_MIN_US, LOOKAHEAD_MAX_US);
-        Some(wall + MediaTime::from_micros(offset) + MediaTime::from_micros(lookahead))
+        let clock = wall + MediaTime::from_micros(offset);
+        Some((clock + MediaTime::from_micros(lookahead), clock))
     }
 
     /// Mirror the clock for the render thread. Call under the clock lock
@@ -133,8 +136,8 @@ pub fn select_for_render(
     pool: &FramePool,
     wall: MediaTime,
 ) -> Option<Lease> {
-    let target = shared.selection_target(wall)?;
-    pool.try_take_due(target)
+    let (target, clock) = shared.selection_target(wall)?;
+    pool.try_take_due(target, clock)
 }
 
 /// Presentation bookkeeping, wherever selection ran: position, the
