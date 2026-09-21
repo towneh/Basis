@@ -2033,6 +2033,8 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                                 format!("{reason}; decoding {codec:?} on {}", route.label),
                             );
                             diag_log!("{reason}; decoding {codec:?} on {}", route.label);
+                        } else {
+                            diag_log!("decoding {codec:?} on {}", route.label);
                         }
                         decode_device = route.decode_device;
                         decoder = Some(route.decoder);
