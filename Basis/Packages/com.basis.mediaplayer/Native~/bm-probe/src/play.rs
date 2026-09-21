@@ -21,11 +21,13 @@ pub struct Options {
     pub audio_track: usize,
     pub seek_to_ms: Option<u64>,
     pub audio_url: Option<String>,
+    pub decode: media_engine::DecodePreference,
 }
 
 pub fn run(options: &Options) -> ExitCode {
     let mut request = OpenRequest::new(options.url.clone());
     request.audio_url = options.audio_url.clone();
+    request.decode_preference = options.decode;
     request.allow_local_addresses = options.allow_local;
     if options.live {
         request.liveness = media_engine::SourceLiveness::Live;

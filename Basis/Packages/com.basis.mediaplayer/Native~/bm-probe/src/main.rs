@@ -15,7 +15,25 @@ mod probe;
 
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// The session's decode preference, as the open request carries it.
+#[derive(Clone, Copy, ValueEnum)]
+enum Decode {
+    Fallback,
+    Hardware,
+    Software,
+}
+
+impl From<Decode> for media_engine::DecodePreference {
+    fn from(decode: Decode) -> Self {
+        match decode {
+            Decode::Fallback => Self::HardwareWithFallback,
+            Decode::Hardware => Self::HardwareOnly,
+            Decode::Software => Self::SoftwareOnly,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "bm-probe", about = "Basis media engine harness player")]
@@ -79,6 +97,10 @@ enum Command {
         /// above their muxed rung. On-demand HTTP(S) and files only.
         #[arg(long)]
         audio_url: Option<String>,
+        /// Which decode routes the session may take: hardware with a
+        /// software fallback, hardware only, or software only.
+        #[arg(long, value_enum, default_value_t = Decode::Fallback)]
+        decode: Decode,
     },
     /// Measure the §11 budgets for one lane: startup-to-first-frame and
     /// seek-to-settled, repeated and aggregated.
@@ -163,6 +185,7 @@ fn main() -> ExitCode {
             audio_track,
             seek_to_ms,
             audio_url,
+            decode,
         } => play::run(&play::Options {
             url,
             duration,
@@ -174,6 +197,7 @@ fn main() -> ExitCode {
             audio_track,
             seek_to_ms,
             audio_url,
+            decode: decode.into(),
         }),
         Command::Bench {
             url,
