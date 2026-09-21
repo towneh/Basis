@@ -273,6 +273,57 @@ fn av1_hardware_matches_rav1d() {
     assert_streams_match("av1", &hw_frames, &sw_frames);
 }
 
+/// The engine feeds a decoder whose output it cannot take yet (a full
+/// frame pool), one output per pass. The Store AV1 MFT answers
+/// `ProcessInput` on a full output queue by waiting a second and then
+/// refusing, and `GetInputStatus` reports accept-data throughout, so the
+/// adapter must refuse on its own account before the MFT is asked.
+#[test]
+fn av1_submit_never_waits_on_undrained_output() {
+    let track = video_track("av1-opus.webm", VideoCodec::Av1);
+    let mut hw = match decode_mf::HwVideoDecoder::new(
+        decode_mf::HwCodec::Av1,
+        track.width,
+        track.height,
+        &track.codec_private,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED: no hardware AV1 on this machine ({e})");
+            return;
+        }
+    };
+    let mut frames = 0usize;
+    for (au, pts) in &track.aus {
+        loop {
+            let asked = std::time::Instant::now();
+            let outcome = hw.submit(au, *pts).expect("submit");
+            let waited = asked.elapsed();
+            assert!(
+                waited < std::time::Duration::from_millis(250),
+                "submit at pts {pts} waited {waited:?} inside the decoder"
+            );
+            match outcome {
+                SubmitOutcome::Accepted => break,
+                SubmitOutcome::NotAccepting => {
+                    if hw.try_output().expect("output").is_some() {
+                        frames += 1;
+                    }
+                }
+            }
+        }
+    }
+    hw.begin_drain().expect("drain");
+    while hw.try_output().expect("output").is_some() {
+        frames += 1;
+    }
+    assert!(
+        frames >= track.aus.len() - 2,
+        "decoded {frames} of {} frames",
+        track.aus.len()
+    );
+}
+
 /// First HEVC on Windows (there is no software oracle — DXVA is the only
 /// route): the fixture decodes to the expected frame count at the coded
 /// dimensions, pts monotonic in display order.

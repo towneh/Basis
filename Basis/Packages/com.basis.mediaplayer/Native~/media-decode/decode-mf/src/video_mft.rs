@@ -118,6 +118,13 @@ pub(crate) struct VideoMft {
     out_height: u32,
     default_stride: i32,
     color: ColorInfo,
+    /// Whether the MFT has reported `NEED_MORE_INPUT` since it last
+    /// accepted a sample. Input is only offered while this holds: the
+    /// Store AV1 MFT answers `ProcessInput` on a full output queue by
+    /// waiting a second before it refuses, and its `GetInputStatus`
+    /// reports accept-data throughout, so an MFT that may still hold
+    /// output is refused here without being asked.
+    drained: bool,
 }
 
 impl VideoMft {
@@ -133,6 +140,7 @@ impl VideoMft {
             out_height: 0,
             default_stride: 0,
             color: ColorInfo::default(),
+            drained: true,
         };
         this.negotiate_output()?;
         // SAFETY: message-only COM calls on the owned MFT; no pointers cross.
@@ -322,6 +330,9 @@ impl VideoMft {
     }
 
     pub(crate) fn submit(&mut self, au: &[u8], pts_us: i64) -> Result<SubmitOutcome, DecodeError> {
+        if !self.drained {
+            return Ok(SubmitOutcome::NotAccepting);
+        }
         // SAFETY: the input buffer is created with au.len() bytes and locked
         // before the copy_nonoverlapping of exactly au.len() bytes; all
         // interface pointers are owned wrappers.
@@ -340,7 +351,10 @@ impl VideoMft {
             mf(sample.SetSampleTime(pts_us * 10), "SetSampleTime")?;
 
             match self.mft.ProcessInput(0, &sample, 0) {
-                Ok(()) => Ok(SubmitOutcome::Accepted),
+                Ok(()) => {
+                    self.drained = false;
+                    Ok(SubmitOutcome::Accepted)
+                }
                 Err(e) if e.code() == MF_E_NOTACCEPTING => Ok(SubmitOutcome::NotAccepting),
                 Err(e) => Err(DecodeError(format!("ProcessInput ({}): {e}", self.tag))),
             }
@@ -376,7 +390,10 @@ impl VideoMft {
                         })?;
                         return Ok(Some(self.copy_frame(&sample)?));
                     }
-                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                        self.drained = true;
+                        return Ok(None);
+                    }
                     Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                         self.negotiate_output()?;
                         continue;
@@ -416,8 +433,9 @@ impl VideoMft {
                     .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0),
                 "START_OF_STREAM",
             )?;
-            Ok(())
         }
+        self.drained = true;
+        Ok(())
     }
 }
 

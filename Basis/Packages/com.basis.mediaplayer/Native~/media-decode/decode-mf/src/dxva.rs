@@ -403,6 +403,10 @@ pub struct HwVideoDecoder {
     floor_armed: bool,
     floor_dropped: u32,
     fell_back: bool,
+    /// The same input gate as `VideoMft::drained`: the MFT is offered a
+    /// sample only once it has reported `NEED_MORE_INPUT` since the last
+    /// one it accepted.
+    drained: bool,
 }
 
 // SAFETY: owned COM interfaces on free-threaded MF/D3D11 objects; the
@@ -483,6 +487,7 @@ impl HwVideoDecoder {
                 floor_armed: false,
                 floor_dropped: 0,
                 fell_back: false,
+                drained: true,
             };
             this.negotiate_output()?;
             mf(
@@ -622,6 +627,9 @@ impl HwVideoDecoder {
 
 impl media_decode::VideoDecoder for HwVideoDecoder {
     fn submit(&mut self, annexb: &[u8], pts_us: i64) -> Result<SubmitOutcome, DecodeError> {
+        if !self.drained {
+            return Ok(SubmitOutcome::NotAccepting);
+        }
         if self.floor_armed {
             self.output_floor_pts = Some(pts_us);
             self.floor_armed = false;
@@ -663,6 +671,7 @@ impl media_decode::VideoDecoder for HwVideoDecoder {
                     if carried_config {
                         self.config_obus.clear();
                     }
+                    self.drained = false;
                     Ok(SubmitOutcome::Accepted)
                 }
                 Err(e) if e.code() == windows::Win32::Media::MediaFoundation::MF_E_NOTACCEPTING => {
@@ -732,7 +741,10 @@ impl media_decode::VideoDecoder for HwVideoDecoder {
                         }
                         return Ok(Some(frame));
                     }
-                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                        self.drained = true;
+                        return Ok(None);
+                    }
                     Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                         self.negotiate_output()?;
                         continue;
@@ -775,6 +787,7 @@ impl media_decode::VideoDecoder for HwVideoDecoder {
         }
         self.floor_armed = true;
         self.output_floor_pts = None;
+        self.drained = true;
         Ok(())
     }
 
