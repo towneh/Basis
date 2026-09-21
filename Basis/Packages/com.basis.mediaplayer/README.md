@@ -18,6 +18,10 @@ needs building.
 | Windows x64 | Direct3D 11 or 12 | H.264, HEVC, VP9 and AV1 in hardware where the GPU supports them; H.264, VP9 and AV1 also in software | AAC, MP3, FLAC, Opus, PCM |
 | Android arm64 (Quest) | Vulkan | H.264, HEVC, VP8, VP9 and AV1 where the device has a hardware decoder | AAC, MP3, FLAC, Opus, PCM |
 
+Direct3D 12 also needs Unity 6000.3 or later, whose native plugin API includes
+`IUnityGraphicsD3D12v8`. On an earlier editor the player refuses Direct3D 12
+with a logged error; Direct3D 11 is unaffected.
+
 On other graphics APIs (Vulkan on Windows, OpenGL ES) the player logs
 `needs Direct3D 11 or 12` or `needs Vulkan` and does not play. It does not play
 on Linux.

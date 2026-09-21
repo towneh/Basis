@@ -65,6 +65,9 @@ struct IUnityGraphicsD3D12v8 {
 }
 
 const IUNITY_GRAPHICS: (u64, u64) = (0x7CBA0A9CA4DDB544, 0x8C5AD4926EB17B11);
+/// Unity 6000.3 and later. Unity's own header marks this GUID "TODO: Get
+/// proper values"; if an upgrade changes it, the lookup returns null and
+/// Direct3D 12 playback refuses until this is updated.
 const IUNITY_GRAPHICS_D3D12_V8: (u64, u64) = (0x9d303045d00d4cfd, 0x8febb42968b423b6);
 
 const RENDERER_D3D12: c_int = 18;
