@@ -29,10 +29,9 @@ fn audio_leg() -> String {
 
 /// Separates "the second leg is playing" from "the second leg was dropped".
 /// Not a throughput measure: `run` pulls at wall-clock cadence, so the total
-/// also reflects how the test thread was scheduled, and the whole workspace
-/// suite running alongside it can cost a second no amount of correctness wins
-/// back. A dropped leg pulls approximately zero, so the bar sits well under
-/// the fixtures' six seconds on purpose and should stay there.
+/// also reflects scheduling, and the rest of the workspace suite running
+/// alongside can cost a second. A dropped leg pulls about zero, so the bar
+/// sits well under the fixtures' six seconds on purpose.
 const AUDIO_LEG_PLAYING: u64 = 3 * 48_000;
 
 fn wait_for(deadline: Duration, mut check: impl FnMut() -> bool) -> bool {
@@ -46,9 +45,9 @@ fn wait_for(deadline: Duration, mut check: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// Drives a session like the managed host does — present on the render
-/// path, pull audio at the hardware cadence — until `until` or the
-/// deadline. Returns the audio frames pulled.
+/// Drives a session as the managed host does (pulling audio at the
+/// hardware cadence) until `until` or the deadline. Returns the audio
+/// frames pulled.
 fn run(session: &Session, deadline: Duration, mut until: impl FnMut() -> bool) -> u64 {
     let shared = session.shared().clone();
     let px = session.pipeline().clone();
@@ -81,10 +80,9 @@ fn run(session: &Session, deadline: Duration, mut until: impl FnMut() -> bool) -
     pulled
 }
 
-/// The whole point: two sources, one session. Video comes off one leg,
-/// audio off the other, both play to a natural end, and the audio total
-/// covers the fixture — i.e. the second leg really is being demuxed and
-/// decoded rather than quietly dropped.
+/// Two sources, one session. Video comes off one leg, audio off the
+/// other, both play to a natural end, and the audio total shows the second
+/// leg is being demuxed and decoded rather than dropped.
 #[test]
 fn a_split_pair_plays_both_legs_to_a_natural_end() {
     let mut request = OpenRequest::new(video_leg());
@@ -119,10 +117,10 @@ fn a_split_pair_plays_both_legs_to_a_natural_end() {
     session.close();
 }
 
-/// A seek is one seek: the video leg takes the command and the audio leg
-/// follows it to the same landing on the same generation, so the pair does
-/// not come apart. Without the follow the audio leg keeps serving the old
-/// position and every post-seek sample is dropped as stale.
+/// The video leg takes the seek and the audio leg follows it to the same
+/// landing on the same generation, so the pair stays together. Without the
+/// follow the audio leg would keep serving the old position and every
+/// post-seek sample would be dropped as stale.
 #[test]
 fn seeking_takes_both_legs_to_the_same_place() {
     let mut request = OpenRequest::new(video_leg());
@@ -163,10 +161,10 @@ fn seeking_takes_both_legs_to_the_same_place() {
     session.close();
 }
 
-/// Each leg contributes only the kind of track it is there for. Handing
-/// the same muxed file to both legs is the sharpest form of this: without
-/// the filter the session would announce two video tracks and two audio
-/// tracks, whose ids would also collide in the Bank.
+/// Each leg contributes only its own kind of track. Handing the same muxed
+/// file to both legs tests this hardest: without the filter the session
+/// would announce two video and two audio tracks, whose ids would also
+/// collide in the Bank.
 #[test]
 fn each_leg_contributes_only_its_own_kind_of_track() {
     let muxed = fixture("h264-aac-640x360-30fps.mp4");
@@ -203,9 +201,9 @@ fn each_leg_contributes_only_its_own_kind_of_track() {
     session.close();
 }
 
-/// A second leg is only meaningful against an on-demand byte stream. Every
+/// A second leg only makes sense against an on-demand byte stream. Every
 /// live transport already carries both tracks, so asking for one there is
-/// a typed refusal rather than a session that silently plays no audio.
+/// a typed refusal, not a session that silently plays no audio.
 #[test]
 fn a_split_request_on_a_live_transport_is_refused() {
     let mut request = OpenRequest::new("rtsp://192.0.2.1/nothing");
@@ -222,14 +220,13 @@ fn a_split_request_on_a_live_transport_is_refused() {
     session.close();
 }
 
-/// The other side of that: two sources that disagree about where their
-/// timelines start cannot be banked against one another at all. The Bank
-/// measures how much it holds as one span across everything banked, so
-/// the gap between the origins counts as media it is not holding — past
-/// the decoder cushion it reads as full from the trailing leg's first
-/// access unit, both legs park on it, release never drains, and the
-/// session sits in Buffering with no audio, no video and nothing said
-/// until it is closed. It says so instead.
+/// Two sources whose timelines start too far apart cannot be banked
+/// against one another. The Bank measures what it holds as one span across
+/// everything banked, so the gap between the origins counts as held media.
+/// Past the decoder cushion it reads as full from the trailing leg's first
+/// access unit, both legs park, release never drains, and the session
+/// would sit silently in Buffering until closed. It fails with a typed
+/// error instead.
 #[test]
 fn a_split_pair_whose_timelines_disagree_is_refused() {
     // The TS fixture's first pts is ~1.47 s and the audio-only m4a starts
@@ -257,12 +254,11 @@ fn a_split_pair_whose_timelines_disagree_is_refused() {
     session.close();
 }
 
-/// Container timelines rarely start at zero — MPEG-TS carries an arbitrary
-/// 33-bit clock, fMP4 a `baseMediaDecodeTime`, Matroska a first cluster
-/// timestamp of its own. The lead cap that keeps the two legs in step
-/// meters their progress against each other, so an origin that is not zero
-/// must not read as one leg already being ahead of the other before either
-/// has banked anything.
+/// Container timelines rarely start at zero: MPEG-TS carries an arbitrary
+/// 33-bit clock, fMP4 a `baseMediaDecodeTime`, Matroska its own first
+/// cluster timestamp. The lead cap that keeps the two legs in step meters
+/// their progress against each other, so a non-zero origin must not read
+/// as one leg being ahead before either has banked anything.
 #[test]
 fn a_split_pair_whose_timeline_does_not_start_at_zero_still_plays() {
     // The TS fixture's first pts is ~1.47 s, well past the lead cap.
@@ -289,9 +285,9 @@ fn a_split_pair_whose_timeline_does_not_start_at_zero_still_plays() {
         "a split pair on a non-zero timeline must still end naturally"
     );
     // Ending is not the same as playing: a pair that reached Eos having
-    // produced nothing would satisfy the state alone. Both bars are
-    // deliberately loose — this harness pulls at wall-clock cadence, so a
-    // throughput figure measures how the test thread got scheduled.
+    // produced nothing would satisfy the state alone. Both bars are loose on
+    // purpose, since this harness pulls at wall-clock cadence and a
+    // throughput figure would measure scheduling.
     assert!(
         shared.frames_decoded.load(Ordering::Relaxed) > 0,
         "the session ended without decoding a frame"

@@ -1,7 +1,7 @@
 //! What the engine decides a URL is. The classifier picks the transport,
-//! and "matched nothing I know" is a refusal rather than a filesystem
-//! open — so these rows are about which lane a string reaches, and about
-//! the strings that must reach none of them.
+//! and a string that matches nothing known is refused rather than opened
+//! as a file. These tests cover which transport a string reaches, and the
+//! strings that must reach none.
 
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -32,9 +32,8 @@ fn settle(url: &str, allow_local: bool) -> (u32, u32) {
 }
 
 /// A scheme the engine does not carry is refused as configuration, not
-/// handed to the filesystem. Before this, every one of these was opened
-/// as a path — which is how a remote peer's string became a local file
-/// read, and how a UNC path became an outbound SMB connect.
+/// handed to the filesystem, where a remote peer's string would become a
+/// local file read.
 #[test]
 fn an_unknown_scheme_is_a_typed_refusal() {
     for url in [
@@ -61,18 +60,17 @@ fn an_unknown_scheme_is_a_typed_refusal() {
 
 /// Schemes are case-insensitive (RFC 3986 §3.1) and the managed
 /// classifier compares them that way, so the engine must agree: an
-/// uppercase URL is the same request as a lowercase one, and above all
-/// is not a local path. Pinned by the error category — these addresses
-/// are unroutable, so the lane fails, but it fails as I/O from the
-/// transport rather than as a config refusal or a missing file.
+/// uppercase URL is the same request as a lowercase one, and is not a
+/// local path. Checked by the error category: these addresses are
+/// unroutable, so the transport fails, but as I/O rather than as a config
+/// refusal or a missing file.
 #[test]
 fn an_uppercase_scheme_routes_where_its_lowercase_twin_does() {
-    // A pair per thread. `settle` allows twenty seconds per URL, and
-    // these eight addresses are unroutable rather than quick to refuse
-    // on every host — a host that drops the SYN reaches the deadline,
-    // and run one after another that is over two minutes for one row.
-    // Each pair stays sequential on its own thread, which is what keeps
-    // its two spellings comparable.
+    // A pair per thread. `settle` allows twenty seconds per URL, and on a
+    // host that drops the SYN these addresses reach the deadline, so run
+    // in sequence the test would take over two minutes. Each pair stays
+    // sequential on its own thread, which keeps its two spellings
+    // comparable.
     let pairs = [
         ("HTTP://127.0.0.1:9/clip.ts", "http://127.0.0.1:9/clip.ts"),
         ("HTTPS://127.0.0.1:9/clip.ts", "https://127.0.0.1:9/clip.ts"),
@@ -93,10 +91,9 @@ fn an_uppercase_scheme_routes_where_its_lowercase_twin_does() {
         // would agree without either URL having reached a transport.
         assert_eq!(upper_state, State::Error as u32, "{upper:?} never settled");
         assert_eq!(lower_state, State::Error as u32, "{lower:?} never settled");
-        // The category rather than the settled pair. Both spellings make a
-        // real attempt against an unroutable address, and whether each one
-        // lands on a refusal or a timeout is the box's to decide under
-        // load; the lane they took is what this row is about.
+        // Compare categories, not the full outcome. Both spellings make a
+        // real attempt against an unroutable address, and whether each ends
+        // in a refusal or a timeout depends on the machine's load.
         assert_eq!(
             upper_category, lower_category,
             "{upper:?} and {lower:?} took different lanes"
@@ -112,9 +109,9 @@ fn an_uppercase_scheme_routes_where_its_lowercase_twin_does() {
 /// A UNC path is a host, not a place on this machine, and opening one is
 /// a network connection the address gate never sees. Refused unless the
 /// session has explicitly opted out of that gate, which world content
-/// never does. Every spelling Windows accepts is a row: it takes either
-/// separator in either of the two leading positions, and all four
-/// pairings open the same share.
+/// never does. Every spelling Windows accepts is covered: it takes either
+/// separator in either of the two leading positions, and all four pairings
+/// open the same share.
 #[test]
 fn a_network_share_path_is_refused_without_the_local_opt_out() {
     for url in [
@@ -142,11 +139,9 @@ fn a_network_share_path_is_refused_without_the_local_opt_out() {
     }
 }
 
-// The rest of this file needs a picture out of the pipeline, so it is
-// Windows-only like every other decode-dependent engine row: the Linux
-// backend carries no H.264 or AAC decoder, and the fixture cannot decode
-// there whatever the routing does. The rows above are decode-free and
-// assert the error *category*, so they run on every host.
+// The rest of this file needs decoded output, so it is Windows-only: the
+// Linux backend has no H.264 or AAC decoder. The tests above are
+// decode-free and assert the error *category*, so they run on every host.
 
 /// The whole fixture in memory, as the impairment harness wraps a
 /// source: the caller owns the bytes and the request's URL never names
@@ -174,12 +169,12 @@ impl media_demux::ByteSource for SuppliedSource {
     }
 }
 
-/// `open_with_source` states that the request's URL is display-only, so
-/// a harness may label its source with a string that names no transport
-/// at all. Classification must neither refuse the session over a label
-/// nor read one as a location: `"case 4"` parses as a relative path, and
-/// treating it as one would hand a caller-supplied playlist a filesystem
-/// arm rooted at the working directory.
+/// With `open_with_source` the request's URL is display-only, so a
+/// harness may label its source with a string that names no transport.
+/// Classification must neither refuse the session over a label nor read
+/// it as a location: `"case 4"` parses as a relative path, and treating it
+/// as one would let a caller-supplied playlist fetch from the working
+/// directory.
 #[cfg(windows)]
 #[test]
 fn a_caller_supplied_source_plays_under_a_label_that_names_no_transport() {
@@ -215,9 +210,8 @@ fn a_caller_supplied_source_plays_under_a_label_that_names_no_transport() {
     }
 }
 
-/// An ordinary local file still opens and plays: the file route is a
-/// case of the classifier now rather than its fallthrough, and that must
-/// not have cost it anything.
+/// An ordinary local file opens and plays through the classifier's file
+/// case.
 #[cfg(windows)]
 #[test]
 fn an_ordinary_local_file_still_plays() {

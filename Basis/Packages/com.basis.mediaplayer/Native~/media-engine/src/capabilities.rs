@@ -1,13 +1,13 @@
-//! The engine-declared capability set: one queryable snapshot of
-//! what this build will decode and play, consumed by the resolver's
-//! format selection and the managed layer. Every entry is a will-decode
-//! claim for the primary route the engine would actually take — probed
-//! routes (the Store VP9 extension) are checked at build time, constant
-//! routes (in-box MFTs, the in-process floors) are stated outright.
+//! The engine-declared capability set: a snapshot of what this build will
+//! decode and play, read by the resolver's format selection and the
+//! managed layer. Every entry is a will-decode claim for the route the
+//! engine would take. Probed routes (the Store VP9 extension) are checked
+//! when the set is built; constant routes (in-box MFTs, the in-process
+//! floors) are stated outright.
 //!
-//! The set is a snapshot, not a live object: runtime changes (a software
-//! fallback engaging) surface as diagnostics events — `DecodeFallbackHwToSw`
-//! is the re-query advisory — and the consumer queries again.
+//! Runtime changes such as a software fallback engaging surface as
+//! diagnostics events (`DecodeFallbackHwToSw` is the re-query advisory),
+//! and the consumer queries again.
 
 use serde::Serialize;
 
@@ -18,8 +18,8 @@ pub const CAPABILITIES_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize)]
 pub struct CapabilitySet {
     pub version: u32,
-    /// "windows-x64" today; "android-quest" joins with the MediaCodec
-    /// adapter.
+    /// "windows-x64", "android-arm64", "linux-x64", or `<os>-<arch>`
+    /// elsewhere.
     pub platform: String,
     pub video: Vec<VideoCap>,
     pub audio: Vec<AudioCap>,
@@ -27,15 +27,14 @@ pub struct CapabilitySet {
     pub containers: Vec<String>,
 }
 
-/// Route the engine would actually take for the codec. Both routes may
-/// appear for one codec; the resolver ranks the best offer, diagnosis
-/// reads the route taken.
+/// Route the engine would take for the codec. Both routes may appear for
+/// one codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Route {
-    /// Hardware-accelerated decode: DXVA on Windows (the two-leg probe —
-    /// MFT present plus `ID3D11VideoDevice` profile/format/config —
-    /// backs the claim), MediaCodec hardware on Android.
+    /// Hardware-accelerated decode: DXVA on Windows (claimed only when the
+    /// MFT is present and `ID3D11VideoDevice` offers a matching
+    /// profile, format and config), MediaCodec hardware on Android.
     Hardware,
     /// CPU decode: platform software MFTs and the in-process floors.
     Software,
@@ -67,8 +66,8 @@ pub struct TransportCap {
     pub note: Option<String>,
 }
 
-/// A software route's entry, stating the enforced ceiling so
-/// resolvers rank against the same numbers the engine refuses on.
+/// A software route's entry. It states the enforced ceiling so resolvers
+/// rank against the same numbers the engine refuses on.
 #[cfg(not(target_os = "android"))]
 fn software_video(codec: &str) -> VideoCap {
     VideoCap {
@@ -94,11 +93,10 @@ fn transport(scheme: &str) -> TransportCap {
     }
 }
 
-/// Windows video routes: hardware DXVA entries carry the
-/// two-leg probe's measured resolution ceiling (fps unstated — DXVA has
-/// no rate ceiling to measure); the CPU rungs stay listed as the
-/// fallback routes, stating the software policy ceiling. Both routes may
-/// appear for one codec.
+/// Windows video routes. Hardware DXVA entries carry the probe's measured
+/// resolution ceiling (fps is unstated: DXVA has no rate ceiling to
+/// measure). The CPU routes are listed as fallbacks with the software
+/// policy ceiling.
 #[cfg(windows)]
 fn platform_video_caps() -> Vec<VideoCap> {
     use decode_mf::HwCodec;
@@ -124,20 +122,18 @@ fn platform_video_caps() -> Vec<VideoCap> {
     if decode_mf::probe_vp9() {
         video_caps.push(software_video("vp9"));
     }
-    // AV1's software rung is the rav1d in-process floor (compiled in
-    // unconditionally). The Store AV1 extension contributes no entry: it
-    // misbehaves under sync driving and is quarantined to a runtime
-    // fallback.
+    // AV1's software route is rav1d, always compiled in. The Store AV1
+    // extension contributes no entry: it misbehaves when driven
+    // synchronously and is kept to a runtime fallback.
     video_caps.push(software_video("av1"));
     video_caps
 }
 
 /// Android video routes: every entry is the platform MediaCodec decoder,
-/// probed by creation (a will-decode claim for the route the engine
-/// takes). Route and ceilings come from the adapter's own probe: the
-/// codec name separates hardware from the c2.android software fallbacks,
-/// and the ceilings are the `MediaCodecList` figures when the JVM probe
-/// is available (0 = unstated — rank conservatively).
+/// probed by creating it. The codec name separates hardware from the
+/// c2.android software fallbacks, and the ceilings are the
+/// `MediaCodecList` figures when the JVM probe is available (0 means
+/// unstated; rank conservatively).
 #[cfg(target_os = "android")]
 fn platform_video_caps() -> Vec<VideoCap> {
     use decode_mediacodec::VideoMime;
@@ -166,17 +162,16 @@ fn platform_video_caps() -> Vec<VideoCap> {
         .collect()
 }
 
-/// Headless platforms: the in-process floors are the only video routes —
-/// AV1 on rav1d, CPU decode, the software policy ceiling. Hardware entries
-/// join with the VAAPI adapter.
+/// Headless platforms: the only video route is AV1 on rav1d, under the
+/// software policy ceiling.
 #[cfg(not(any(windows, target_os = "android")))]
 fn platform_video_caps() -> Vec<VideoCap> {
     vec![software_video("av1")]
 }
 
 /// Build the capability set for this process. Cheap enough to rebuild on
-/// every query (one decoder enumerate + activate per probed codec);
-/// callers cache, the engine does not — a re-query after a
+/// every query (one decoder enumerate and activate per probed codec).
+/// Callers cache; the engine does not, because a re-query after a
 /// capability-change diagnostic must re-probe.
 pub fn capabilities() -> CapabilitySet {
     let platform = if cfg!(all(windows, target_arch = "x86_64")) {
@@ -191,13 +186,13 @@ pub fn capabilities() -> CapabilitySet {
 
     let video_caps = platform_video_caps();
 
-    // Audio ceilings are the adapters' real screens: AAC chan_conf 1..=6,
-    // MP3 mono/stereo, Opus mapping family 0 only, claxon's 8-channel cap,
-    // and the PCM adapter's 1..=8. The screens hold on Android too — the
-    // demux-side AAC channel screen and the in-process Opus/FLAC/PCM floors
-    // are platform-free. Headless platforms carry only the in-process
-    // floors: AAC/MP3 ride platform decoders, which do not exist there, so
-    // listing them would be false will-decode claims.
+    // Audio ceilings match the adapters' own checks: AAC chan_conf 1..=6,
+    // MP3 mono/stereo, Opus mapping family 0 only, claxon's 8-channel cap
+    // and the PCM adapter's 1..=8. These hold on Android too, since the
+    // demux-side AAC channel check and the in-process Opus/FLAC/PCM
+    // decoders are platform-free. Headless platforms list only the
+    // in-process decoders: AAC and MP3 need platform decoders that do not
+    // exist there.
     #[cfg(any(windows, target_os = "android"))]
     let audio_caps = vec![
         audio("aac", 6),
@@ -209,8 +204,8 @@ pub fn capabilities() -> CapabilitySet {
     #[cfg(not(any(windows, target_os = "android")))]
     let audio_caps = vec![audio("opus", 2), audio("flac", 8), audio("pcm", 8)];
 
-    // The engine's routing table. `rist` appears iff the feature was
-    // compiled in; the stub's typed refusal stays the runtime backstop.
+    // `rist` appears only when the feature is compiled in; without it the
+    // stub's typed refusal is the runtime backstop.
     let mut transports = vec![
         transport("file"),
         transport("http"),
@@ -241,8 +236,7 @@ pub fn capabilities() -> CapabilitySet {
 }
 
 impl CapabilitySet {
-    /// The one serialisation the contract ships: the versioned JSON blob
-    /// that crosses the ABI (UTF-8 serialised-blob posture).
+    /// The versioned UTF-8 JSON blob that crosses the ABI.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("capability set serialises")
     }

@@ -1,8 +1,8 @@
 //! What an HLS playlist may reach, end to end through the engine: a
 //! playlist served over HTTP names a real, readable, playable local file
-//! and must not get it. The fetcher's own rows pin the refusal; these
-//! pin the wiring that decides which fetcher the lane is given, which is
-//! the half a unit test cannot see.
+//! and must not get it. The fetcher's own tests cover the refusal; these
+//! cover the wiring that decides which fetcher the session is given,
+//! which a unit test cannot see.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use media_engine::{ErrorCategory, OpenRequest, Session, SourceLiveness, State};
 
 /// Serve `playlist` at `/index.m3u8` and **nothing else**, 200 with a
-/// length, ranges ignored. Everything other than the playlist path is a
-/// 404 on purpose: serving the playlist body for any path would let a
-/// segment URI that resolved back to this origin be answered with
-/// playlist bytes, so the session would fail at demux and a row would
-/// pass while asserting nothing about where the URI was allowed to go.
+/// length, ranges ignored. Every other path is a 404 on purpose: serving
+/// the playlist for any path would answer a segment URI that resolved
+/// back to this origin with playlist bytes, the session would fail at
+/// demux, and a test would pass without asserting anything about where the
+/// URI was allowed to go.
 fn spawn_playlist_server(playlist: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
@@ -61,14 +61,13 @@ fn spawn_playlist_server(playlist: String) -> String {
     format!("http://127.0.0.1:{port}/index.m3u8")
 }
 
-/// A copy of the TS fixture somewhere off the playlist's origin. Real,
-/// readable, and playable — so a session that reaches it plays, and the
+/// A copy of the TS fixture somewhere off the playlist's origin. It is
+/// real, readable and playable, so a session that reaches it plays and the
 /// test can tell "refused" from "failed for some other reason".
 ///
-/// Removed on drop rather than at the end of the row, because a failed
-/// assertion panics past any cleanup written after it — and the
-/// directory is named for the process, so a run that fails would leave
-/// one behind every time.
+/// Removed on drop, because a failed assertion panics past any cleanup
+/// written after it, and the directory is named for the process, so every
+/// failing run would leave one behind.
 struct Planted(std::path::PathBuf);
 
 impl Drop for Planted {
@@ -76,8 +75,8 @@ impl Drop for Planted {
         let dir = self.0.parent().map(std::path::Path::to_path_buf);
         let _ = std::fs::remove_file(&self.0);
         if let Some(dir) = dir {
-            // Refuses while it holds anything, so a sibling row's own
-            // planted file is safe from this.
+            // Refuses while it holds anything, so a sibling test's planted
+            // file is safe.
             let _ = std::fs::remove_dir(dir);
         }
     }
@@ -101,11 +100,11 @@ fn play_playlist_naming(segment: &str) -> (u32, u64, u32) {
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:7\n#EXTINF:6.0,\n{segment}\n#EXT-X-ENDLIST\n"
     );
     let mut request = OpenRequest::new(spawn_playlist_server(playlist));
-    // The address gate is not what is under test — leave it wide open, so
-    // a pass cannot be the gate refusing 127.0.0.1 by accident.
+    // The address gate is not under test. Leave it open so a pass cannot
+    // be the gate refusing 127.0.0.1 by accident.
     request.allow_local_addresses = true;
-    // Stated, so the lane is the ranged on-demand one every time rather
-    // than liveness inference deciding it from the server's answer.
+    // Stated, so the source is always the ranged on-demand one rather than
+    // liveness inference deciding from the server's answer.
     request.liveness = SourceLiveness::Vod;
     let mut session = Session::open(request);
     let shared = session.shared().clone();
@@ -132,11 +131,11 @@ fn play_playlist_naming(segment: &str) -> (u32, u64, u32) {
 
 /// A `file:` URL for the planted fixture, in the spelling the host uses.
 ///
-/// The temp directory sits under a user profile, whose name this test
-/// does not choose — a space in it would make the URL name something
-/// other than the planted file, and the row would then assert a refusal
-/// for a reason that is not the origin routing it is about. `%` goes
-/// first, or it would re-encode the escape the space just produced.
+/// The temp directory sits under a user profile whose name this test does
+/// not choose. An unescaped space would make the URL name something other
+/// than the planted file, and the test would then see a refusal for the
+/// wrong reason. `%` is escaped first, or it would re-encode the escape the
+/// space just produced.
 fn file_url(path: &std::path::Path) -> String {
     let text = path.to_str().expect("scratch path is UTF-8");
     let escaped = text.replace('%', "%25").replace(' ', "%20");
@@ -148,24 +147,22 @@ fn file_url(path: &std::path::Path) -> String {
 }
 
 /// Every spelling names the *same planted, playable* copy of the TS
-/// fixture, so a row that passes has refused rather than merely failed
-/// to find anything — that distinction is the whole assertion.
+/// fixture, so a pass means the read was refused, not that nothing was
+/// found.
 ///
-/// Which spellings can name a local file at all depends on the host, so
-/// they are listed per platform rather than filtered — a row that cannot
-/// bite on the host running it is worse than absent, because it reads as
-/// coverage.
+/// Which spellings can name a local file depends on the host, so they are
+/// listed per platform. A case that cannot fail on the running host would
+/// read as coverage it does not give.
 ///
-/// On Windows a bare path is drive-absolute, and URL joining turns it
-/// into a one-character scheme; `c://…` carries the `://` that once
-/// marked a URI absolute; `c:/…` is the same drive path again. All three
-/// reach the filesystem if nothing stops them.
+/// On Windows a bare path is drive-absolute, and URL joining turns it into
+/// a one-character scheme; `c://…` has the `://` form of an absolute URI;
+/// `c:/…` is the same drive path again. All three reach the filesystem if
+/// nothing stops them.
 ///
-/// Off Windows none of that applies. A POSIX absolute path joined onto
-/// an http base is simply a **root-relative URL** — `/tmp/x` becomes
-/// `http://origin/tmp/x`, which names no local file and is not the thing
-/// this row is about. Only the `file:` URL is a genuine local naming
-/// there, so that is the only spelling listed.
+/// Off Windows, a POSIX absolute path joined onto an http base is a
+/// **root-relative URL**: `/tmp/x` becomes `http://origin/tmp/x`, which
+/// names no local file. Only the `file:` URL names a local file there, so
+/// it is the only spelling listed.
 #[test]
 fn a_network_playlist_cannot_play_a_local_file() {
     let planted = planted_fixture("planted.ts");
@@ -194,11 +191,10 @@ fn a_network_playlist_cannot_play_a_local_file() {
             decoded, 0,
             "{segment:?} decoded {decoded} frames off the local file"
         );
-        // The refusal has to come from the source, not from the decoder.
-        // On a host with no H.264 decoder — the Linux lane — a session
-        // that *did* read the planted file would also settle in Error
-        // with nothing decoded, so state alone cannot tell the two
-        // apart and this row would pass without proving anything.
+        // The refusal must come from the source, not the decoder. On a host
+        // with no H.264 decoder (Linux), a session that *did* read the
+        // planted file would also settle in Error with nothing decoded, so
+        // state alone cannot tell the two apart.
         assert_ne!(
             category,
             ErrorCategory::Decode as u32,
@@ -207,18 +203,15 @@ fn a_network_playlist_cannot_play_a_local_file() {
     }
 }
 
-/// The fetcher wiring behind that lane, on every host. What the row
-/// above proves needs a picture out of the pipeline, so it is gated to
-/// Windows — but the part most likely to regress is the confinement in
-/// `ResourceFetcher::local`, which is platform-independent and was
-/// therefore covered nowhere else.
+/// The disk fetcher's wiring, on every host. The confinement in
+/// `ResourceFetcher::local` is platform-independent, so it is tested here
+/// without needing decoded output.
 ///
-/// What a host without a decoder can still reach is the Bank: media
-/// arrives there demuxed, so anything in it proves the fetcher was asked
-/// for the playlist's own segment and delivered it. Asserted positively
-/// for that reason — a session that never settles, which is what this
-/// one does off Windows, would satisfy any assertion phrased against the
-/// error category without the fetcher having been reached at all.
+/// A host without a decoder still reaches the Bank: media arrives there
+/// demuxed, so anything in it proves the fetcher was asked for the
+/// playlist's own segment and delivered it. Asserted positively because a
+/// session that never settles, as this one does off Windows, would satisfy
+/// any assertion on the error category without the fetcher being reached.
 #[test]
 fn a_disk_playlist_reaches_its_own_segments_without_a_decoder() {
     let playlist =
@@ -247,13 +240,11 @@ fn a_disk_playlist_reaches_its_own_segments_without_a_decoder() {
     );
 }
 
-/// The other direction still works: a playlist opened from disk plays the
-/// segments sitting beside it. The refusal above is about where the
-/// playlist came from, not a blanket ban on local media.
+/// A playlist opened from disk plays the segments beside it. The refusal
+/// above depends on where the playlist came from; it is not a ban on local
+/// media.
 ///
-/// Windows only, like every other row here that needs a picture out of
-/// the pipeline: the Linux backend carries no H.264 or AAC decoder, so
-/// the fixture cannot decode there whatever the routing does.
+/// Windows only: the Linux backend has no H.264 or AAC decoder.
 #[cfg(windows)]
 #[test]
 fn a_disk_playlist_still_plays_its_own_segments() {

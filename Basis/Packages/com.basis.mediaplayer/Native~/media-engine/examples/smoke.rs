@@ -70,9 +70,9 @@ fn main() {
     let mut consumer = unsafe { SharedTextureConsumer::open(target.texture_ptr(), handle) }
         .expect("open consumer");
 
-    // Pull audio the way the Unity audio thread will: interleaved buffers
-    // at the hardware rate — never faster, or the audio playhead (the
-    // clock master) would race ahead of real time.
+    // Pull audio as the Unity audio thread does: interleaved buffers at the
+    // hardware rate. Never faster, or the audio playhead (the clock master)
+    // would race ahead of real time.
     let mut copies = 0u64;
     let mut audio_frames = 0u64;
     let mut audio_epoch: Option<Instant> = None;

@@ -1,10 +1,9 @@
-//! The decode-route ladder under a withheld hardware path: with
+//! Decode routing with the hardware path withheld. With
 //! `BASIS_MEDIA_DISABLE_HW_DECODE` set, every hardware probe reports
-//! absent, so the default preference lands on the software rung with a
-//! `DecodeFallbackHwToSw` diagnostic and play continues — the
-//! forced-fallback row. The hardware-only preference must instead refuse
-//! typed (CodecRefused posture: video mutes, audio plays out and owns
-//! Ended).
+//! absent, so the default preference falls back to software with a
+//! `DecodeFallbackHwToSw` diagnostic and play continues. The hardware-only
+//! preference must instead refuse with CodecRefused: video mutes, audio
+//! plays out and owns Ended.
 //!
 //! Lives in its own integration-test binary because the environment
 //! variable is process-wide.
@@ -75,7 +74,7 @@ fn withheld_hardware_falls_back_reported_and_hardware_only_refuses() {
     // concurrently.
     unsafe { std::env::set_var(decode_mf::DISABLE_HW_DECODE_ENV, "1") };
 
-    // Default preference: software rung engages, reported, plays out.
+    // Default preference: software fallback engages, is reported, plays out.
     let (events, decoded, ended) = run_session(DecodePreference::HardwareWithFallback);
     assert!(
         events.contains(&EventCode::DecodeFallbackHwToSw),

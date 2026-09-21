@@ -9,14 +9,14 @@
 //! that cannot be shown within the lip-sync limit is not shown.
 //!
 //! The consumer asks for a buffer on the hardware cadence and never asks
-//! again for a shortfall, which is how an audio device behaves: time an
-//! underrun cost is gone. A consumer that paced itself off what it was
-//! served would take the shortfall back on the next pass and hide it.
+//! again for a shortfall, as an audio device behaves: time lost to an
+//! underrun is gone. A consumer that paced itself off what it was served
+//! would make up the shortfall on the next pass and hide it.
 //!
-//! The source has to outlast the decode channel. That channel absorbs 256
-//! access units before the video track is gated at all, which is eight and
-//! a half seconds of this fixture, so the window measured starts well past
-//! that and a short fixture would pass having shown nothing.
+//! The source must outlast the decode channel, which absorbs 256 access
+//! units (eight and a half seconds of this fixture) before the video track
+//! is gated at all. The measured window starts well past that; a short
+//! fixture would pass having shown nothing.
 //!
 //! Lives in its own integration-test binary because the environment
 //! variable is process-wide.
@@ -33,9 +33,9 @@ const PER_FRAME_MS: u64 = 80;
 const BUFFER_FRAMES: usize = 1024;
 const WINDOW_FROM: Duration = Duration::from_secs(18);
 const WINDOW_TO: Duration = Duration::from_secs(26);
-/// How far behind the sound a frame may go up: the lip-sync limit, stated
-/// here and not taken from the engine, so that changing the engine's figure
-/// means arguing with this row.
+/// How far behind the sound a frame may go up: the lip-sync limit. Stated
+/// here rather than taken from the engine, so changing the engine's figure
+/// has to change this test too.
 const LIP_SYNC_LIMIT_US: i64 = 40_000;
 /// What presenting and the poll below add to a lateness read after the fact.
 const POLL_SLACK_US: i64 = 40_000;

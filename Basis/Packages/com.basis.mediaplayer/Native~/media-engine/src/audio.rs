@@ -1,14 +1,15 @@
-//! Per-session PCM output: a lock-free SPSC ring of interleaved f32
-//! frames written by the audio decode thread and drained by the Unity audio
-//! thread through the ABI, PTS-annotated at chunk granularity. The consumer
-//! side never takes a lock on the pull path; the playhead derives from the
-//! media timeline (chunk pts markers interpolated by frames removed) and
-//! feeds the session clock as its master when audio is present, so a
-//! source whose sample count drifts against its pts timeline cannot drag
-//! the clock. The serve trims a head that runs late against the session
-//! clock for the same reason: such a source delivers more samples than
-//! its timeline claims, and without the trim the surplus saturates the
-//! ring and gaps upstream.
+//! Per-session PCM output: a lock-free SPSC ring of interleaved f32 frames,
+//! written by the audio decode thread and drained by the Unity audio thread
+//! through the ABI, with pts markers at chunk granularity. The pull path
+//! takes no lock.
+//!
+//! The playhead comes from the media timeline (chunk pts markers
+//! interpolated by frames removed) and is the session clock's master when
+//! audio is present, so a source whose sample count drifts against its pts
+//! cannot drag the clock. For the same kind of source the serve trims a
+//! head that runs late against the clock: it delivers more samples than
+//! its timeline claims, and without the trim the surplus fills the ring
+//! and stalls the track upstream.
 
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,22 +25,18 @@ const RING_SECONDS: u32 = 2;
 /// 384 kHz 7.1, which is past anything the codec table carries.
 const MAX_RING_SAMPLES: usize = 6 * 1024 * 1024;
 /// How late (µs) the ring head's pts may run against the session clock
-/// before the serve trims it. Depth alone is normal (the VOD startup
-/// burst fills the ring by design, live joins bank legitimately); a head
-/// that stays late against the clock means the source delivers more
-/// samples than its timeline claims, and holding the surplus saturates
-/// the ring and gaps the track upstream. Sized above the ladder's snap
-/// threshold's practical wobble and the pull cadence, below anything a
-/// viewer would read as drift.
+/// before the serve trims it. Depth alone is normal: the on-demand startup
+/// burst fills the ring, and live joins bank audio. A head that stays late
+/// against the clock means the source delivers more samples than its
+/// timeline claims. Sized above the clock's practical wobble and the pull
+/// cadence, below anything a viewer would read as drift.
 const TRIM_LATE_US: i64 = 300_000;
-/// Per-pull trim bound, frames: small steps so the master playhead jumps
-/// by at most ~21 ms at a time (the ladder absorbs that without a snap).
+/// Per-pull trim bound, frames. The master playhead jumps by at most
+/// ~21 ms at a time, which the clock absorbs without a snap.
 const TRIM_MAX_FRAMES: usize = 1024;
 /// Chunk pts markers buffered between producer and consumer. Only chunks
 /// whose pts the consumer could not already work out take a slot, so this
-/// counts discontinuities in flight rather than chunks, and a stream has
-/// to gap on more than a thousand of them before the ring is the binding
-/// constraint on depth.
+/// bounds discontinuities in flight, not chunks.
 const PTS_MARKERS: usize = 1024;
 
 #[derive(Clone, Copy)]
@@ -70,30 +67,30 @@ pub struct AudioShared {
     /// the *audible* position and video paces to match. 0 = uncompensated.
     pub output_latency_us: AtomicI64,
     /// Media time of the ring head as of the last pull (µs), derived from
-    /// the chunk pts markers — the playhead's timeline authority once set.
+    /// the chunk pts markers. Once set it is what the playhead reads.
     /// `i64::MIN` until the first marker is consumed.
     pub playhead_pts_us: AtomicI64,
-    /// Lock-free mirror of the session clock for the pull path (which
-    /// must never take the clock lock): position + the wall it was read
-    /// at, written by the audio thread each tick while the clock plays;
-    /// `i64::MIN` while parked, which disables the serve trim (parked
-    /// spans — startup, seeks, join backlogs — legitimately hold depth).
+    /// Lock-free mirror of the session clock for the pull path, which must
+    /// never take the clock lock: position and the wall it was read at,
+    /// written by the audio thread each tick while the clock plays.
+    /// `i64::MIN` while parked, which disables the serve trim, since
+    /// startup, seeks and join backlogs legitimately hold depth.
     pub clock_now_us: AtomicI64,
     pub clock_wall_us: AtomicI64,
     /// Interleaved frames pushed this generation (production counter).
     pub pushed_frames: AtomicU64,
     /// Frames discarded by the serve-side lateness trim, this generation.
-    /// Reset with the rest of the block, because the ring's own accounting
-    /// invariant — served plus trimmed equals pushed — only holds inside one
+    /// Reset with the rest of the block, because the ring's invariant
+    /// (served plus trimmed equals pushed) only holds inside one
     /// generation.
     pub trimmed_frames: AtomicU64,
     /// The same trim, counted for the life of the session and never reset.
     ///
-    /// Diagnostics want a figure that only ever climbs: a capture column that
-    /// drops after a seek loses the trims before it, and the event beside it is
-    /// rate-limited against a high-water mark that a reset leaves stranded above
-    /// the counter, silencing the event until the new generation passes the old
-    /// session total.
+    /// Diagnostics need a figure that only climbs. A capture column that
+    /// drops after a seek loses the earlier trims, and the trim event is
+    /// rate-limited against a high-water mark that a reset would leave above
+    /// the counter, silencing it until the new generation passed the old
+    /// total.
     pub trimmed_frames_total: AtomicU64,
 }
 
@@ -116,11 +113,11 @@ impl AudioShared {
     }
 
     /// The audio playhead: the ring head's media time as of the last pull
-    /// (chunk pts markers interpolated by frames removed — the pts
-    /// timeline, not the sample count, is the authority), extrapolated by
-    /// the time since that pull (the consumer drains in DSP-buffer quanta,
-    /// so the raw position stair-steps one buffer behind real time).
-    /// Meaningful only once a format is set and consumption has begun.
+    /// (pts markers interpolated by frames removed, so the pts timeline
+    /// wins over the sample count), extrapolated by the time since that
+    /// pull. The consumer drains in DSP-buffer quanta, so without the
+    /// extrapolation the position would stair-step a buffer behind real
+    /// time. `None` until a format is set and consumption has begun.
     pub fn playhead(&self, wall: MediaTime) -> Option<MediaTime> {
         let rate = self.sample_rate.load(Ordering::Relaxed);
         if rate == 0 {
@@ -136,9 +133,9 @@ impl AudioShared {
         let latency = MediaTime::from_micros(self.output_latency_us.load(Ordering::Relaxed));
         let position = match self.playhead_pts_us.load(Ordering::Relaxed) {
             i64::MIN => {
-                // No marker consumed yet: fall back to the sample-counted
-                // form (identical on any timeline until the first chunk's
-                // marker lands, which the first progressing pull consumes).
+                // No marker consumed yet: count samples. This matches the
+                // pts form until the first chunk's marker lands, which the
+                // first progressing pull consumes.
                 let base = self.base_pts_us.load(Ordering::Relaxed);
                 base + (consumed as i64) * 1_000_000 / i64::from(rate)
             }
@@ -164,10 +161,10 @@ pub struct AudioProducer {
 
 impl AudioProducer {
     /// Push presentable interleaved samples stamped with the first frame's
-    /// pts. Frames before the media origin (negative pts — encoder priming)
-    /// must already be dropped by the caller. Returns the number of
-    /// *samples* written; the rest is backpressure the caller retries after
-    /// a wait (with the pts advanced past what was written).
+    /// pts. Frames before the media origin (negative pts from encoder
+    /// priming) must already be dropped by the caller. Returns the number
+    /// of *samples* written. The rest is backpressure: the caller retries
+    /// after a wait, with the pts advanced past what was written.
     pub fn push(&mut self, pts_us: i64, samples: &[f32]) -> usize {
         if !self.base_set {
             self.shared.base_pts_us.store(pts_us, Ordering::Relaxed);
@@ -181,16 +178,15 @@ impl AudioProducer {
             return 0;
         }
         // Marker before the samples: the consumer drains markers up to
-        // its removed count, so one must never describe frames that
-        // could be consumed before it is visible.
+        // its removed count, so a marker must be visible before any frame
+        // it describes can be consumed.
         if let Some(marker) = self.marker_for(pts_us) {
             if self.markers.push(marker).is_err() {
-                // The chunk's own pts, and nothing else, says where it
-                // sits on the timeline. Losing it leaves the consumer
-                // extrapolating an older chunk's timeline over this one,
-                // which lands on the serve-side lateness trim as an
-                // arbitrary error and costs audio. Take the back-pressure
-                // instead, exactly as a full sample ring does: the caller
+                // Only the chunk's own pts says where it sits. Losing it
+                // would leave the consumer extrapolating an older chunk's
+                // timeline over this one, and the lateness trim would then
+                // discard audio on an arbitrary error. Take the
+                // backpressure as a full sample ring does: the caller
                 // retries once the consumer has drained.
                 return 0;
             }
@@ -210,25 +206,23 @@ impl AudioProducer {
     /// already put the chunk where it belongs.
     ///
     /// Chunk cadence is the stream's to choose and the marker ring is
-    /// fixed, so a stream of minimum-size access units — FLAC blocks go
-    /// down to sixteen samples — would otherwise exhaust the budget on
-    /// nothing but cadence. A contiguous chunk carries no information the
-    /// consumer does not already have: it interpolates from the marker it
-    /// holds by frames removed, which is this chunk's pts. Comparing
-    /// against the retained marker rather than the previous chunk keeps
-    /// the error bounded by the tolerance instead of letting it accrue.
+    /// fixed, so a stream of minimum-size access units (FLAC blocks go down
+    /// to sixteen samples) would otherwise exhaust it. A contiguous chunk
+    /// tells the consumer nothing new: interpolating from its current
+    /// marker by frames removed already gives this chunk's pts. Comparing
+    /// against the retained marker, not the previous chunk, keeps the error
+    /// within the tolerance instead of letting it accrue.
     fn marker_for(&self, pts_us: i64) -> Option<PtsMarker> {
         let marker = PtsMarker {
             index: self.pushed_frames,
             pts_us,
         };
         let rate = i64::from(self.sample_rate.max(1));
-        // One sample period: below the resolution the consumer's own
-        // interpolation works in.
+        // One sample period, the resolution the consumer interpolates at.
         let tolerance = (1_000_000 / rate).max(1);
         let redundant = self.last_marker.is_some_and(|last| {
-            // Saturating throughout: the pts is the stream's to state, and
-            // a hostile one must cost a marker rather than a panic.
+            // Saturating: the pts comes from the stream, and a hostile one
+            // must cost a marker, not a panic.
             let ahead = i64::try_from(marker.index.saturating_sub(last.index)).unwrap_or(i64::MAX);
             let predicted = last
                 .pts_us
@@ -263,7 +257,7 @@ pub struct AudioConsumer {
     shared: Arc<AudioShared>,
     channels: u32,
     sample_rate: u32,
-    /// Frames removed from the ring (served + trimmed) — the index space
+    /// Frames removed from the ring (served + trimmed): the index space
     /// the pts markers map onto.
     removed_frames: u64,
     /// The newest marker at or before `removed_frames`.
@@ -294,20 +288,16 @@ impl AudioConsumer {
         })
     }
 
-    /// Fill `out` with as many whole frames as are ready; the remainder is
-    /// zeroed (silence). Returns frames written. `wall_us` stamps consumer
-    /// liveness for the master-selection heuristic.
+    /// Fill `out` with as many whole frames as are ready and zero the
+    /// remainder. Returns frames written. `wall_us` stamps consumer
+    /// liveness, which master selection reads.
     pub fn pull(&mut self, out: &mut [f32], wall_us: i64) -> usize {
         let channels = self.channels.max(1) as usize;
         let rate = i64::from(self.sample_rate.max(1));
 
-        // Serve-side trim: a head that runs late against the session
-        // clock means the source delivers more samples than its timeline
-        // claims (depth alone is normal — the startup burst and live-join
-        // backlogs bank legitimately, and a parked clock disables the
-        // check entirely). Discard the late span in bounded steps: it has
-        // no slot in the timeline, and holding it saturates the ring and
-        // gaps the track upstream.
+        // Serve-side trim (see `TRIM_LATE_US`). The late span has no place
+        // on the timeline, so it is discarded in bounded steps. A parked
+        // clock disables the check.
         let clock_now = self.shared.clock_now_us.load(Ordering::Relaxed);
         if clock_now != i64::MIN
             && let Some(head) = self.head_pts()
@@ -326,9 +316,9 @@ impl AudioConsumer {
                 self.shared
                     .trimmed_frames
                     .fetch_add(trim as u64, Ordering::Relaxed);
-                // Both, at the one site that trims. Deriving the session figure
-                // from the per-generation one would need whoever installs a
-                // generation to snapshot it first, and the install resets the
+                // Both counters are bumped here. Deriving the session figure
+                // from the per-generation one would need the generation
+                // install to snapshot it first, and the install resets the
                 // block from inside.
                 self.shared
                     .trimmed_frames_total
@@ -359,32 +349,28 @@ impl AudioConsumer {
     }
 }
 
-/// Install a fresh ring for one generation's format — a seek's flush or a
-/// mid-stream format change — and return the producer half.
+/// Install a fresh ring for one generation's format (a seek's flush or a
+/// mid-stream format change) and return the producer half.
 ///
-/// The slot's own lock is taken here rather than by the caller, because
-/// the shared block's reset and the swap have to be one critical section
-/// and a signature the caller can satisfy without holding that lock does
-/// not say so. Holding the slot is what makes the swap safe: a pull holds
-/// it for its whole duration, so the reset cannot land underneath one
-/// already in flight. Were it able to, that pull's own stores would go
-/// back on top of the reset — the retired generation's playhead, consumed
-/// count and pull wall — and the clock, which masters on the playhead,
-/// would read the previous timeline's absolute position against the new
-/// one: an error the size of the seek, which the ladder answers with a
-/// snap to a position nothing has decoded behind. The pull path serves
-/// silence on a failed `try_lock`, so the contention this adds costs one
-/// block.
+/// The slot's lock is taken here, not by the caller, because the shared
+/// block's reset and the swap must be one critical section. A pull holds
+/// the slot for its whole duration, so the reset cannot land underneath
+/// one in flight. If it could, that pull's stores (the retired
+/// generation's playhead, consumed count and pull wall) would land on top
+/// of the reset, and the clock, mastered on the playhead, would see an
+/// error the size of the seek and snap to a position nothing has decoded.
+/// The pull path serves silence on a failed `try_lock`, so the added
+/// contention costs one block.
 pub fn install_audio_generation(
     slot: &Mutex<Option<AudioConsumer>>,
     format: AudioFormatInfo,
     shared: Arc<AudioShared>,
 ) -> AudioProducer {
-    // A pull that panicked while holding the slot poisons it. What is
-    // behind the lock is replaced wholesale here, so nothing this call
-    // does depends on the previous holder having finished — and panicking
-    // instead would take the opener thread down on every later seek and
-    // format change, where `read_audio` merely serves silence.
+    // A pull that panicked while holding the slot poisons it. The contents
+    // are replaced wholesale here, so nothing depends on the previous
+    // holder having finished. Panicking instead would take the opener
+    // thread down on every later seek and format change, where `read_audio`
+    // only serves silence.
     let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
     let (producer, consumer) = audio_pair(format, shared);
     *slot = Some(consumer);
@@ -395,24 +381,21 @@ pub fn install_audio_generation(
 /// block to that generation's origin. Private because the reset is only
 /// safe with the consumer slot held: go through `install_audio_generation`.
 fn audio_pair(format: AudioFormatInfo, shared: Arc<AudioShared>) -> (AudioProducer, AudioConsumer) {
-    // Saturating throughout: the announced rate reaching u32::MAX wraps a
-    // plain multiply, and the wrap is silent in a release build. The
-    // announced values still go to the shared state below verbatim — this
-    // bounds the allocation, not the timeline.
+    // Saturating: an announced rate near u32::MAX would wrap a plain
+    // multiply, silently in a release build. The announced values still go
+    // to the shared state verbatim; this bounds the allocation, not the
+    // timeline.
     let frames = format.sample_rate.max(8000).saturating_mul(RING_SECONDS);
-    // The cap counts samples while both ends of the ring work in whole
-    // frames, so it is rounded down to one: a channel count that does not
-    // divide it would otherwise leave slots no push or pull can use.
+    // The cap counts samples but both ends work in whole frames, so it is
+    // rounded down to a whole frame. Otherwise a channel count that does
+    // not divide it would leave slots no push or pull can use.
     //
-    // A geometry whose single frame is wider than the cap has no working
-    // answer: neither the rounded-down zero nor the flat cap holds one
-    // frame, so nothing can ever be pushed. The flat cap keeps the
-    // allocation bounded, which is what matters here, and the line says
-    // the lane is inert rather than leaving it to look like a stall. It
-    // is not reachable from a decoder — this is sized from what one
-    // reports, and every adapter screens its own channel count far below
-    // the cap (8 on the MF and software audio routes, 2 for Opus, 64 on
-    // MediaCodec) against a cap of six million samples.
+    // A single frame wider than the cap cannot work either way: nothing can
+    // ever be pushed. The flat cap keeps the allocation bounded and the log
+    // line says the track is inert, so it does not look like a stall. No
+    // decoder can reach this, since every adapter limits its channel count
+    // far below the cap (8 on the MF and software routes, 2 for Opus, 64 on
+    // MediaCodec).
     let channels = format.channels.max(1) as usize;
     let cap = match MAX_RING_SAMPLES / channels * channels {
         0 => {
@@ -436,9 +419,8 @@ fn audio_pair(format: AudioFormatInfo, shared: Arc<AudioShared>) -> (AudioProduc
     shared.clock_now_us.store(i64::MIN, Ordering::Relaxed);
     shared.pushed_frames.store(0, Ordering::Relaxed);
     shared.trimmed_frames.store(0, Ordering::Relaxed);
-    // trimmed_frames_total is deliberately not reset here. It is what the
-    // diagnostics quote, and a session total that restarts at a seek reports
-    // less loss than the session actually had.
+    // trimmed_frames_total is deliberately not reset: it is a session
+    // total.
     (
         AudioProducer {
             ring: producer,
@@ -466,10 +448,10 @@ pub fn new_audio_shared() -> Arc<AudioShared> {
     Arc::new(AudioShared::new())
 }
 
-/// The C player's priming rule: given a chunk starting at `pts_us` with
-/// `frames` frames at `rate`, how many leading frames precede the media
-/// origin and must be dropped (rounding up, so a partially primed frame is
-/// dropped rather than half-played).
+/// Given a chunk starting at `pts_us` with `frames` frames at `rate`, how
+/// many leading frames precede the media origin and must be dropped.
+/// Rounds up, so a partially primed frame is dropped rather than
+/// half-played.
 pub fn frames_before_origin(pts_us: i64, frames: usize, rate: u32) -> usize {
     if pts_us >= 0 || frames == 0 || rate == 0 {
         return 0;
@@ -497,10 +479,10 @@ mod tests {
     }
 
     /// The sizing factors are announced by the stream, so the ring must
-    /// stay bounded whatever they say. Unbounded, a saturated rate wraps
-    /// the frame count — silently, in a release build — and lands a
-    /// multi-gigabyte request; the shared state still carries the
-    /// announced values, which the playhead maths reads verbatim.
+    /// stay bounded whatever they say. Unbounded, a saturated rate would
+    /// wrap the frame count (silently, in a release build) and request
+    /// gigabytes. The shared state still carries the announced values,
+    /// which the playhead maths reads verbatim.
     #[test]
     fn a_hostile_geometry_cannot_size_the_ring() {
         for (sample_rate, channels) in [
@@ -555,8 +537,8 @@ mod tests {
     /// The marker ring is fixed and chunk cadence is the stream's to
     /// choose, so a source can offer more gapped chunks than there are
     /// slots. Dropping the overflow would leave the consumer extrapolating
-    /// a stale chunk's timeline over the ones that followed, which reaches
-    /// the serve-side lateness trim as an arbitrary error and costs audio.
+    /// a stale chunk's timeline over the ones that followed, and the
+    /// lateness trim would discard audio on the resulting error.
     #[test]
     fn a_gapped_stream_cannot_outrun_the_pts_marker_ring() {
         const FRAMES: usize = 16;
@@ -641,13 +623,11 @@ mod tests {
         );
     }
 
-    /// A generation swap — a seek's flush, or a mid-stream format change —
-    /// rebuilds the ring and resets the shared block. A pull holds the
-    /// consumer slot for its whole duration, so one already in flight must
-    /// not be able to land the retired generation's playhead, consumed
+    /// A generation swap (a seek's flush, or a mid-stream format change)
+    /// rebuilds the ring and resets the shared block. A pull already in
+    /// flight must not land the retired generation's playhead, consumed
     /// count and pull wall on top of that reset: the clock masters on the
-    /// playhead, and the previous timeline's absolute position against the
-    /// new one is the whole seek distance of error.
+    /// playhead, and the error would be the whole seek distance.
     #[test]
     fn a_generation_swap_cannot_be_undone_by_a_pull_in_flight() {
         let format = || AudioFormatInfo {
@@ -681,11 +661,9 @@ mod tests {
                 install_audio_generation(&slot, format(), shared)
             })
         };
-        // The barrier says the swap is under way. What orders it behind
-        // the pull is the slot guard, not the moment the thread reaches
-        // the lock, so there is nothing here for a loaded machine to get
-        // wrong — and a timer long enough to be sure on a quiet one is a
-        // timer that proves nothing on a busy one.
+        // The barrier says the swap is under way. The slot guard, not
+        // timing, orders it behind the pull, so a loaded machine cannot
+        // change the outcome.
         at_the_swap.wait();
         let mut in_flight = in_flight;
         in_flight.as_mut().expect("consumer").pull(&mut out, 2_000);
@@ -728,8 +706,7 @@ mod tests {
         );
     }
 
-    /// The whole ladder inherits the latency offset — with a sink
-    /// latency reported mid-play, the clock slews back by exactly that
+    /// With a sink latency reported mid-play, the clock slews back by that
     /// offset (within the dead band) and settles there.
     #[test]
     fn ladder_inherits_the_latency_offset() {
@@ -772,9 +749,9 @@ mod tests {
         let before = clock.now(wall) - shared.playhead(wall).unwrap();
         assert!(before.abs() <= dead_band, "unconverged baseline: {before}");
 
-        // Sink latency arrives: the master shifts back 100 ms; the clock
-        // must slew (never snap — 100 ms is under the snap threshold)
-        // until it sits within the dead band of the shifted master.
+        // Sink latency arrives and the master shifts back 100 ms. That is
+        // under the snap threshold, so the clock must slew until it sits
+        // within the dead band of the shifted master.
         shared.output_latency_us.store(100_000, Ordering::Relaxed);
         let mut slewed = false;
         for _ in 0..600 {
@@ -794,8 +771,8 @@ mod tests {
             error.abs() <= dead_band,
             "clock should settle onto the compensated master, error {error}"
         );
-        // And the settled position is ~the latency behind the raw pull
-        // playhead: video due-times shifted to the audible timeline.
+        // The settled position is about the latency behind the raw pull
+        // playhead, so video due-times follow the audible timeline.
         let raw = shared.playhead(wall).unwrap() + MediaTime::from_millis(100);
         let shift = raw - clock.now(wall);
         assert!(
@@ -804,10 +781,10 @@ mod tests {
         );
     }
 
-    /// The pts timeline, not the sample count, owns the playhead. A
-    /// source stamping 1024-sample chunks ~1010 samples of pts apart (the
-    /// ms-quantised passthrough class) must not drag the master ahead of
-    /// its own timeline.
+    /// The pts timeline, not the sample count, drives the playhead. A
+    /// source stamping 1024-sample chunks ~1010 samples of pts apart (as
+    /// ms-quantised passthrough sources do) must not drag the master ahead
+    /// of its own timeline.
     #[test]
     fn pts_timeline_owns_the_playhead() {
         let shared = new_audio_shared();
@@ -844,11 +821,10 @@ mod tests {
         );
     }
 
-    /// A head that runs late against the session clock trims in
-    /// bounded steps instead of saturating the ring — the surplus samples
-    /// have no slot in the timeline. The clock mirror is driven at wall
-    /// rate while the fixture's pts advance at half the sample count (the
-    /// ms-quantised passthrough class, exaggerated).
+    /// A head that runs late against the session clock trims in bounded
+    /// steps. The clock mirror is driven at wall rate while the fixture's
+    /// pts advance at half the sample count (an exaggerated ms-quantised
+    /// passthrough source).
     #[test]
     fn serve_trims_a_head_late_against_the_clock() {
         let shared = new_audio_shared();
@@ -899,12 +875,10 @@ mod tests {
     /// The session trim total survives a generation change; the
     /// per-generation counter does not.
     ///
-    /// A seek reinstalls the audio generation, which resets the shared block.
-    /// Diagnostics quote the total, so if that reset reached it the capture
-    /// column would fall after a seek and report less loss than the session
-    /// had — while the event beside it, rate-limited against a high-water
-    /// mark held across generations, would go quiet until the new generation
-    /// passed the old total.
+    /// A seek reinstalls the audio generation, which resets the shared
+    /// block. If that reset reached the total, the capture column would fall
+    /// after a seek and the rate-limited trim event would go quiet until the
+    /// new generation passed the old total.
     #[test]
     fn the_session_trim_total_survives_a_generation_change() {
         fn trim_some(shared: &Arc<AudioShared>) {
@@ -954,10 +928,9 @@ mod tests {
             second_total > first_total,
             "the session total only climbs: {second_total} against {first_total}"
         );
-        // The two together, which is the whole point: the per-generation counter
-        // restarted and carries only this generation's share, while the total
-        // carries both. Either one alone passes with the reset reaching the wrong
-        // counter.
+        // Both checks are needed: the per-generation counter restarted and
+        // carries only this generation's share, while the total carries both.
+        // Either alone passes with the reset reaching the wrong counter.
         assert_eq!(
             second_total,
             first_total + second_generation,
@@ -965,8 +938,8 @@ mod tests {
         );
     }
 
-    /// A completely full ring on an honest timeline (the VOD startup-burst
-    /// shape) must never trim: depth is not the signal, lateness is.
+    /// A full ring on an honest timeline (the on-demand startup burst) must
+    /// never trim: the trigger is lateness, not depth.
     #[test]
     fn full_ring_on_an_honest_timeline_never_trims() {
         let shared = new_audio_shared();

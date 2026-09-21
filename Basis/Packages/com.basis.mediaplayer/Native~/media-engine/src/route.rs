@@ -1,26 +1,22 @@
-//! Platform decoder routing: one factory pair per platform behind
-//! the same signatures, so the pipeline threads stay platform-free. A
-//! refusal is typed — the caller turns it into a CodecRefused diagnostic,
-//! mutes the track and plays on; a software fallback engaging is reported,
-//! never silent.
+//! Platform decoder routing: one factory pair per platform behind the same
+//! signatures, so the pipeline threads stay platform-free. A refusal is
+//! typed: the caller turns it into a CodecRefused diagnostic, mutes the
+//! track and plays on. A software fallback engaging is reported.
 //!
-//! The route ladder honours the user's decode preference:
-//! hardware-with-fallback (default) / hardware-only / software-only. A
-//! rung the platform does not have is a typed refusal. Software routes
-//! additionally enforce the performance cap: content over 1080p60
-//! coded pixel rate refuses in the CodecRefused posture rather than
-//! melting a CPU the platform gave no hardware path for.
+//! Routing honours the user's decode preference: hardware with fallback
+//! (the default), hardware only, or software only. A route the platform
+//! does not have is a typed refusal. Software routes also enforce a
+//! performance cap, refusing content over 1080p60 coded pixel rate instead
+//! of overloading a CPU that has no hardware path.
 
 use crate::DecodePreference;
 use media_decode::{AudioDecoder, VideoDecoder};
 
 /// The software-route cap: coded pixel rate ≤ 1920 × 1088 × 60
-/// (~125 Mpx/s — real 1080p with macroblock padding passes). Where no
-/// frame rate is stated, the gate is dimensions alone (≤1920×1088); the
-/// budget form admits cost-equivalent shapes such as 1440p30 when a
-/// demuxer states the rate. Tightens on field evidence of weak-CPU
-/// struggle in the 1080p30–60 band. Android's routes are all
-/// platform-MediaCodec and sit outside the gate.
+/// (~125 Mpx/s, so 1080p with macroblock padding passes). Where no frame
+/// rate is stated, the gate is dimensions alone (≤1920×1088). With a rate,
+/// the budget form admits cost-equivalent shapes such as 1440p30.
+/// Android's routes are all platform MediaCodec and sit outside the gate.
 #[cfg(not(target_os = "android"))]
 pub const SOFTWARE_CAP_WIDTH: u32 = 1920;
 #[cfg(not(target_os = "android"))]
@@ -42,8 +38,7 @@ pub fn software_cap_allows(width: u32, height: u32, fps: Option<u32>) -> bool {
 
 #[cfg(not(target_os = "android"))]
 fn software_cap_check(width: u32, height: u32) -> Result<(), media_decode::DecodeError> {
-    // No demuxer states a frame rate yet, so the dimensions-only arm is
-    // the live gate; the pixel-rate form activates when one does.
+    // No demuxer states a frame rate, so only the dimensions arm applies.
     if software_cap_allows(width, height, None) {
         Ok(())
     } else {
@@ -54,8 +49,8 @@ fn software_cap_check(width: u32, height: u32) -> Result<(), media_decode::Decod
     }
 }
 
-/// The route a video format resolved to: which decoder, and whether the
-/// platform path was absent so the software floor carried it.
+/// The route a video format resolved to: the decoder, its label, and why
+/// the software route carried it if the hardware path was absent.
 pub struct VideoRoute {
     pub decoder: Box<dyn VideoDecoder>,
     pub label: &'static str,
@@ -68,9 +63,9 @@ pub struct VideoRoute {
 }
 
 /// Setting this to a number of milliseconds makes every routed video
-/// decoder take that long over each frame it yields: a decoder too slow
-/// for its stream, on demand. It is the lever for the rows that pin what
-/// slow video may cost, and for reproducing that by hand on a device.
+/// decoder sleep that long for each frame it yields, simulating a decoder
+/// too slow for its stream. Used by the slow-video tests and for
+/// reproducing the case by hand on a device.
 pub const SLOW_VIDEO_DECODE_ENV: &str = "BASIS_MEDIA_SLOW_VIDEO_DECODE_MS";
 
 struct SlowVideoDecoder {
@@ -163,9 +158,9 @@ fn route_video_decoder(
         VideoCodec::Vp8 => None,
     };
 
-    // Hardware rung first unless the user opted out. Construction runs
-    // the two-leg claim (MFT present + GPU profile/format/config at this
-    // resolution), so a failure here is the honest "no hardware path".
+    // Hardware first unless the user opted out. Construction checks both
+    // the MFT and the GPU's profile/format/config at this resolution, so a
+    // failure here means there is no hardware path.
     let mut hw_failure: Option<String> = None;
     if preference != DecodePreference::SoftwareOnly {
         if let Some(hw) = hw_codec {
@@ -195,17 +190,17 @@ fn route_video_decoder(
         }
     }
 
-    // Software rung — the direct route under software_only, the reported
-    // fallback otherwise. The software cap gates it before any decoder builds.
+    // Software: the direct route under software-only, a reported fallback
+    // otherwise. The cap is checked before any decoder is built.
     software_cap_check(coded_width, coded_height)?;
     let fallback = hw_failure.map(|e| format!("hardware decode unavailable ({e})"));
     open_windows_software(codec, coded_width, coded_height, fallback)
 }
 
-/// The Windows CPU routes: in-box
-/// H.264 sync MFT, Store VP9 extension, AV1 on rav1d with the Store
-/// extension quarantined to last (it misbehaves under sync driving —
-/// ProcessInput blocks for over a second when its queue fills).
+/// The Windows CPU routes: the in-box H.264 MFT, the Store VP9 extension,
+/// and AV1 on rav1d. The Store AV1 extension is tried only if rav1d fails,
+/// because driven synchronously its `ProcessInput` blocks for over a
+/// second when its queue fills.
 #[cfg(windows)]
 fn open_windows_software(
     codec: media_demux::VideoCodec,
@@ -260,12 +255,10 @@ fn open_windows_software(
     }
 }
 
-/// Android: every route is the platform MediaCodec stack
-/// (platform-decoder-or-typed-refusal is the ceiling for the patented and
-/// the royalty-free video codecs alike; Quest has no software fallback
-/// for avc/hevc/vp9 and the rav1d floor has no Vulkan upload path yet, so
-/// a missing platform decoder is a typed refusal, observable, not
-/// silent). The software-only preference has no rung here.
+/// Android: every route is the platform MediaCodec stack. Quest has no
+/// software fallback for avc/hevc/vp9 and rav1d has no Vulkan upload path,
+/// so a missing platform decoder is a typed refusal. The software-only
+/// preference has no route here.
 #[cfg(target_os = "android")]
 fn route_video_decoder(
     codec: media_demux::VideoCodec,
@@ -298,11 +291,10 @@ fn route_video_decoder(
     })
 }
 
-/// Headless platforms (Linux and anything else without a platform
-/// decoder adapter): only the in-process floors route. The patented
-/// codecs never bundle, and the VAAPI adapter is future work, so
-/// H.264/H.265/VP9/VP8 are typed refusals here — observable, never
-/// silent. The hardware-only preference has no rung.
+/// Headless platforms (Linux and anything else without a platform decoder
+/// adapter): only AV1 on rav1d routes. Patented codecs are never bundled,
+/// so H.264/H.265/VP9/VP8 are typed refusals. The hardware-only preference
+/// has no route.
 #[cfg(not(any(windows, target_os = "android")))]
 fn route_video_decoder(
     codec: media_demux::VideoCodec,
@@ -357,9 +349,9 @@ pub fn open_audio_decoder(
     })
 }
 
-/// Android: AAC/MP3 decode on the platform (the patented codecs
-/// never bundle); FLAC and Opus stay on the in-process floors for one
-/// behaviour across platforms.
+/// Android: AAC and MP3 decode on the platform, since patented codecs are
+/// never bundled. FLAC, Opus and PCM use the in-process decoders for the
+/// same behaviour on every platform.
 #[cfg(target_os = "android")]
 pub fn open_audio_decoder(
     codec: media_demux::AudioCodec,
@@ -389,9 +381,8 @@ pub fn open_audio_decoder(
     })
 }
 
-/// Headless platforms: FLAC and Opus on the in-process floors; AAC and
-/// MP3 have no platform decoder here and refuse typed (the
-/// patented codecs never bundle).
+/// Headless platforms: FLAC, Opus and PCM use the in-process decoders. AAC
+/// and MP3 have no platform decoder here and are typed refusals.
 #[cfg(not(any(windows, target_os = "android")))]
 pub fn open_audio_decoder(
     codec: media_demux::AudioCodec,
@@ -430,9 +421,8 @@ mod tests {
         assert!(!software_cap_allows(1920, 1088, Some(120)));
     }
 
-    /// The enforcement point: a software route resolving for over-cap
-    /// content refuses typed before any decoder builds, on every
-    /// preference that lands on the software rung.
+    /// A software route for over-cap content refuses before any decoder is
+    /// built.
     #[cfg(windows)]
     #[test]
     fn software_route_refuses_over_cap_content() {

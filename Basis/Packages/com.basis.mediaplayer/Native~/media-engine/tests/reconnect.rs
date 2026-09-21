@@ -1,7 +1,7 @@
-//! The resilience path end to end: a live TS server that kills the first
-//! connection mid-stream; the session must rebuild the transport (with the
-//! banked depth playing through the outage), rejoin at the live edge
-//! mid-GOP, and keep presenting — no Error state, no manual intervention.
+//! Live reconnect end to end: a live TS server kills the first connection
+//! mid-stream, and the session must rebuild the transport (the banked depth
+//! playing through the outage), rejoin at the live edge mid-GOP and keep
+//! presenting without entering Error.
 
 #![cfg(windows)]
 
@@ -87,7 +87,7 @@ fn live_session_survives_a_dropped_connection() {
     let mut request = OpenRequest::new(url);
     request.allow_local_addresses = true;
     request.liveness = SourceLiveness::Live;
-    // A shallow bank keeps the run short; the point is the rebuild, not
+    // A shallow bank keeps the run short; this tests the rebuild, not
     // riding out the gap.
     request.buffer_depth_ms = Some(1000);
     let mut session = Session::open(request);
@@ -110,8 +110,8 @@ fn live_session_survives_a_dropped_connection() {
         let decoded = shared.frames_decoded.load(Ordering::Relaxed);
         if connections.load(Ordering::SeqCst) >= 2 {
             let baseline = *decoded_at_drop.get_or_insert(decoded);
-            // Recovered = decode moved on well past the pre-drop point
-            // (a whole GOP, so it cannot be pool residue).
+            // Recovered means decode moved a whole GOP past the pre-drop
+            // point, so it cannot be pool residue.
             if decoded > baseline + 60 {
                 recovered = true;
                 break;
@@ -135,13 +135,12 @@ fn live_session_survives_a_dropped_connection() {
     session.close();
 }
 
-/// Auto is the default liveness both engine-side and on the managed
-/// component, so a plain live URL settles it by probing — and that probe
-/// is a GET whose 200 *is* the stream. Opening a second connection to
-/// read the same bytes spends a handshake out of the join budget, rejoins
-/// the edge later than it left off, and is refused outright by an origin
-/// serving one client at a time. The live lane adopts the probe's body,
-/// so the whole session is one connection.
+/// Auto is the default liveness in the engine and on the managed
+/// component, so a plain live URL settles it by probing, and that probe is
+/// a GET whose 200 *is* the stream. A second connection would cost a
+/// handshake, rejoin the edge later than the probe left off, and be
+/// refused by an origin serving one client at a time. The live path adopts
+/// the probe's body, so the whole session is one connection.
 #[test]
 fn an_auto_live_session_costs_one_connection() {
     let bytes = std::fs::read(
@@ -150,12 +149,12 @@ fn an_auto_live_session_costs_one_connection() {
     )
     .expect("fixture readable");
     let rate = bytes.len() as u64 / 30;
-    // Never killed: this row is about the join, not the rebuild.
+    // Never killed: this tests the join, not the rebuild.
     let (url, connections) = spawn_live_server(bytes, rate, Duration::from_secs(3600));
 
     let mut request = OpenRequest::new(url);
     request.allow_local_addresses = true;
-    // Left at Auto deliberately — that is the lane under test.
+    // Left at Auto deliberately: that is the path under test.
     assert_eq!(request.liveness, SourceLiveness::Auto);
     request.buffer_depth_ms = Some(1000);
     let mut session = Session::open(request);
@@ -186,9 +185,8 @@ fn an_auto_live_session_costs_one_connection() {
         "the liveness probe reopened instead of handing its body over"
     );
 
-    // Without this the row proves nothing: a source that read as
-    // on-demand would also take one connection, and never touch the
-    // handover at all.
+    // Without this the test proves nothing: a source read as on-demand
+    // would also take one connection and never touch the handover.
     let events = session.diag().take_events();
     assert!(
         events
@@ -199,11 +197,11 @@ fn an_auto_live_session_costs_one_connection() {
     session.close();
 }
 
-/// The probe settles Auto as live and hands its body to the live lane —
-/// and the lane has to run the Bank as live, not as the request's
-/// on-demand default. The observable half of that is the engine's own
-/// liveness, which is what refuses a pause. A session that pauses here
-/// was running a live edge in the on-demand posture.
+/// The probe settles Auto as live and hands its body to the live path,
+/// which must run the Bank as live, not as the request's on-demand
+/// default. The observable part is the engine's own liveness, which
+/// refuses a pause. A session that pauses here was running a live edge as
+/// on-demand.
 #[test]
 fn an_auto_inferred_live_session_is_live_to_the_engine() {
     let bytes = std::fs::read(

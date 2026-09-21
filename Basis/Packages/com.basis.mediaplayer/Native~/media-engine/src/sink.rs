@@ -1,13 +1,12 @@
 //! Platform video sink: the video thread's half of presentation.
-//! Frame *selection* normally lives in the Unity render event (see
-//! `present.rs` — due-ness at display cadence with a vsync of lookahead);
-//! this sink configures the output target and carries the tick-paced
-//! fallback for consumers that issue no render events (headless sessions,
-//! a non-rendering app). On Windows the shared D3D11 texture presenter
-//! lives in `PipelineShared::presenter` so the render event and the
-//! fallback drive the same conversion pass; on Android the fallback has
-//! nowhere to draw (the conversion pass needs Unity's device), so a
-//! fallback-presented frame is simply consumed.
+//!
+//! Frame selection normally happens in the Unity render event
+//! (`present.rs`). This sink configures the output target and carries the
+//! tick-paced fallback for consumers that issue no render events, such as
+//! headless sessions. On Windows the shared D3D11 texture presenter lives
+//! in `PipelineShared::presenter`, so the render event and the fallback
+//! drive the same conversion pass. On Android the conversion pass needs
+//! Unity's device, and a fallback-presented frame is just consumed.
 
 use crate::pipeline::PipelineShared;
 use crate::pool::Lease;
@@ -25,17 +24,16 @@ impl VideoSink {
 
     /// (Re)build the shared texture for a newly announced coded size and
     /// expose its handle to the managed side. `decode_device` is the
-    /// hardware route's D3D11 device — the presenter builds on it so
-    /// decoded slices bind straight into the conversion pass; `None`
-    /// (software routes) keeps the presenter's own device.
+    /// hardware route's D3D11 device: the presenter builds on it so decoded
+    /// slices bind straight into the conversion pass. `None` (software
+    /// routes) keeps the presenter's own device.
     ///
     /// # Safety
-    /// `decode_device`, when `Some`, must be a live `ID3D11Device*` that
-    /// stays live for the duration of the call. The presenter clones its
-    /// own reference, so the caller's may drop once this returns; what it
-    /// cannot survive is the device going away underneath the call, which
-    /// turns the vtable dispatch inside `new_on_device` into a read of
-    /// freed memory as a function pointer.
+    /// `decode_device`, when `Some`, must be a live `ID3D11Device*` for the
+    /// duration of the call. The presenter clones its own reference, so the
+    /// caller's may drop once this returns. If the device went away during
+    /// the call, the vtable dispatch inside `new_on_device` would read freed
+    /// memory as a function pointer.
     pub unsafe fn configure(
         &mut self,
         px: &PipelineShared,
@@ -96,7 +94,7 @@ impl VideoSink {
     }
 }
 
-/// Convert one leased frame through the presenter — shared by the video
+/// Convert one leased frame through the presenter. Shared by the video
 /// thread's fallback present and the render event (`present.rs`). The
 /// DXVA slice stays alive for the whole call (the lease holds the frame),
 /// so the GPU copy is ordered ahead of the decoder reusing the surface.
@@ -157,9 +155,9 @@ impl VideoSink {
     }
 
     /// Fallback present: the Vulkan conversion pass runs only inside a
-    /// render event, so with no render consumer live the due frame is
-    /// consumed here — the pipeline keeps flowing (position, EOS, buffer
-    /// accounting) and the frame's buffer returns to its image reader.
+    /// render event, so with no render consumer the due frame is consumed
+    /// here. Position, EOS and buffer accounting keep moving, and the
+    /// frame's buffer returns to its image reader.
     pub fn present(
         &mut self,
         _px: &PipelineShared,
@@ -169,10 +167,9 @@ impl VideoSink {
     }
 }
 
-/// Headless platforms: no present target exists, so the tick-paced
-/// fallback consumes each due frame — the pipeline keeps flowing
-/// (position, EOS, buffer accounting) and a consumed frame counts as
-/// presented for the null-sink counters.
+/// Headless platforms have no present target. The tick-paced fallback
+/// consumes each due frame to keep position, EOS and buffer accounting
+/// moving, and a consumed frame counts as presented.
 #[cfg(not(any(windows, target_os = "android")))]
 pub struct VideoSink {
     configured: bool,

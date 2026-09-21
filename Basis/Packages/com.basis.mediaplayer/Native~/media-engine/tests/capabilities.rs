@@ -1,7 +1,6 @@
-//! The capability contract: the serialisation shape is pinned
-//! byte-exact (the blob is a versioned ABI surface — field renames are
-//! breaking), and the built set is checked against what this build
-//! actually routes.
+//! The capability contract. The serialisation shape is pinned byte-exact
+//! because the blob is a versioned ABI surface and field renames are
+//! breaking. The built set is checked against what this build routes.
 
 use media_engine::{AudioCap, CapabilitySet, Route, TransportCap, VideoCap, capabilities};
 
@@ -64,9 +63,9 @@ fn built_set_matches_this_build() {
     assert_eq!(set.version, media_engine::CAPABILITIES_VERSION);
     assert_eq!(set.platform, "windows-x64");
 
-    // Software rungs: H.264 (in-box MFT) and AV1 (the rav1d floor) are
-    // constant; VP9 appears exactly when the Store extension probe finds
-    // a decoder. Every software entry states the enforced ceiling.
+    // Software routes: H.264 (in-box MFT) and AV1 (rav1d) are constant;
+    // VP9 appears exactly when the Store extension probe finds a decoder.
+    // Every software entry states the enforced ceiling.
     let software = |c: &str| {
         set.video
             .iter()
@@ -83,8 +82,8 @@ fn built_set_matches_this_build() {
             cap.codec
         );
     }
-    // Hardware entries appear exactly where the two-leg DXVA probe
-    // passes, with a measured resolution ceiling (fps unstated).
+    // Hardware entries appear exactly where the DXVA probe passes, with a
+    // measured resolution ceiling (fps unstated).
     for (codec, hw) in [
         ("h264", decode_mf::HwCodec::H264),
         ("h265", decode_mf::HwCodec::H265),
@@ -104,7 +103,7 @@ fn built_set_matches_this_build() {
         }
     }
 
-    // The adapters' real screens.
+    // The adapters' own channel limits.
     let channels = |c: &str| {
         set.audio
             .iter()
@@ -132,10 +131,9 @@ fn built_set_matches_this_build() {
     }
 }
 
-/// Headless builds route only the in-process floors; every platform
-/// entry here is a will-decode claim for a decoder compiled into this
-/// binary, and the platform codecs (H.264/AAC/MP3) must be absent —
-/// listing them would be false claims.
+/// Headless builds route only the in-process decoders. Every entry is a
+/// will-decode claim for a decoder compiled into this binary, so the
+/// platform codecs (H.264/AAC/MP3) must be absent.
 #[cfg(not(any(windows, target_os = "android")))]
 #[test]
 fn built_set_matches_this_build() {

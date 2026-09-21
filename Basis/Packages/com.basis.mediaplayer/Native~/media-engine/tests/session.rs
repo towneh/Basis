@@ -28,8 +28,8 @@ fn wait_for(deadline: Duration, mut check: impl FnMut() -> bool) -> bool {
 }
 
 /// Audio-only: the session plays without a video track, and Ended waits
-/// for the ring's tail to be consumed instead of firing at demux EOS —
-/// the pulled total must cover (nearly) the whole fixture.
+/// for the ring's tail to be consumed instead of firing at demux EOS. The
+/// pulled total must cover (nearly) the whole fixture.
 #[test]
 fn audio_only_plays_out_the_tail() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -73,8 +73,8 @@ fn audio_only_plays_out_the_tail() {
         State::Ended as u32,
         "audio-only session must end naturally"
     );
-    // The fixture is ~6 s at 48 kHz; the tail must not be cut at EOS
-    // (the old behaviour lost up to the ring depth, 2 s).
+    // The fixture is ~6 s at 48 kHz; the tail must not be cut at EOS,
+    // which would lose up to the ring depth (2 s).
     assert!(
         pulled >= 5 * 48_000,
         "pulled only {pulled} frames — the ring tail was cut"
@@ -86,17 +86,16 @@ fn audio_only_plays_out_the_tail() {
     session.close();
 }
 
-/// The A/V twin of `audio_only_plays_out_the_tail`. A session carrying both
-/// kinds of track used to declare Ended the moment the last *picture* was
-/// presented, with no regard for what the audio ring still held, and
-/// `read_audio` serves nothing outside Playing — so whatever had not been
-/// pulled by then was simply unreachable.
+/// The A/V twin of `audio_only_plays_out_the_tail`. A session with both
+/// kinds of track must not declare Ended when the last *picture* is
+/// presented while the audio ring still holds sound: `read_audio` serves
+/// nothing outside Playing, so the rest would be unreachable.
 ///
 /// Asserted as an invariant rather than a frame total, because a total
 /// cannot separate this from the serve-side lateness trim, which discards
-/// late audio deliberately and would be blamed for the same shortfall. At
-/// Ended every frame pushed into the ring must have been accounted for:
-/// handed to the consumer, or trimmed. Anything else was cut.
+/// late audio deliberately. At Ended every frame pushed into the ring must
+/// be accounted for: handed to the consumer, or trimmed. Anything else was
+/// cut.
 #[test]
 fn an_av_session_plays_out_the_audio_tail() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -157,13 +156,13 @@ fn an_av_session_plays_out_the_audio_tail() {
 ///
 /// The two decode threads observe a seek independently, so the video thread can
 /// process its Flush, run the short remainder of the new generation and reach
-/// its end check while the audio thread is still on the old one. Reading a bare
-/// "audio is done" flag there ends the session on the previous generation's
-/// answer, cutting the new one off before it plays. The published value carries
-/// the generation it belongs to for that reason.
+/// its end check while the audio thread is still on the old one. A bare "audio
+/// is done" flag would end the session on the previous generation's answer,
+/// cutting the new one off before it plays, so the published value carries its
+/// generation.
 ///
-/// This row guards the outcome rather than the race: the window is two threads
-/// wide and cannot be scheduled on demand.
+/// This guards the outcome rather than the race, which cannot be scheduled on
+/// demand.
 #[test]
 fn a_seek_near_eos_does_not_end_the_new_generation_early() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -195,9 +194,9 @@ fn a_seek_near_eos_does_not_end_the_new_generation_early() {
 
     session.seek(MediaTime::from_millis(5_400));
 
-    // The new generation has only ~0.6 s to play, which is the point: the
-    // video thread finishes it almost at once, so if the end check took the
-    // old generation's answer the session is Ended before any of it is heard.
+    // The new generation has only ~0.6 s to play, deliberately: the video
+    // thread finishes it almost at once, so if the end check took the old
+    // generation's answer the session would end before any of it is heard.
     let mut after = 0u64;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(20) {
@@ -215,12 +214,12 @@ fn a_seek_near_eos_does_not_end_the_new_generation_early() {
     session.close();
 }
 
-/// The PCM interleave for multichannel audio is WAV/channel-mask order —
-/// FL FR C LFE BL BR — the order every decoder behind the engine emits
-/// (Media Foundation's PCM convention here; the Android AAC decoder's FDK
-/// default and FLAC's stored order elsewhere). The managed stereo downmix
-/// keys its matrix on it. Pinned with a channel-marker fixture: one
-/// distinct sine per speaker, identified per interleave slot.
+/// The PCM interleave for multichannel audio is WAV/channel-mask order (FL
+/// FR C LFE BL BR), the order every decoder behind the engine emits (Media
+/// Foundation's PCM convention here; the Android AAC decoder's FDK default
+/// and FLAC's stored order elsewhere). The managed stereo downmix keys its
+/// matrix on it. Checked with a channel-marker fixture: one distinct sine
+/// per speaker, identified per interleave slot.
 #[test]
 fn multichannel_interleave_is_wav_order() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -292,8 +291,8 @@ fn multichannel_interleave_is_wav_order() {
     }
 }
 
-/// The ABI-facing latency setter clamps to the engine's sane range
-/// (0..=500 ms) before the playhead subtracts it.
+/// The ABI-facing latency setter clamps to 0..=500 ms before the playhead
+/// subtracts it.
 #[test]
 fn audio_latency_setter_clamps_to_a_sane_range() {
     let mut session = Session::open(OpenRequest::new(fixture_path()));
@@ -314,11 +313,10 @@ fn audio_latency_setter_clamps_to_a_sane_range() {
     session.close();
 }
 
-/// A pause that lands while the open is still settling is not a pause:
-/// nothing is playing yet, so there is nothing to hold, and the request
-/// must not be carried forward into the session that follows. The state
-/// is read before the liveness flag, so a request that sees Opening
-/// returns before either could be misread across the open's publication.
+/// A pause that lands while the open is still settling is ignored: nothing
+/// is playing yet, and the request must not carry forward into the session
+/// that follows. The state is read before the liveness flag, so a request
+/// that sees Opening returns before either could be misread.
 #[test]
 fn a_pause_during_opening_is_not_carried_into_the_session() {
     let mut session = Session::open(OpenRequest::new(fixture_path()));
@@ -338,7 +336,7 @@ fn a_pause_during_opening_is_not_carried_into_the_session() {
 
 /// A live source is not pausable: the request is ignored and the state
 /// stays where it was. The fixture is on-demand, so liveness is forced,
-/// which is the same path the RTSP, WHEP and RIST lanes take.
+/// the same path RTSP, WHEP and RIST take.
 #[test]
 fn pause_is_ignored_on_a_live_source() {
     let request = OpenRequest {
@@ -499,10 +497,10 @@ fn assert_lands_paused_then_resumes(session: &Session, presented_before: u64) {
     );
 }
 
-/// A pause on the heels of a seek waits for the seek: the session lands
-/// the target, presents it and holds there. Freezing the wall under the
-/// seek instead leaves a session that reports Playing on a stopped clock
-/// and that `play` cannot restart.
+/// A pause straight after a seek waits for the seek: the session lands the
+/// target, presents it and holds there. Freezing the wall under the seek
+/// would leave a session reporting Playing on a stopped clock that `play`
+/// cannot restart.
 #[test]
 fn a_pause_straight_after_a_seek_lands_the_seek_first() {
     let mut session = open_playing();
@@ -537,7 +535,7 @@ fn a_seek_while_paused_stays_paused() {
 }
 
 /// The fixture's keyframes are at 0, 2 and 4 s, so a seek to 3.2 s lands
-/// the demuxer on 2 s. The session has to present the target's frame, not
+/// the demuxer on 2 s. The session must present the target's frame, not
 /// the keyframe's: paused, nothing would ever move it off the wrong one.
 #[test]
 fn a_paused_seek_between_keyframes_shows_the_target() {
@@ -566,8 +564,8 @@ fn a_paused_seek_between_keyframes_shows_the_target() {
         shared.state.load(Ordering::Relaxed),
         shared.position_us.load(Ordering::Relaxed),
     );
-    // The frame on screen, which is its own reading: position is the
-    // clock's, and a parked clock sits on the target whatever was shown.
+    // The frame on screen is read separately: position is the clock's, and
+    // a parked clock sits on the target whatever was shown.
     let shown = session.pipeline().presented_pts_us.load(Ordering::Relaxed);
     assert!(
         (TARGET_US..=TARGET_US + FRAME_US).contains(&shown),
@@ -576,11 +574,10 @@ fn a_paused_seek_between_keyframes_shows_the_target() {
     session.close();
 }
 
-/// Position is the clock's and not the picture's: it moves between frames.
-/// Read from presented frames it could only ever take a frame's pts, about
-/// thirty values a second on this fixture, and it would stand still
-/// whenever the picture did, taking captions, user data and shared
-/// playback with it.
+/// Position is the clock's, not the picture's, so it moves between frames.
+/// Read from presented frames it could only take a frame's pts (about
+/// thirty values a second here), and would stand still whenever the
+/// picture did, stalling captions, user data and shared playback.
 #[test]
 fn position_is_the_clocks_and_moves_between_frames() {
     let mut session = open_playing();
@@ -704,10 +701,10 @@ fn a_seek_while_paused_stays_paused_on_audio_only() {
     session.close();
 }
 
-/// A seek after Ended revives the pipeline — the generation advance
+/// A seek after Ended revives the pipeline: the generation advance
 /// rebuilds decode state and presentation resumes on the new timeline.
-/// Runs on the progressive MP4 lane and the HLS-TS VOD lane (whose
-/// demuxer latches an internal end state the seek must clear).
+/// Runs on progressive MP4 and on HLS-TS on-demand, whose demuxer latches
+/// an internal end state the seek must clear.
 #[test]
 fn seek_after_ended_revives_the_session() {
     for lane in [
@@ -760,19 +757,17 @@ fn seek_after_ended_revives_the_session() {
     }
 }
 
-/// The ordering row: a seek issued while the video thread is inside
-/// its EOS drain tail (the whole fixture released, banked at zero, the
-/// pool still presenting the tail). The demux thread parks the clock and
-/// advances the generation; until the video thread processes the Flush,
-/// stale pre-seek frames still sit in the pool — restarting the parked
-/// clock from one would resume the old timeline, race the state back to
-/// Playing, let the audio ring free-run through the settle, and end in a
-/// backwards snap to the audio master once the landed frames arrive
-/// (observed as a ~5 s settle with the tail audio consumed on Quest,
-/// where the OMX drain stretches the window; the ordering half
-/// reproduces here). Clean shape: the clock stays parked until the new
-/// generation's first frame, so the settle carries no master snap and
-/// the tail plays out at 1x.
+/// A seek issued while the video thread is inside its EOS drain (the whole
+/// fixture released, banked at zero, the pool still presenting the tail).
+/// The demux thread parks the clock and advances the generation, but until
+/// the video thread processes the Flush, stale pre-seek frames sit in the
+/// pool. Restarting the parked clock from one would resume the old
+/// timeline, race the state back to Playing, let the audio ring free-run
+/// through the settle, and end in a backwards snap to the audio master
+/// once the landed frames arrive. On Quest the OMX drain stretches this
+/// window to seconds. Expected: the clock stays parked until the new
+/// generation's first frame, so the settle has no master snap and the
+/// tail plays out at 1x.
 #[test]
 fn seek_during_eos_drain_settles_without_a_snap() {
     let mut session = Session::open(OpenRequest::new(fixture_path()));
@@ -781,7 +776,7 @@ fn seek_during_eos_drain_settles_without_a_snap() {
     let diag = session.diag().clone();
 
     // Pull audio like the Unity thread (budget at the stream rate) so the
-    // audio master is live — the defect surfaced through it.
+    // audio master is live, since the failure shows through it.
     let mut pulled = 0u64;
     let mut buf = vec![0f32; 2048];
     let mut epoch: Option<Instant> = None;
@@ -827,7 +822,7 @@ fn seek_during_eos_drain_settles_without_a_snap() {
         "never reached Playing"
     );
     // The whole 6 s fixture is released well before it finishes playing
-    // (VOD read-ahead + startup burst): banked zero with the position
+    // (read-ahead plus startup burst): banked zero with the position
     // mid-file means the Eos is through and the drain tail is presenting.
     assert!(
         pump_until(Duration::from_secs(10), &mut || {
@@ -878,10 +873,10 @@ fn seek_during_eos_drain_settles_without_a_snap() {
     session.close();
 }
 
-/// In-band CEA-608: the authored caption fixture's scripted cue
-/// sequence surfaces through the caption lane — text (including special +
-/// extended characters and the two-row roll-up), clears, and 2 s spacing
-/// keyed to the video PTS. The script is tools/gen-caption-fixture.py's.
+/// In-band CEA-608: the caption fixture's scripted cue sequence comes
+/// through the caption path, with text (including special and extended
+/// characters and the two-row roll-up), clears, and 2 s spacing keyed to
+/// the video PTS. The script is tools/gen-caption-fixture.py's.
 #[test]
 fn caption_lane_delivers_the_scripted_cues() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -932,10 +927,10 @@ fn caption_lane_delivers_the_scripted_cues() {
 
 /// A long decode-forward must not cost audio. The Bank starts releasing at
 /// its first push, the audio ring holds two seconds, and nothing pulls from
-/// it until the seek lands: pushed while the decoder is still working
-/// through the span, the Bank releases for as long as that takes and the
-/// overflow is discarded, which is heard as a skip two seconds after Play.
-/// Paused is the sharp case, since nothing pulls afterwards either.
+/// it until the seek lands. Pushed while the decoder is still working
+/// through the span, the Bank would release for as long as that takes and
+/// the overflow would be discarded, heard as a skip two seconds after Play.
+/// Paused is the hardest case, since nothing pulls afterwards either.
 ///
 /// Needs a span long enough to take real time to decode, which no checked-in
 /// fixture has. Set `BASIS_MEDIA_TEST_SPARSE_KEYFRAMES_URL` to an H.264 MP4
@@ -970,8 +965,8 @@ fn a_long_decode_forward_discards_no_audio() {
         shared.last_error.load(Ordering::Relaxed),
     );
     session.pause();
-    // Paused, the release schedule is frozen, so whatever this consumer
-    // that never pulls has cost the ring so far has stopped growing.
+    // Paused, the release schedule is frozen, so whatever the non-pulling
+    // consumer has cost the ring has stopped growing.
     std::thread::sleep(Duration::from_millis(800));
     let drops_before = ring_drops();
     let presented_before = presented();
@@ -997,7 +992,7 @@ fn a_long_decode_forward_discards_no_audio() {
 /// A caption that went up ahead of a seek's target and is still up at it
 /// is on screen after the seek. The caption decoder is stateful, so the
 /// span the seek decodes unseen is scanned too, its cues held back, and
-/// the last of them published at the target. The fixture's keyframes are
+/// the last one published at the target. The fixture's keyframes are
 /// 2 s apart and its roll-up caption gains its second row at 7 s, so a
 /// seek to 7.5 s lands the demuxer on 6 s with that row still to come.
 #[test]
@@ -1125,9 +1120,9 @@ fn a_seek_past_the_last_frame_lands_on_it_and_ends() {
     session.close();
 }
 
-/// `diag_csv` writes the capture-recorder CSV on close: header row per the
-/// pinned column contract plus at least one 100 ms sample per second of
-/// playback (the engine-owned sampler behind the managed ABI).
+/// `diag_csv` writes the capture-recorder CSV on close: a header row per
+/// the pinned column contract plus at least one 100 ms sample per second
+/// of playback.
 #[test]
 fn diag_csv_written_on_close() {
     let dir = std::env::temp_dir().join(format!("bm-diag-test-{}", std::process::id()));
@@ -1159,9 +1154,9 @@ fn diag_csv_written_on_close() {
 }
 
 /// The sync ladder over a playing A/V session (audio master): a target
-/// inside the dead band asks for nothing, a target ahead engages the
-/// +2% slew (surfaced for the managed audio pull), and a target past the
-/// seek threshold seeks — the last rung, never the first.
+/// inside the dead band asks for nothing, a target ahead engages the +2%
+/// slew (surfaced for the managed audio pull), and a target past the seek
+/// threshold seeks.
 #[test]
 fn sync_target_ladder_slew_then_seek() {
     let mut session = Session::open(OpenRequest::new(fixture_path()));
@@ -1192,7 +1187,7 @@ fn sync_target_ladder_slew_then_seek() {
         "never started playing"
     );
 
-    // Dead band: the current position is (near) the target — no action.
+    // Dead band: the current position is (near) the target, so no action.
     let position = shared.position_us.load(Ordering::Relaxed);
     Session::set_sync_target(&px, position);
     assert_eq!(px.sync_rate_ppm.load(Ordering::Relaxed), 0);
@@ -1203,8 +1198,8 @@ fn sync_target_ladder_slew_then_seek() {
     Session::set_sync_target(&px, position + 1_000_000);
     assert_eq!(px.sync_rate_ppm.load(Ordering::Relaxed), 20_000);
 
-    // Behind by 1 s wants -2%. Needs a second of track behind the
-    // playhead first — a negative target is the clear sentinel.
+    // Behind by 1 s wants -2%. Needs a second of track behind the playhead
+    // first, since a negative target is the clear sentinel.
     assert!(
         wait_for(Duration::from_secs(5), || {
             pull(&px);
@@ -1243,9 +1238,9 @@ fn sync_target_ladder_slew_then_seek() {
     session.close();
 }
 
-/// Wall-master lanes (no audio track) apply the sync slew to the clock
-/// directly: the engine has no audio consumer to ride, so the correction
-/// is engine-side and `sync_rate_ppm` mirrors it.
+/// With a wall master (no audio track) the sync slew goes to the clock
+/// directly: there is no audio consumer to apply it, so the correction is
+/// engine-side and `sync_rate_ppm` mirrors it.
 #[test]
 fn sync_target_slews_the_wall_clock_on_video_only() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1279,10 +1274,9 @@ fn sync_target_slews_the_wall_clock_on_video_only() {
 }
 
 /// `diag_csv_append` keeps every session's capture in one file instead of the
-/// last one only — the shape a player that goes dormant and wakes needs. The
-/// header belongs to the file, not to each capture, so a second run adds rows
-/// and nothing else: a header row in the middle would read as data to anything
-/// consuming this format.
+/// last one only, as a player that goes dormant and wakes needs. The header
+/// belongs to the file, not to each capture, so a second run adds rows and
+/// nothing else: a header row in the middle would read as data.
 #[test]
 fn diag_csv_appends_without_a_second_header() {
     let dir = std::env::temp_dir().join(format!("bm-diag-append-{}", std::process::id()));
@@ -1328,12 +1322,11 @@ fn diag_csv_appends_without_a_second_header() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// SEI user data: the authored fixture stamps one type-5 message into
-/// every access unit (tools/gen-sei-userdata-fixture.py's layout), and the
-/// lane hands each over with its UUID split off and its PTS, in order and
-/// without loss. x264's own build-string message rides through on the
-/// first AU under its own UUID, which is what the consumer-side UUID
-/// filter exists for.
+/// SEI user data: the fixture stamps one type-5 message into every access
+/// unit (tools/gen-sei-userdata-fixture.py's layout), and each is handed
+/// over with its UUID split off and its PTS, in order and without loss.
+/// x264's own build-string message comes through on the first AU under its
+/// own UUID, which is why the consumer filters on UUID.
 #[test]
 fn user_data_lane_delivers_every_frames_message() {
     const FIXTURE_UUID: [u8; 16] = [
@@ -1421,10 +1414,10 @@ fn a_seek_delivers_no_user_data_from_ahead_of_its_target() {
     let target_us = 3_200_000;
     session.seek(MediaTime::from_micros(target_us));
     // Settled first, drained after. The seek empties the ring part-way
-    // through running, so a drain that starts any earlier can pick up the
-    // old timeline's messages. Everything in the ring once playback has
-    // passed the target was scanned after the clear, and the span the
-    // seek covers is a fraction of what the ring holds.
+    // through, so an earlier drain can pick up the old timeline's messages.
+    // Once playback has passed the target, everything in the ring was
+    // scanned after the clear, and the span the seek covers is a fraction
+    // of what the ring holds.
     assert!(
         wait_for(Duration::from_secs(5), || {
             shared.state.load(Ordering::Relaxed) == State::Playing as u32
@@ -1446,22 +1439,20 @@ fn a_seek_delivers_no_user_data_from_ahead_of_its_target() {
 
 /// A seek clears the A/V offset and only re-arms it from the new timeline.
 ///
-/// **This does not cover the interleaving it looks like it covers.** The
-/// defect it was written beside is a race: the offset is computed on the
-/// audio thread while the origin used to be cleared on the *video* thread's
-/// own Flush, so audio could install the new generation and publish an
-/// offset pairing the old video position with the new playhead. Reverting
-/// the fix leaves this row green — the video thread reaches its Flush fast
-/// enough that the sentinel appears anyway, and nothing here can hold it
-/// back. Forcing that order needs a seam in `run_video` that does not
-/// exist; the predicates on both sides are pinned by unit rows instead
-/// (`a_frame_from_a_retired_timeline_cannot_arm_the_origin` and
-/// `presentation_arms_the_origin_and_the_first_writer_wins`), and the gap
-/// is recorded in TESTING.md.
+/// **This does not cover the race it appears to.** The offset is computed
+/// on the audio thread and the presentation gate is per generation, so a
+/// stale video position must never pair with a new playhead. This test
+/// cannot force the interleaving that would expose that: the video thread
+/// reaches its Flush fast enough that the sentinel appears anyway, and
+/// holding it back needs a seam in `run_video` that does not exist. The
+/// gate itself is covered by the unit tests
+/// `the_gate_answers_only_for_the_timeline_in_force` and
+/// `a_new_generation_starts_unarmed_and_arms_itself`, and the gap is
+/// recorded in TESTING.md.
 ///
-/// What it does pin, end to end: a seek clears the origin at all, and the
-/// offset comes back only once the new timeline has presented. Both halves
-/// assert they were reached, so neither can pass by never arriving.
+/// What it does check end to end: a seek clears the offset, and it comes
+/// back only once the new timeline has presented. Both halves assert they
+/// were reached, so neither can pass by never arriving.
 #[test]
 fn a_seek_clears_the_offset_and_re_arms_on_the_new_timeline() {
     let session = Session::open(OpenRequest::new(fixture_path()));
@@ -1498,9 +1489,9 @@ fn a_seek_clears_the_offset_and_re_arms_on_the_new_timeline() {
     session.seek(MediaTime::from_millis(1_500));
 
     // `seek` only queues the command, so the old timeline's offset is
-    // legitimately exported until the demux thread reaches it. The clear
-    // landing is the start of the window this row is about; from there the
-    // offset must stay unknown until the new timeline presents.
+    // legitimately exported until the demux thread reaches it. From the
+    // clear onwards the offset must stay unknown until the new timeline
+    // presents.
     let cleared = wait_for(Duration::from_secs(10), || {
         pull(&mut buf);
         std::thread::sleep(Duration::from_millis(1));

@@ -1,20 +1,19 @@
-//! Render-event frame selection: presentation due-ness is
-//! decided *in* the Unity render event, which runs at the display cadence,
-//! with one vsync of lookahead — so the selection quantiser and the
-//! display quantiser are the same clock and the tick-vs-vsync beat cannot
-//! tip isolated frames a vsync late or early. The video thread keeps a
-//! tick-paced fallback for consumers that issue no render events
-//! (headless sessions, a non-rendering app): selection hands over on the
-//! first stamped event and hands back after [`PRESENT_LIVENESS`] without
-//! one.
+//! Render-event frame selection. Which frame is due is decided in the
+//! Unity render event, which runs at the display cadence, with one vsync
+//! of lookahead. Selection and display then share one clock, so a beat
+//! between a decode tick and vsync cannot push isolated frames a vsync
+//! late or early. The video thread keeps a tick-paced fallback for
+//! consumers that issue no render events (headless sessions, a
+//! non-rendering app): selection hands over on the first stamped event and
+//! hands back after [`PRESENT_LIVENESS`] without one.
 //!
-//! The render thread reads session time from a lock-free clock mirror —
-//! a single `clock_now − wall` offset atomic, written under the clock
-//! lock at every `set_playing` site and refreshed each decode-thread
-//! tick, `i64::MIN` while the clock is parked. One atomic means no torn
-//! pair; staleness costs at most the slew cap over one refresh interval
-//! (~0.2 ms). The pool take is a try-lock: contention with a decode-side
-//! publish costs a re-present, never a wait.
+//! The render thread reads session time from a lock-free clock mirror: a
+//! single `clock_now − wall` offset atomic, written under the clock lock
+//! at every `set_playing` site, refreshed each decode-thread tick and
+//! `i64::MIN` while the clock is parked. One atomic cannot tear, and
+//! staleness costs at most the slew cap over one refresh interval
+//! (~0.2 ms). The pool take is a try-lock, so contention with a
+//! decode-side publish costs a re-present, never a wait.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -31,16 +30,16 @@ use crate::pool::FramePool;
 #[cfg(any(windows, target_os = "android", test))]
 use crate::pool::Lease;
 
-/// A render event within this window marks the render consumer live: the
-/// video thread's fallback selection stands down (the audio-consumer
-/// liveness pattern, same figure).
+/// A render event within this window marks the render consumer live, and
+/// the video thread's fallback selection stands down. Same figure as the
+/// audio consumer's liveness window.
 pub const PRESENT_LIVENESS: MediaTime = MediaTime::from_millis(500);
 
 /// Lookahead clamp: one vsync at any sane display rate (500 Hz .. 25 Hz).
 const LOOKAHEAD_MIN_US: i64 = 2_000;
 const LOOKAHEAD_MAX_US: i64 = 40_000;
 /// Inter-event deltas outside this range are app hitches or double
-/// events, not display cadence — they must not pollute the estimate.
+/// events, not display cadence, and are left out of the estimate.
 const DELTA_MIN_US: i64 = 1_000;
 const DELTA_MAX_US: i64 = 250_000;
 /// Seed until two events have been observed (a 60 Hz-ish guess; the EMA
@@ -52,7 +51,7 @@ const INTERVAL_SEED_US: i64 = 16_667;
 pub struct PresentShared {
     /// Wall µs of the last render event; `i64::MIN` = none ever.
     pub last_event_wall_us: AtomicI64,
-    /// Smoothed inter-event interval µs — the vsync estimate.
+    /// Smoothed inter-event interval µs: the vsync estimate.
     pub interval_us: AtomicI64,
     /// Lock-free clock mirror: `clock.now(wall) − wall` µs, `i64::MIN`
     /// while the clock is parked (which disables selection).
@@ -97,12 +96,12 @@ impl PresentShared {
     }
 
     /// Session time the selection grades against: mirrored clock plus one
-    /// vsync of lookahead — the frame chosen now is the one that should be
-    /// on screen during the *upcoming* refresh. Returned beside the clock's
-    /// own reading, which is what lateness is measured from. Where the copy
-    /// lands events later (`lookahead_events`), both move on by those
-    /// events, so the frame is chosen for when it is seen and its lateness
-    /// is judged there too. `None` while parked.
+    /// vsync of lookahead, because the frame chosen now should be on screen
+    /// during the *upcoming* refresh. Returned beside the clock's own
+    /// reading, which lateness is measured from. Where the copy lands
+    /// events later (`lookahead_events`), both move on by those events, so
+    /// the frame is chosen and judged for when it is seen. `None` while
+    /// parked.
     pub fn selection_target(&self, wall: MediaTime) -> Option<(MediaTime, MediaTime)> {
         let offset = self.clock_offset_us.load(Ordering::Relaxed);
         if offset == i64::MIN {
@@ -151,8 +150,8 @@ pub fn select_for_render(
     pool.try_take_due(target, clock)
 }
 
-/// Presentation bookkeeping, wherever selection ran: position, the
-/// Present out-count, the Buffering→Playing transition.
+/// Presentation bookkeeping, wherever selection ran: presented pts, the
+/// Present out-count and the Buffering to Playing transition.
 #[cfg(any(windows, target_os = "android"))]
 fn presented(px: &PipelineShared, pts: MediaTime, generation: u64) {
     px.diag
@@ -209,9 +208,9 @@ pub fn render_present(px: &PipelineShared) -> bool {
     fresh
 }
 
-/// The Android render event's engine half: stamp, select, book-keep, and
-/// hand the frame to the Vulkan conversion pass (whose GPU lifetime the
-/// caller's renderer manages). `None` = nothing new this vsync.
+/// The Android render event's engine half: stamp, select, do the
+/// bookkeeping and hand the frame to the Vulkan conversion pass, whose GPU
+/// lifetime the caller's renderer manages. `None` = nothing new this vsync.
 #[cfg(target_os = "android")]
 pub fn render_take(px: &PipelineShared) -> Option<media_decode::VideoFrame> {
     let wall = px.wall.now();
@@ -297,12 +296,10 @@ mod tests {
         assert!(!shared.consumer_live(MediaTime::from_micros(10_500_001)));
     }
 
-    /// The selection scenario: 24 fps content selected by 72 Hz render events.
-    /// Whatever the phase between the content grid and the event grid,
-    /// every frame is selected exactly once, exactly three events apart —
-    /// no 4-then-2 / 2-then-4 pairs, which is precisely what the old
-    /// two-quantiser handoff produced when the due phase sat near a vsync
-    /// boundary.
+    /// 24 fps content selected by 72 Hz render events. Whatever the phase
+    /// between the content grid and the event grid, every frame is selected
+    /// exactly once, exactly three events apart, with no 4-then-2 or
+    /// 2-then-4 pairs when the due phase sits near a vsync boundary.
     #[test]
     fn steady_grid_selects_every_frame_at_the_ideal_hold() {
         const VSYNC_US: i64 = 13_889;
@@ -345,9 +342,9 @@ mod tests {
                 "phase {phase_us}: frames must not skip or repeat"
             );
             assert_eq!(pool.dropped(), 0, "phase {phase_us}: no newest-wins drops");
-            // Every hold is exactly the ideal 3 events — the beat class.
-            // The very first hold may run short (the first frame clamps to
-            // the loop's first event); steady state is what the row pins.
+            // Every hold is exactly 3 events. The first may run short (the
+            // first frame clamps to the loop's first event), so it is
+            // skipped.
             let holds: Vec<i64> = selections.windows(2).map(|w| w[1].0 - w[0].0).collect();
             assert!(
                 holds.iter().skip(1).all(|&h| h == 3),
@@ -360,7 +357,7 @@ mod tests {
     /// selection: the same grid with ±1.5 ms of deterministic wobble on
     /// each event still selects every frame once, and holds never pair a
     /// long with a short more than one apart (a 4 must not be followed by
-    /// a 2 — the measured defect signature).
+    /// a 2).
     #[test]
     fn event_jitter_inside_the_margin_keeps_holds_stable() {
         const VSYNC_US: i64 = 13_889;

@@ -1,8 +1,7 @@
-//! Sessions, state machine, pipeline assembly. One session = one
-//! pipeline: media-clock is the only position
-//! source, the Bank sits between demux and decode, every stage exports
-//! counters, and the leased FramePool carries decoded frames to the
-//! present pass.
+//! Sessions, the state machine and pipeline assembly. One session is one
+//! pipeline: media-clock is the only position source, the Bank sits
+//! between demux and decode, every stage exports counters, and the leased
+//! FramePool carries decoded frames to the present pass.
 
 mod audio;
 mod capabilities;
@@ -38,15 +37,14 @@ use media_demux::{ByteSource, DemuxError, DemuxLimits, DemuxOptions, SourceError
 use media_diag::{EventCode, SessionDiag, Stage, diag_log, diag_warn};
 use media_io::{AllowAllGate, FileSource, HttpSource, IoError, IoLimits, PublicAddressGate};
 
-/// Decode-channel depths. The audio side stays shallow (its decoders and
-// the ring drain fast, so depth is just latency). The video side must
-// swallow the whole startup burst without the release thread ever
-// blocking on it: a video decoder with a shallow input queue (the MF AV1
-// extension accepts ~12 before MF_E_NOTACCEPTING, against MF H.264's ~30)
-// otherwise wedges the single release thread mid-burst, which starves
-// audio, drags the audio-master clock backwards and oscillates the whole
-// pipeline. Compressed-AU memory here is bounded by the burst window, not
-// the slot count.
+/// Decode-channel depths. The audio side stays shallow: its decoders and
+// the ring drain fast, so depth is only latency. The video side must take
+// the whole startup burst without the release thread blocking on it. A
+// video decoder with a shallow input queue (the MF AV1 extension accepts
+// ~12 before MF_E_NOTACCEPTING, MF H.264 ~30) would otherwise wedge the
+// single release thread mid-burst, starving audio and dragging the
+// audio-master clock backwards. Compressed-AU memory here is bounded by
+// the burst window, not the slot count.
 const AUDIO_CHANNEL_DEPTH: usize = 8;
 const VIDEO_CHANNEL_DEPTH: usize = 256;
 
@@ -149,12 +147,11 @@ impl EngineError {
         }
     }
 
-    /// The two sources of a split pair measure their timelines from
-    /// points too far apart to play against one another. A property of
-    /// the pair the caller asked for rather than of either source, so it
-    /// shares the descriptor's category, with its own sub-code because
-    /// the answer is to pick a different rendition rather than to fix a
-    /// URL.
+    /// The two sources of a split pair measure their timelines from points
+    /// too far apart to play against one another. This is a property of
+    /// the requested pair, so it shares the descriptor's category. It has
+    /// its own sub-code because the fix is to pick a different rendition,
+    /// not to correct a URL.
     pub fn split_origin_mismatch(detail: impl Into<String>) -> Self {
         Self {
             code: 502,
@@ -175,9 +172,9 @@ pub struct SessionShared {
     /// Presented video pts minus the audio playhead, µs: the engine's own
     /// account of its A/V alignment, sampled where both are known at one
     /// wall reading. `i32::MIN` until an audio playhead and a presented
-    /// frame both exist. Diagnostic only — nothing steers on it, and it is
-    /// deliberately *not* what the clock ladder acts on (that error is
-    /// clock-versus-playhead, which says nothing about the picture).
+    /// frame both exist. Diagnostic only: nothing steers on it. The clock's
+    /// own correction acts on clock-versus-playhead, which says nothing
+    /// about the picture.
     pub av_offset_us: AtomicI32,
     pub duration_us: AtomicI64,
     pub frames_decoded: AtomicU64,
@@ -191,45 +188,45 @@ pub struct SessionShared {
     pub audio_rate: AtomicU32,
     pub audio_channels: AtomicU32,
     /// Current seek generation (the Bank's, mirrored lock-free). The
-    /// decode threads compare it against their Flush-adopted generation
-    /// to drop stale-timeline work instead of parking on it — a parked
-    /// stale AU would starve the channel intake that delivers the Flush
-    /// (decoder full, presentation parked: nothing else frees it).
+    /// decode threads compare it against the generation of the last Flush
+    /// they took, to drop stale-timeline work instead of parking on it. A
+    /// parked stale AU would block the channel that delivers the Flush,
+    /// with the decoder full and presentation parked, and nothing else
+    /// would free it.
     pub generation: AtomicU64,
     pub(crate) stop: AtomicBool,
 }
 
-/// Liveness. Every transport bar bare http(s) settles this
-/// itself — RTSP/WHEP/RIST force Live, HLS takes it from the playlist,
-/// a resolver states it — so the descriptor field exists for the one
-/// case left: a plain HTTP URL that is not a playlist.
+/// Liveness. Every transport except plain http(s) settles this itself:
+/// RTSP, WHEP and RIST force Live, HLS reads it from the playlist, and a
+/// resolver states it. The descriptor field covers the case left over, a
+/// plain HTTP URL that is not a playlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceLiveness {
     /// Force the live path: lag the edge, never read ahead.
     Live,
     /// Force the on-demand path: read ahead and seek.
     Vod,
-    /// Work it out from the source's own answer — finite and rangeable
-    /// is on-demand, anything else is a live edge. The default, and the
-    /// right answer for everything except a server whose headers lie.
+    /// Work it out from the source's answer: finite and rangeable is
+    /// on-demand, anything else is a live edge. The default, and correct
+    /// unless a server's headers are wrong.
     #[default]
     Auto,
 }
 
 /// Decode-route preference: a per-user machine setting, never
-/// world-authored. One audited enforcement point in the route factory; a
-/// rung the platform does not have is a typed refusal, never silently
-/// ignored.
+/// world-authored. Enforced in one place, the route factory. A route the
+/// platform does not have is a typed refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DecodePreference {
     /// Hardware first; the software path carries a `DecodeFallbackHwToSw`
     /// diagnostic when it engages. The default.
     #[default]
     HardwareWithFallback,
-    /// Hardware or typed refusal (the C player's shipped posture).
+    /// Hardware or a typed refusal.
     HardwareOnly,
-    /// Software only — the CPU A/B lever and a driver-workaround
-    /// escape hatch. Subject to the software-route performance cap.
+    /// Software only, for CPU comparisons and as a workaround for driver
+    /// faults. Subject to the software-route performance cap.
     SoftwareOnly,
 }
 
@@ -240,43 +237,41 @@ pub struct OpenRequest {
     pub url: String,
     /// A separate audio-only source to play against `url`, which is then
     /// treated as video-only. This is how adaptive ladders serve anything
-    /// above their muxed fallback rung: the two legs are cuts of the same
+    /// above their muxed fallback rung. The two legs are cuts of the same
     /// content, so their timelines already agree and the Bank meters them
-    /// as one. On-demand HTTP(S) and local files only — every live
+    /// as one. On-demand HTTP(S) and local files only, since every live
     /// transport carries both tracks in one stream. `None` = one source
     /// carrying everything.
     pub audio_url: Option<String>,
-    /// Explicit opt-out from the public-address gate for local fixtures
-    /// and the test rig. Never set from world content.
+    /// Explicit opt-out from the public-address gate, for local fixtures
+    /// and test servers. Never set from world content.
     pub allow_local_addresses: bool,
     /// `None` = Auto (the sizing model's default).
     pub buffer_depth_ms: Option<u32>,
     pub liveness: SourceLiveness,
     /// Which of the container's audio tracks to bind, as an index into
     /// the offered list. Switching track re-opens the session at the
-    /// current position, so this is only ever read at open. Out of range
-    /// falls back to the first track with a note rather than failing —
-    /// an index remembered across a source change must not break
-    /// playback.
+    /// current position, so this is only read at open. Out of range falls
+    /// back to the first track with a note rather than failing, so an index
+    /// remembered across a source change cannot break playback.
     pub audio_track: usize,
-    /// Write the capture-recorder CSV here on close, sampled at
-    /// 100 ms by an engine-owned thread — for hosts that cannot drive
-    /// the recorder themselves (the managed ABI; bm-probe polls it
-    /// in-process instead). `None` = off.
+    /// Write the capture-recorder CSV here on close, sampled every 100 ms
+    /// by an engine-owned thread. For hosts that cannot drive the recorder
+    /// themselves (the managed ABI; bm-probe polls it in-process instead).
+    /// `None` = off.
     pub diag_csv: Option<std::path::PathBuf>,
     /// Append each session's capture to `diag_csv` instead of replacing it.
-    /// A session that opens and closes repeatedly — a player going dormant
-    /// and waking — otherwise leaves only the last one behind.
+    /// Otherwise a player that goes dormant and wakes repeatedly leaves
+    /// only its last session behind.
     pub diag_csv_append: bool,
-    /// Shared-playback divergence bound on live lanes: the
-    /// furthest behind the live edge this viewer may sit, applied as a
-    /// ceiling on the Bank's lag cap (and so on Auto's depth growth).
-    /// Live position is never hard-synced peer-to-peer — this bound is
-    /// the world author's whole instrument. `None` keeps the default
-    /// lag cap.
+    /// Shared-playback divergence bound on live sessions: the furthest
+    /// behind the live edge this viewer may sit, applied as a ceiling on
+    /// the Bank's lag cap (and so on Auto's depth growth). Live position is
+    /// never hard-synced between peers, so this is the world author's only
+    /// control. `None` keeps the default lag cap.
     pub max_divergence_ms: Option<u32>,
-    /// Decode-route preference: descriptor-stated from the user's
-    /// client-persisted setting. Absent in the descriptor = the default.
+    /// Decode-route preference, from the user's client-side setting.
+    /// Absent in the descriptor = the default.
     pub decode_preference: DecodePreference,
 }
 
@@ -330,8 +325,8 @@ impl Session {
     }
 
     /// Open over a caller-built byte source instead of one derived from the
-    /// URL — the impairment harness wraps sources this way. The
-    /// request's URL is display-only here.
+    /// URL, as the impairment harness does. The request's URL is
+    /// display-only here.
     pub fn open_with_source(request: OpenRequest, source: Box<dyn ByteSource>) -> Self {
         Self::open_internal(request, Some(source))
     }
@@ -344,9 +339,8 @@ impl Session {
         let bank_cfg = BankConfig {
             liveness: match request.liveness {
                 SourceLiveness::Live => Liveness::Live,
-                // Auto is seeded on-demand and re-decided once the source
-                // has answered, the way the HLS lane re-decides from its
-                // playlist.
+                // Auto starts on-demand and is re-decided once the source
+                // has answered, as HLS re-decides from its playlist.
                 SourceLiveness::Vod | SourceLiveness::Auto => Liveness::Vod,
             },
             depth: match request.buffer_depth_ms {
@@ -367,11 +361,11 @@ impl Session {
         };
 
         let clock_cfg = ClockConfig::default();
-        // Android's audio stack delivers DSP callbacks in jittering
+        // Android's audio stack delivers DSP callbacks in jittery
         // double-buffer bursts with missed slots (±40 ms measured on Quest
-        // Pro against a 20 ms dead band), so the master observations run
-        // through the ladder's first-order filter there. Windows' uniform
-        // cadence keeps the raw ladder.
+        // Pro, against a 20 ms dead band), so master observations go
+        // through the clock's first-order filter there. Windows' cadence is
+        // uniform enough without it.
         #[cfg(target_os = "android")]
         let clock_cfg = ClockConfig {
             master_filter: Some(MediaTime::from_millis(400)),
@@ -486,13 +480,12 @@ impl Session {
         }
     }
 
-    /// Pause an on-demand session. A live source is not pausable: the
-    /// wall clock stops but delivery does not, so the bank fills to its
-    /// byte cap, the demuxer blocks on it and a UDP source loses everything
-    /// after that, and on resume the session sits the pause's length
-    /// behind the edge for good. Halt and reload instead. The request is
-    /// ignored and said so once on the process log, and the state stays
-    /// where it was.
+    /// Pause an on-demand session. A live source is not pausable: the wall
+    /// clock stops but delivery does not, so the Bank fills to its byte cap,
+    /// the demuxer blocks, a UDP source loses everything after that, and on
+    /// resume the session sits the pause's length behind the edge for good.
+    /// On a live session the request is ignored with a line on the process
+    /// log, and the state stays where it was.
     ///
     /// A pause holds across a seek: the session lands the new position,
     /// shows it, and stays paused there until `play`.
@@ -502,19 +495,18 @@ impl Session {
         if state != State::Playing as u32 && state != State::Buffering as u32 {
             return;
         }
-        // Read after the state, not before: the opener publishes the
-        // liveness flag and then Buffering, and `state()` is an acquire
-        // against that store, so a request that sees Buffering sees the
-        // flag the opener set. Read first, the flag could be the default
-        // from before the open settled and the state the one after.
+        // Read after the state: the opener publishes the liveness flag and
+        // then Buffering, and `state()` is an acquire against that store,
+        // so a request that sees Buffering sees the flag. Read first, the
+        // flag could still be the pre-open default.
         if self.px.live.load(Ordering::Acquire) {
             diag_warn!("pause ignored: a live source is not pausable, reload it instead");
             return;
         }
         // A buffering session, or one with a seek still queued, pauses once
         // its position is showing: freezing the wall now would stop the
-        // release schedule that has to deliver that picture. The decode
-        // threads complete it.
+        // release schedule that delivers that picture. The decode threads
+        // complete the pause.
         self.px.pause_wanted.store(true, Ordering::Relaxed);
         if state == State::Playing as u32 && self.px.seeks_pending.load(Ordering::Acquire) == 0 {
             self.px.park_paused();
@@ -525,19 +517,15 @@ impl Session {
         seek_px(&self.px, to);
     }
 
-    /// Feed the owner's extrapolated position as a soft sync target:
-    /// the engine runs dead band → slew → seek-last against it.
-    /// Negative clears the target (local user took control, owner left).
-    /// The slew's application is master-dependent — see the snapshot's
-    /// `sync_rate_ppm` for the audio-consumer half of the contract.
+    /// Feed the owner's extrapolated position as a soft sync target. The
+    /// engine answers with a dead band, then a slew, then a seek. Negative
+    /// clears the target (the local user took control, or the owner left).
+    /// How the slew is applied depends on the clock master; see the
+    /// snapshot's `sync_rate_ppm` for the audio consumer's part.
     pub fn set_sync_target(px: &PipelineShared, position_us: i64) {
         sync::set_sync_target(px, position_us);
     }
 
-    /// Drain up to `max` pending caption cues (in-band CEA-608):
-    /// each is the full displayed text as of its PTS (empty = display
-    /// cleared). Surfaced on arrival — the consumer schedules display
-    /// against the session position.
     /// The audio tracks the source offers instead of the bound one, in
     /// container order. Empty where there is nothing to choose between.
     /// Switching is a re-open with `OpenRequest::audio_track` set, so this
@@ -551,7 +539,7 @@ impl Session {
     }
 
     /// Cover art the container carried, where it carried one. The bytes
-    /// are compressed exactly as stored — the caller decodes them.
+    /// are compressed exactly as stored; the caller decodes them.
     pub fn artwork(&self) -> Option<media_demux::Artwork> {
         self.pipeline()
             .artwork
@@ -560,6 +548,10 @@ impl Session {
             .clone()
     }
 
+    /// Drain up to `max` pending caption cues (in-band CEA-608). Each is
+    /// the full displayed text as of its PTS (empty = display cleared).
+    /// Cues are surfaced on arrival; the consumer schedules display
+    /// against the session position.
     pub fn drain_captions(px: &PipelineShared, max: usize) -> Vec<media_bitstream::CaptionCue> {
         let mut ring = px.captions.lock().expect("captions lock");
         let n = ring.len().min(max);
@@ -571,8 +563,8 @@ impl Session {
     /// copying into a fixed buffer takes exactly what fits and the rest
     /// waits. A message that could never fit on its own (payload above
     /// `max_bytes`) is dropped rather than left blocking the head.
-    /// Surfaced on arrival — the consumer schedules delivery against the
-    /// session position.
+    /// Messages are surfaced on arrival; the consumer schedules delivery
+    /// against the session position.
     pub fn drain_user_data(
         px: &PipelineShared,
         max: usize,
@@ -587,23 +579,22 @@ impl Session {
     /// Report the managed sink's estimated output latency (µs): the chain
     /// between the audio pull and the speaker (DSP buffers + HAL). The
     /// playhead the clock masters on is shifted back by it, so video paces
-    /// to the audible position. Clamped to a sane range; 0 (the
-    /// default) leaves the ladder untouched.
+    /// to the audible position. Clamped to 0..=500 ms; 0 (the default)
+    /// applies no shift.
     pub fn set_audio_latency(px: &PipelineShared, latency_us: i64) {
         px.audio_shared
             .output_latency_us
             .store(latency_us.clamp(0, 500_000), Ordering::Relaxed);
     }
 
-    /// Lock-free-path audio pull for the Unity audio thread. Fills `out`
-    /// (interleaved f32) and returns frames written; silence when not
-    /// playing, while the clock is parked, or contended.
+    /// Lock-free audio pull for the Unity audio thread. Fills `out`
+    /// (interleaved f32) and returns frames written. Serves silence when
+    /// not playing, while the clock is parked, or under contention.
     pub fn read_audio(px: &PipelineShared, out: &mut [f32]) -> usize {
-        // Both gates matter: the state alone races (a present in flight can
+        // Both gates matter. The state alone races (a present in flight can
         // flip a seeking session back to Playing), and a parked clock means
-        // presentation has not reached this timeline yet — serving the ring
-        // then would play the post-seek tail out against a frozen picture
-        // (the parked-clock discipline, applied to seeks).
+        // presentation has not reached this timeline yet: serving the ring
+        // then would play the post-seek audio against a frozen picture.
         if px.state() != State::Playing as u32 || !px.clock_playing.load(Ordering::Relaxed) {
             out.fill(0.0);
             return 0;
@@ -625,16 +616,16 @@ impl Session {
         self.px.shared.stop.store(true, Ordering::Relaxed);
         self.px.io_cancel.cancel();
         self.px.bank.changed.notify_all();
-        // Drop runs this, where a panic would abort the process rather
-        // than reach the ABI's fences, so poisoning is recovered from at
-        // every site on this lock. The handles stay valid across one.
+        // Drop runs this, where a panic would abort the process rather than
+        // reach the ABI's fences, so every site on this lock recovers from
+        // poisoning. The handles stay valid across one.
         //
         // Drained in a loop because the opener registers the pipeline's
-        // threads part-way through its own run: closing mid-open takes a
-        // list holding just the opener, and returning after joining it
-        // would leave the threads it spawned meanwhile running on shared
-        // state the caller believes is released. The opener is the only
-        // registrar, so the drain after it is joined is the last one.
+        // threads part-way through its own run. Closing mid-open finds only
+        // the opener in the list, and returning after joining it would leave
+        // the threads it spawned running on state the caller believes is
+        // released. The opener is the only registrar, so the drain after it
+        // is joined is the last.
         loop {
             let handles: Vec<_> =
                 std::mem::take(&mut *self.threads.lock().unwrap_or_else(|e| e.into_inner()));
@@ -654,11 +645,11 @@ impl Drop for Session {
     }
 }
 
-/// Seek, from a session handle or the sync ladder's last rung: resume a
-/// paused/ended session into the new position's buffering; the demux
-/// thread parks the clock and the video thread restarts it at the first
-/// post-seek frame. A paused session is resumed only to land the seek,
-/// and pauses again once the new position is showing.
+/// Seek, from a session handle or the sync ladder. A paused or ended
+/// session resumes into buffering at the new position; the demux thread
+/// parks the clock and the video thread restarts it at the first
+/// post-seek frame. A paused session resumes only to land the seek, and
+/// pauses again once the new position is showing.
 pub(crate) fn seek_px(px: &PipelineShared, to: MediaTime) {
     let _transport = px.transport.lock().expect("transport lock");
     px.seeks_pending.fetch_add(1, Ordering::Relaxed);
@@ -680,9 +671,8 @@ fn run_diag_sampler(px: Arc<PipelineShared>, path: std::path::PathBuf, append: b
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     recorder.sample(px.wall.now(), &px.diag);
-    // Only the first capture into a given file carries the header; a later
-    // one appends rows to it. An append to a file that is missing or empty
-    // still needs one, so this asks the filesystem rather than assuming.
+    // Only the first capture into a file carries the header. An append to a
+    // file that is missing or empty still needs one, so ask the filesystem.
     let existing = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let header = !append || existing == 0;
     let written = std::fs::OpenOptions::new()
@@ -697,9 +687,7 @@ fn run_diag_sampler(px: Arc<PipelineShared>, path: std::path::PathBuf, append: b
     }
 }
 
-/// The opener: source + demuxer construction (blocking I/O), then the
-/// pipeline threads.
-/// Fill `head` from offset 0; short fill means a short source.
+/// Fill `head` from offset 0; a short fill means a short source.
 fn read_head(source: &mut dyn ByteSource, head: &mut [u8]) -> Result<usize, SourceError> {
     let mut filled = 0usize;
     while filled < head.len() {
@@ -730,20 +718,19 @@ fn read_all(source: &mut dyn ByteSource, cap: u64) -> Result<Vec<u8>, SourceErro
 
 const PLAYLIST_CAP: u64 = 4 * 1024 * 1024;
 
-/// Where a playlist came from, which fixes what its URIs may reach for
-/// the life of the session. A playlist read off the network can name only
-/// more network; one opened from disk can name either, since reaching the
-/// network is what the address gate already covers.
+/// Where a playlist came from, which fixes what its URIs may reach for the
+/// life of the session. A playlist read off the network can name only more
+/// network. One opened from disk can name either, since the address gate
+/// already covers reaching the network.
 enum PlaylistOrigin {
     Network,
     Disk,
 }
 
-/// HLS lane: playlist bytes sniffed, hand the URL to the HLS demuxer with
-/// a per-resource fetcher built for where the playlist came from. The
-/// playlist states its own liveness (EXT-X-ENDLIST), and the Bank mode
-/// follows it; the HLS scheduler owns resilience, so the lane takes no
-/// engine reconnect factory.
+/// HLS: hand the URL to the HLS demuxer with a per-resource fetcher built
+/// for where the playlist came from. The playlist states its own liveness
+/// (EXT-X-ENDLIST) and the Bank mode follows it. The HLS scheduler handles
+/// reconnects itself, so no engine reconnect factory is passed.
 fn open_hls(
     px: Arc<PipelineShared>,
     url: &str,
@@ -802,10 +789,9 @@ fn open_hls(
     }
 }
 
-/// The live HTTP lane: build the streaming source once and sniff it — an
-/// HLS playlist routes to the HLS lane, anything else gets the resilience
-/// path, a factory that rebuilds source + demuxer when the demux thread
-/// sees transport loss.
+/// Live HTTP: build the streaming source once and sniff it. An HLS
+/// playlist goes to `open_hls`; anything else gets a factory that rebuilds
+/// source and demuxer when the demux thread sees transport loss.
 fn open_http_live(
     px: Arc<PipelineShared>,
     url: &str,
@@ -834,8 +820,8 @@ fn open_http_live(
     open_http_live_with(px, url, source, allow_local, bank_cfg, threads, options);
 }
 
-/// The live lane from an already-open source, so the Auto probe can hand
-/// over the body it opened rather than spending a second connection.
+/// Live HTTP from an already-open source, so the Auto probe can hand over
+/// the body it opened instead of spending a second connection.
 fn open_http_live_with(
     px: Arc<PipelineShared>,
     url: &str,
@@ -845,13 +831,10 @@ fn open_http_live_with(
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
     options: DemuxOptions,
 ) {
-    // This is the live lane whichever way it was reached. A declared-live
-    // request arrives with the Bank already in live mode; an Auto request
-    // that the probe settled as live arrives with the request's default,
-    // which is on-demand, and the Bank would run the whole session in that
-    // posture: read-ahead cap, no priming, no debt bound, sync targets
-    // honoured, pause allowed. The transport lanes set this for themselves
-    // and so does this one.
+    // An Auto request that the probe settled as live arrives with the
+    // on-demand default, and would otherwise run the whole session that way:
+    // read-ahead cap, no priming, no debt bound, sync targets honoured,
+    // pause allowed.
     bank_cfg.liveness = Liveness::Live;
     let mut counted = CountedSource {
         inner: source,
@@ -868,7 +851,7 @@ fn open_http_live_with(
     if media_hls::looks_like_playlist(&head[..filled]) {
         match read_all(&mut counted, PLAYLIST_CAP) {
             Ok(playlist) => {
-                // This lane is only ever entered for an http(s) URL.
+                // Only ever reached for an http(s) URL.
                 open_hls(
                     px,
                     url,
@@ -929,12 +912,12 @@ fn open_http_live_with(
     finish_open(px, demuxer, bank_cfg, Some(reconnect_factory), threads);
 }
 
-/// RTSP lane: always live, UDP negotiated first for `rtsp://` (media-rtp
-/// under retina) with TCP-interleaved fallback, `rtspt://` pinned to
-/// TCP; the Bank is the jitter answer either way, and the engine
-/// reconnect factory rebuilds the whole session on transport loss. The
-/// host is vetted against the address gate before the client dials, and
-/// the same gate vets the SETUP response's UDP peer address.
+/// RTSP: always live. `rtsp://` tries UDP first (media-rtp under retina)
+/// and falls back to TCP-interleaved; `rtspt://` is pinned to TCP. The
+/// Bank absorbs jitter either way, and the reconnect factory rebuilds the
+/// whole session on transport loss. The host is vetted against the
+/// address gate before the client dials, and the same gate vets the SETUP
+/// response's UDP peer address.
 fn open_rtsp(
     px: Arc<PipelineShared>,
     url: &str,
@@ -999,15 +982,13 @@ fn open_rtsp(
     finish_open(px, demuxer, bank_cfg, Some(factory), threads);
 }
 
-/// WHEP lane: always live, and the Bank sits at its floor: the depth
-/// equals the decoder cushion, so the lag target is zero.
-/// Sub-second work happens upstream: str0m's NACK recovery plus
-/// media-rtp's bounded reorder absorb network jitter, and stacking a
-/// deep Bank on top would just buy latency. An explicit depth request
-/// still wins. Reconnect re-runs the whole signalling exchange; the
-/// signalling host is vetted and pinned inside the crate, and
-/// every media-path address passes the same gate at the transmit
-/// boundary.
+/// WHEP: always live, with the Bank at its floor (depth equals the decoder
+/// cushion, so the lag target is zero). str0m's NACK recovery and
+/// media-rtp's bounded reorder absorb network jitter upstream, and a deep
+/// Bank on top would only add latency. An explicit depth request still
+/// wins. Reconnect re-runs the whole signalling exchange. The signalling
+/// host is vetted and pinned inside the crate, and every media-path
+/// address passes the same gate at the transmit boundary.
 fn open_whep(
     px: Arc<PipelineShared>,
     url: &str,
@@ -1067,11 +1048,11 @@ fn open_whep(
     finish_open(px, demuxer, bank_cfg, Some(factory), threads);
 }
 
-/// RIST lane: always live; librist owns the sockets, ARQ, jitter buffer and
-/// PSK-AES and serves recovered TS as a sequential byte source, so the lane
-/// takes no engine reconnect factory (librist keeps the flow alive
-/// underneath). The host is resolved and vetted against the address gate
-/// here, and librist is pinned to the vetted literal.
+/// RIST: always live. librist owns the sockets, ARQ, jitter buffer and
+/// PSK-AES and serves recovered TS as a sequential byte source. It keeps
+/// the flow alive itself, so no engine reconnect factory is passed. The
+/// host is resolved and vetted against the address gate here, and librist
+/// is pinned to the vetted literal.
 fn open_rist(
     px: Arc<PipelineShared>,
     url: &str,
@@ -1143,11 +1124,10 @@ fn open_rist(
 }
 
 /// What a session's URL names. Decided once, from the URL parser's
-/// normalised scheme rather than from raw prefixes, because schemes are
-/// case-insensitive (RFC 3986 §3.1) and the managed classifier that
-/// steers the same string compares them that way. A local path is a
-/// case of its own and not the fallthrough: a string that matches
-/// nothing known is a refusal, not something to open off the disk.
+/// normalised scheme rather than raw prefixes, because schemes are
+/// case-insensitive (RFC 3986 §3.1) and the managed classifier compares
+/// them that way. A local path is its own case, not the fallthrough: a
+/// string that matches nothing known is refused, not opened off disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     Http,
@@ -1169,21 +1149,18 @@ impl SourceKind {
 }
 
 /// A path that names a host rather than a place on this machine. Windows
-/// resolves both spellings through the SMB redirector, so opening one is
-/// a network connection that never reaches the address gate — the same
-/// class of reach the gate exists to decide on, arriving through a route
-/// it does not watch.
+/// resolves both spellings through the SMB redirector, so opening one
+/// makes a network connection that never passes the address gate.
 ///
-/// Matched as text, on every host: `Path` recognises only the syntax of
-/// the platform it was compiled for, and the answer to "is this a
-/// network path" should not depend on who is asking.
+/// Matched as text on every host: `Path` recognises only the syntax of the
+/// platform it was compiled for, and the answer should not depend on that.
 fn names_a_network_share(url: &str) -> bool {
     // Two leading separators are not always a host. `\\?\` and `\\.\`
     // open the device namespace, where `\\?\C:\clips\x.mp4` is the long
-    // spelling of a local file — what a caller reaches for past MAX_PATH —
-    // and only the UNC device names a host. Backslashes only: an
-    // extended-length path reaches the object manager unnormalised, so the
-    // forward-slash pairings are not this prefix.
+    // spelling of a local file (used past MAX_PATH), and only the UNC
+    // device names a host. Backslashes only: an extended-length path
+    // reaches the object manager unnormalised, so the forward-slash
+    // pairings are not this prefix.
     if let Some(rest) = url
         .strip_prefix(r"\\?\")
         .or_else(|| url.strip_prefix(r"\\.\"))
@@ -1203,18 +1180,16 @@ fn names_a_network_share(url: &str) -> bool {
     )
 }
 
-/// The URL with its scheme in the parser's normalised form and every
-/// other byte untouched. The transports below match their schemes as
-/// text, so normalise once here rather than teach each of them that
-/// `RTSP://` is the same request as `rtsp://`.
+/// The URL with its scheme in the parser's normalised form and every other
+/// byte untouched. The transports match their schemes as text, so this
+/// normalises once instead of teaching each that `RTSP://` is `rtsp://`.
 ///
-/// Spliced only where the leading bytes really are that scheme in some
-/// other case. The parser skips leading control characters and spaces
-/// before it reads a scheme, so its answer does not always start at byte
-/// zero of what the caller wrote, and splicing on length alone would
-/// build a string that is neither what was asked for nor what was
-/// parsed. Where the two disagree the URL is left exactly as it came in
-/// and the transport's own parser sees the same input this one did.
+/// Spliced only where the leading bytes really are that scheme in another
+/// case. The parser skips leading control characters and spaces before
+/// reading a scheme, so its scheme does not always start at byte zero, and
+/// splicing on length alone would build a string that is neither the
+/// input nor what was parsed. Where they disagree the URL is left as it
+/// came in.
 fn with_normalised_scheme(url: &str, scheme: &str) -> String {
     match url.get(..scheme.len()) {
         Some(prefix) if prefix.eq_ignore_ascii_case(scheme) && prefix != scheme => {
@@ -1224,8 +1199,8 @@ fn with_normalised_scheme(url: &str, scheme: &str) -> String {
     }
 }
 
-/// Classify `url`, and hand back the spelling the lanes below should
-/// use. An unknown scheme is a typed refusal.
+/// Classify `url` and return the spelling the openers should use. An
+/// unknown scheme is a typed refusal.
 fn classify(url: &str) -> Result<(SourceKind, String), EngineError> {
     let Ok(parsed) = url::Url::parse(url) else {
         return Ok((SourceKind::File, url.to_owned()));
@@ -1249,6 +1224,8 @@ fn classify(url: &str) -> Result<(SourceKind, String), EngineError> {
     Ok((kind, with_normalised_scheme(url, scheme)))
 }
 
+/// The opener: source and demuxer construction (blocking I/O), then the
+/// pipeline threads.
 fn open_and_run(
     px: Arc<PipelineShared>,
     request: OpenRequest,
@@ -1258,14 +1235,12 @@ fn open_and_run(
 ) {
     let diag = Arc::clone(&px.diag);
     let (kind, url) = match classify(&request.url) {
-        // `open_with_source` states the URL is display-only, so when the
-        // caller brought the bytes the URL is a label and names nothing
-        // to open — whatever it happens to parse as. Refusing a label
-        // would break such a caller, and reading one as a location is
-        // worse: "case 4" parses as a relative path, which would hand a
-        // caller-supplied playlist a filesystem arm rooted at the working
+        // With `open_with_source` the URL is display-only, whatever it
+        // parses as. Refusing it would break such a caller, and reading it
+        // as a location is worse: "case 4" parses as a relative path, which
+        // would let a caller-supplied playlist fetch files from the working
         // directory. Every transport branch below already requires no
-        // override, so nothing else moves.
+        // override.
         Ok((_, url)) if source_override.is_some() => (SourceKind::Supplied, url),
         Err(_) if source_override.is_some() => (SourceKind::Supplied, request.url.clone()),
         Ok(classified) => classified,
@@ -1279,10 +1254,10 @@ fn open_and_run(
         audio_track: request.audio_track,
     };
 
-    // A separate audio leg is only meaningful where the primary is an
+    // A separate audio leg only makes sense where the primary is an
     // on-demand byte stream. Every live transport carries both tracks in
-    // one stream, and a caller-supplied source is a single stream by
-    // construction — refusing loudly beats silently playing no audio.
+    // one stream, and a caller-supplied source is a single stream. Refuse
+    // rather than silently play no audio.
     if request.audio_url.is_some()
         && (kind.is_live_transport()
             || source_override.is_some()
@@ -1316,8 +1291,8 @@ fn open_and_run(
         return;
     }
 
-    // Live HTTP lanes take the resilience path: a streaming source plus a
-    // factory that rebuilds source + demuxer on transport loss.
+    // Live HTTP: a streaming source plus a factory that rebuilds source and
+    // demuxer on transport loss.
     if source_override.is_none() && is_http && request.liveness == SourceLiveness::Live {
         open_http_live(
             px,
@@ -1336,9 +1311,8 @@ fn open_and_run(
             diag: Arc::clone(&diag),
         })
     } else if is_http {
-        // Declared-live HTTP took the factory path above; this is the
-        // ranged on-demand source, which is also the probe that settles
-        // Auto.
+        // The ranged on-demand source, which is also the probe that
+        // settles Auto.
         let gate: Arc<dyn media_io::AddressGate> = if request.allow_local_addresses {
             Arc::new(AllowAllGate)
         } else {
@@ -1346,9 +1320,8 @@ fn open_and_run(
         };
         match HttpSource::open(&url, IoLimits::default(), gate, px.io_cancel.clone()) {
             Ok(source) => {
-                // A split session is an on-demand shape by construction
-                // (the resolver states liveness for those), so the audio
-                // leg's own source keeps the declared answer.
+                // A split session is always on-demand (the resolver states
+                // liveness for those), so it is never inferred live.
                 if request.liveness == SourceLiveness::Auto
                     && request.audio_url.is_none()
                     && !source.is_seekable()
@@ -1361,12 +1334,10 @@ fn open_and_run(
                             "liveness inferred Live for {url}: the source states neither a usable length nor byte ranges"
                         ),
                     );
-                    // The probe's own body is the live stream, so the live
-                    // lane adopts it. Connecting again to read the same
-                    // bytes costs a handshake against the join budget and
-                    // rejoins the stream later than it left it, and an
-                    // origin serving one client at a time cannot give a
-                    // second connection at all.
+                    // The probe's body is the live stream, so adopt it.
+                    // Connecting again costs a handshake, rejoins the stream
+                    // later than the probe left it, and fails outright on an
+                    // origin that serves one client at a time.
                     match media_io::HttpLiveSource::adopt(
                         source,
                         &IoLimits::default(),
@@ -1421,8 +1392,8 @@ fn open_and_run(
         }
     };
 
-    // The router sniffs the container; extension and resolver hints are
-    // hints only. A playlist head routes to the HLS lane.
+    // The container is sniffed, not taken from the extension. A playlist
+    // head goes to `open_hls`.
     let mut source = source;
     let mut head = [0u8; 1024];
     match read_head(&mut source, &mut head) {
@@ -1436,10 +1407,9 @@ fn open_and_run(
             match read_all(&mut source, PLAYLIST_CAP) {
                 Ok(playlist) => {
                     drop(source);
-                    // Only a playlist actually opened off the disk gets a
-                    // fetcher that can reach it; everything else, a
-                    // caller-supplied source included, stays on the
-                    // network side.
+                    // Only a playlist opened off the disk gets a fetcher
+                    // that can reach the disk. Everything else, including a
+                    // caller-supplied source, stays on the network side.
                     let origin = if kind == SourceKind::File {
                         PlaylistOrigin::Disk
                     } else {
@@ -1492,8 +1462,8 @@ fn open_and_run(
 
 /// Builds the demuxer for a split session's audio leg: one plain on-demand
 /// byte stream, HTTP(S) or a local file. Fails the session and returns
-/// `None` if it cannot be opened — a split source that loses its audio is
-/// not a session worth playing silently.
+/// `None` if it cannot be opened: a split source without its audio is not
+/// worth playing silently.
 fn open_audio_leg(
     px: &Arc<PipelineShared>,
     url: &str,
@@ -1507,8 +1477,6 @@ fn open_audio_leg(
             return None;
         }
     };
-    // The leg is one plain on-demand byte stream by construction, so the
-    // live transports are refused here as they are for the primary.
     if kind.is_live_transport() {
         px.fail(EngineError::config(
             "audio_url applies to on-demand HTTP(S) and file sources only",
@@ -1560,8 +1528,7 @@ fn open_audio_leg(
 }
 
 /// Common tail of the open: swap in the configured Bank, then spawn the
-/// pipeline threads around the demuxer (and the reconnect factory when the
-/// lane has one).
+/// pipeline threads around the demuxer and the reconnect factory, if any.
 fn finish_open(
     px: Arc<PipelineShared>,
     demuxer: Box<dyn media_demux::Demuxer>,
@@ -1602,9 +1569,9 @@ fn finish_open_split(
             .store(duration.as_micros(), Ordering::Relaxed);
     }
 
-    // The real Bank for this session's config; an unsatisfiable derivation
-    // is a reported error, never a clamp. The liveness flag is published
-    // before the state leaves Opening, and `set_state` releases it: a
+    // The real Bank for this session's config. An unsatisfiable config is
+    // a reported error, never a clamp. The liveness flag is published
+    // before the state leaves Opening and `set_state` releases it, so a
     // caller that observes Buffering observes this store.
     px.live
         .store(bank_cfg.liveness == Liveness::Live, Ordering::Release);
@@ -1616,16 +1583,16 @@ fn finish_open_split(
         }
     }
 
-    // Auto-play posture, but the clock stays parked until the first frame
-    // is actually ready: starting it at open would burn the startup-hold
-    // time as instant lateness. The video thread starts it.
+    // Auto-play, but the clock stays parked until the first frame is
+    // ready: starting it at open would turn the startup wait into instant
+    // lateness. The decode threads start it.
     px.set_state(State::Buffering);
 
     let (video_tx, video_rx) = sync_channel(VIDEO_CHANNEL_DEPTH);
     let (audio_tx, audio_rx) = sync_channel(AUDIO_CHANNEL_DEPTH);
 
-    // A split pair announces itself here, where the second thread is
-    // actually being spawned, so no leg is ever waited on that never runs.
+    // Set here, where the second thread is actually spawned, so nothing
+    // ever waits on a leg that never runs.
     let leg = if audio_leg.is_some() {
         let _ = px.split.set(pipeline::SplitLegs::new());
         pipeline::Leg::Video
@@ -1761,9 +1728,8 @@ mod classify_tests {
         }
     }
 
-    /// The scheme is lowercased for the transports below, which match it
-    /// as text; every other byte, case included, is left exactly as the
-    /// caller wrote it.
+    /// The scheme is lowercased for the transports, which match it as
+    /// text. Every other byte, case included, is left as written.
     #[test]
     fn only_the_scheme_is_normalised() {
         assert_eq!(spelling("RTSP://Host/Path?Q=V"), "rtsp://Host/Path?Q=V");
@@ -1775,12 +1741,10 @@ mod classify_tests {
     }
 
     /// The parser skips leading control characters and spaces before it
-    /// reads a scheme, so its answer does not always begin at byte zero
-    /// of the input. Splicing on length alone would graft the normalised
-    /// scheme onto a string still carrying part of the original one —
-    /// " http://h/x" becoming "httpp://h/x", a URL nobody asked for.
-    /// Where the leading bytes are not that scheme, the input is passed
-    /// through untouched for the transport's own parser to read.
+    /// reads a scheme, so its scheme does not always begin at byte zero.
+    /// Splicing on length alone would turn " http://h/x" into
+    /// "httpp://h/x". Where the leading bytes are not that scheme, the
+    /// input is passed through untouched.
     #[test]
     fn a_scheme_the_parser_found_past_the_start_is_not_spliced() {
         for url in [
@@ -1794,13 +1758,11 @@ mod classify_tests {
         }
     }
 
-    /// A string that does not parse as a URL at all is a path, not an
-    /// error — so the unknown-scheme refusal never sees it. That is why
-    /// `open_and_run` overrides the kind whenever the caller brought the
-    /// bytes rather than only when classification fails: a label like
-    /// `"case 4"` reads as a relative path here, and left alone would
-    /// give a caller-supplied playlist a filesystem arm rooted at the
-    /// working directory.
+    /// A string that does not parse as a URL is a path, so the
+    /// unknown-scheme refusal never sees it. That is why `open_and_run`
+    /// overrides the kind whenever the caller brought the bytes: a label
+    /// like `"case 4"` reads as a relative path here, and would otherwise
+    /// let a caller-supplied playlist fetch from the working directory.
     #[test]
     fn a_label_that_does_not_parse_as_a_url_reads_as_a_path() {
         for label in ["case 4", "burst run", "the third one"] {
@@ -1842,10 +1804,8 @@ mod classify_tests {
         for url in [
             r"\\?\C:\clips\x.ts",
             r"\\.\C:\clips\x.ts",
-            // A device name whose fourth byte falls inside a character.
-            // The prefix test counts bytes and the value is a str, so
-            // slicing to a fixed length is a panic waiting for a name
-            // that is not all ASCII.
+            // A device name whose fourth byte falls inside a character:
+            // slicing a str to a fixed byte length would panic here.
             "\\\\?\\A𐀀\\x.ts",
             // A device whose name merely begins with those three letters
             // is not the UNC device.
@@ -1885,10 +1845,9 @@ mod close_tests {
                 self.stalled = true;
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
-            // Bounded in the type it arrives in: narrowing first would
-            // drop the high bits of an offset past `usize` and read from
-            // wherever the remainder landed. The sibling source in
-            // `tests/routing.rs` orders it the same way.
+            // Bounded as u64 before narrowing: narrowing first would drop
+            // the high bits of an offset past `usize` and read from
+            // wherever the remainder landed.
             if offset >= self.data.len() as u64 {
                 return Ok(0);
             }
@@ -1900,10 +1859,10 @@ mod close_tests {
     }
 
     /// The opener registers the pipeline's threads part-way through its own
-    /// run, so a close arriving mid-open takes a list holding only the
-    /// opener. Joining that is not the end of the job: the threads it
-    /// spawned meanwhile are in the list by the time the join returns, and
-    /// close must drain it again rather than return with them running.
+    /// run, so a close arriving mid-open finds only the opener in the list.
+    /// The threads it spawned meanwhile are in the list once that join
+    /// returns, and close must drain it again rather than leave them
+    /// running.
     #[test]
     fn close_mid_open_joins_the_threads_the_opener_registered() {
         let path = concat!(

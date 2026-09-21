@@ -1,13 +1,13 @@
-//! The leased FramePool: a small fixed pool of decoder-format
-//! frames between decode and present. The decode side blocks (bounded,
-//! stop-aware) when the pool is exhausted; the present side never blocks —
-//! it takes the newest due frame or nothing. Waiting is one-directional by
-//! construction, which is what makes the backpressure deadlock-safe.
+//! The leased FramePool: a small fixed pool of decoder-format frames
+//! between decode and present. A full pool is backpressure on the decode
+//! side. The present side never blocks: it takes the newest due frame or
+//! nothing. Waiting only ever runs one way, so the backpressure cannot
+//! deadlock.
 //!
 //! Slots carry owned [`VideoFrame`]s, so an opaque (decoder-native GPU)
-//! frame rides the pool exactly like a CPU frame; recycling a slot drops
+//! frame moves through the pool like a CPU frame. Recycling a slot drops
 //! the payload, which for an opaque frame returns the buffer to the
-//! adapter's image reader — the pool depth is therefore part of the
+//! adapter's image reader. The pool depth is therefore part of the
 //! adapter's outstanding-image budget.
 
 use std::sync::{Arc, Condvar, Mutex};
@@ -19,20 +19,19 @@ pub const POOL_SLOTS: usize = 4;
 
 /// How far behind the audio-led clock a frame may be when it is chosen and
 /// still be shown. Past it the frame is recycled and the picture already
-/// on screen stays: a held picture under sound that is right is preferred
-/// to a moving one that is out of step with it.
+/// on screen stays. A held picture under correct sound is preferred to a
+/// moving one out of step with it.
 ///
-/// A late picture puts the sound ahead of it, which is the direction
-/// people notice first. EBU R37 limits end-to-end error that way to 40 ms
-/// (60 ms the other way); ITU-R BT.1359-1 puts detectability at 45 ms and
-/// acceptability at 90 ms (125 and 185 ms the other way). Media players
-/// sit in the same place: ExoPlayer drops an output buffer 30 ms late, VLC
-/// a picture one frame period late. Healthy playback presents a frame a
-/// few milliseconds after its time and crosses 40 ms for under one frame
-/// in a thousand, so the limit costs it nothing. It is a fixed figure
-/// rather than a frame period, which at 60 fps would sit inside the
-/// display's own quantisation, and it is measured from the clock rather
-/// than from the render path's lookahead target.
+/// A late picture puts the sound ahead of it, the direction people notice
+/// first. EBU R37 limits end-to-end error that way to 40 ms (60 ms the
+/// other way); ITU-R BT.1359-1 puts detectability at 45 ms and
+/// acceptability at 90 ms (125 and 185 ms the other way). ExoPlayer drops
+/// an output buffer 30 ms late, VLC a picture one frame period late.
+/// Healthy playback presents a frame a few milliseconds after its time and
+/// crosses 40 ms for under one frame in a thousand. The limit is a fixed
+/// figure because a frame period at 60 fps would sit inside the display's
+/// own quantisation. It is measured from the clock, not from the render
+/// path's lookahead target.
 pub const MAX_PRESENT_LATE: MediaTime = MediaTime::from_millis(40);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,10 +107,10 @@ impl FramePool {
         })
     }
 
-    /// Decode side: publish one frame if a slot is free; a full pool hands
-    /// the frame back as backpressure — the caller holds it and keeps
-    /// presenting; it never blocks, because the thread publishing may be the
-    /// presenter that frees the slots.
+    /// Decode side: publish one frame if a slot is free. A full pool hands
+    /// the frame back as backpressure and the caller holds it. This never
+    /// blocks, because the publishing thread may be the presenter that
+    /// frees the slots.
     pub fn try_publish(&self, frame: VideoFrame, generation: u64) -> Result<(), VideoFrame> {
         let mut state = self.state.lock().expect("pool lock");
         let Some(slot_index) = state.slots.iter().position(|s| s.state == SlotState::Free) else {
@@ -140,9 +139,8 @@ impl FramePool {
         self.take_due_locked(state, now, clock)
     }
 
-    /// `take_due` for the render thread: a try-lock, so a publish in flight
-    /// on the video thread costs a re-present, never a wait (the
-    /// render thread never blocks on a media-path lock).
+    /// `take_due` for the render thread. It try-locks, so a publish in
+    /// flight on the video thread costs a re-present, never a wait.
     pub fn try_take_due(&self, now: MediaTime, clock: MediaTime) -> Option<Lease> {
         let state = self.state.try_lock().ok()?;
         self.take_due_locked(state, now, clock)
@@ -154,8 +152,7 @@ impl FramePool {
         now: MediaTime,
         clock: MediaTime,
     ) -> Option<Lease> {
-        // On the stack: this runs on the render thread once per event, and
-        // the pool is a handful of slots.
+        // On the stack: this runs on the render thread once per event.
         let mut found = [0usize; POOL_SLOTS];
         let mut count = 0;
         for (i, slot) in state.slots.iter().enumerate() {
@@ -174,7 +171,6 @@ impl FramePool {
             }
             _ => (None, &*due),
         };
-        // The rest lost the race to the clock: recycle them.
         for &stale in due {
             state.slots[stale].state = SlotState::Free;
             state.slots[stale].frame = None;
@@ -200,7 +196,7 @@ impl FramePool {
         Some(lease)
     }
 
-    /// The pts of the oldest Ready frame, if any — the restart point for a
+    /// The pts of the oldest Ready frame, if any: the restart point for a
     /// parked clock.
     pub fn first_ready_pts(&self) -> Option<MediaTime> {
         let state = self.state.lock().expect("pool lock");
@@ -210,7 +206,7 @@ impl FramePool {
             .map(|i| state.slots[i].pts)
     }
 
-    /// Present side, on teardown/flush inspection: how many frames wait.
+    /// How many frames are waiting.
     pub fn ready_count(&self) -> usize {
         let state = self.state.lock().expect("pool lock");
         state
@@ -225,8 +221,8 @@ impl FramePool {
     }
 
     /// Free a lease's slot. The frame itself is the caller's to keep or
-    /// drop — an opaque frame may need to outlive the lease until the
-    /// render thread has consumed it.
+    /// drop: an opaque frame may need to outlive the lease until the render
+    /// thread has consumed it.
     pub fn release(&self, lease: Lease) {
         let mut state = self.state.lock().expect("pool lock");
         state.slots[lease.slot].state = SlotState::Free;

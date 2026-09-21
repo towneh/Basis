@@ -1,25 +1,23 @@
-//! Shared-playback soft sync target: receivers feed the owner's
-//! extrapolated position in and the engine runs the correction ladder —
-//! dead band (no action) → bounded slew → seek only past a large
-//! threshold. The hard seek is the last rung, never the first.
+//! Shared-playback soft sync target. Receivers feed in the owner's
+//! extrapolated position and the engine runs the correction ladder: a dead
+//! band with no action, then a bounded slew, then a seek past a large
+//! threshold.
 //!
 //! How the slew is applied depends on the clock master:
 //!
 //! - **Audio master:** the engine publishes the wanted rate offset
 //!   (`PipelineShared::sync_rate_ppm`, surfaced in the ABI snapshot) and
 //!   the managed audio pull consumes source frames at `1x + offset`
-//!   through its resampler. The audio playhead then genuinely moves
-//!   faster or slower, the clock follows it through the ladder, and
-//!   video follows the clock — A/V stays aligned throughout the
-//!   correction. A consumer that ignores the rate degrades gracefully:
-//!   the error grows until the seek rung takes it.
+//!   through its resampler. The audio playhead moves faster or slower, the
+//!   clock follows it and video follows the clock, so A/V stays aligned
+//!   during the correction. A consumer that ignores the rate lets the
+//!   error grow until the seek rung takes it.
 //! - **Wall master** (no audio track): the engine slews the clock
 //!   directly ([`media_clock::MediaClock::slew_wall`]).
 //!
-//! Live lanes ignore sync targets entirely: the stream clock is
-//! authoritative there and depth is per-viewer latency — divergence is
-//! bounded by the Bank's lag cap (`OpenRequest::max_divergence_ms`), not
-//! chased by corrections.
+//! Live sessions ignore sync targets. The stream clock is authoritative
+//! and depth is per-viewer latency; divergence is bounded by the Bank's
+//! lag cap (`OpenRequest::max_divergence_ms`) instead.
 
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
@@ -34,8 +32,7 @@ use crate::pipeline::PipelineShared;
 /// and chasing it would keep the rate oscillating.
 pub const SYNC_DEAD_BAND: MediaTime = MediaTime::from_millis(150);
 /// Beyond this the slew would take too long to converge and the viewer
-/// is visibly elsewhere: seek (the C player's drift-seek figure, now the
-/// last rung rather than the only one).
+/// is visibly elsewhere, so seek.
 pub const SYNC_SEEK_THRESHOLD: MediaTime = MediaTime::from_secs(2);
 /// Slew magnitude, ppm of 1x. Matches the clock's slew cap so an
 /// audio-master correction can be followed at full rate (2%,
@@ -55,7 +52,7 @@ pub(crate) struct SyncShared {
     pub target: Mutex<Option<SyncTarget>>,
 }
 
-/// What one evaluation decided. Pure ladder — unit-testable without a
+/// What one evaluation decided. Pure, so it is unit-testable without a
 /// session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncAction {
@@ -108,9 +105,9 @@ fn clear_rate(px: &PipelineShared) {
     px.clock.lock().expect("clock lock").slew_wall(wall, 0);
 }
 
-/// One ladder pass against the current position. Corrections only apply
-/// to a playing VOD session: live lanes never chase, and a
-/// buffering/paused/seeking session is left to settle first.
+/// One ladder pass against the current position. Corrections apply only
+/// to a playing on-demand session: live sessions never chase, and a
+/// buffering, paused or seeking session is left to settle first.
 pub(crate) fn evaluate(px: &PipelineShared, wall: MediaTime) {
     let Some(target) = *px.sync.target.lock().expect("sync lock") else {
         return;
