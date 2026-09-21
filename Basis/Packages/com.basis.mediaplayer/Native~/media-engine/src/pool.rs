@@ -154,15 +154,28 @@ impl FramePool {
         now: MediaTime,
         clock: MediaTime,
     ) -> Option<Lease> {
-        let mut due: Vec<usize> = (0..state.slots.len())
-            .filter(|&i| state.slots[i].state == SlotState::Ready && state.slots[i].pts <= now)
-            .collect();
-        due.sort_by_key(|&i| state.seq[i]);
+        // On the stack: this runs on the render thread once per event, and
+        // the pool is a handful of slots.
+        let mut found = [0usize; POOL_SLOTS];
+        let mut count = 0;
+        for (i, slot) in state.slots.iter().enumerate() {
+            if slot.state == SlotState::Ready && slot.pts <= now {
+                found[count] = i;
+                count += 1;
+            }
+        }
+        let due = &mut found[..count];
+        due.sort_unstable_by_key(|&i| state.seq[i]);
         // The newest due frame is shown unless it is too late to be in
         // step with the sound, in which case every due frame is.
-        let newest = due.pop_if(|&mut i| clock - state.slots[i].pts <= MAX_PRESENT_LATE);
+        let (newest, due) = match due.split_last() {
+            Some((&last, older)) if clock - state.slots[last].pts <= MAX_PRESENT_LATE => {
+                (Some(last), older)
+            }
+            _ => (None, &*due),
+        };
         // The rest lost the race to the clock: recycle them.
-        for &stale in &due {
+        for &stale in due {
             state.slots[stale].state = SlotState::Free;
             state.slots[stale].frame = None;
             state.dropped += 1;
