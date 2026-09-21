@@ -1,12 +1,13 @@
 #!/bin/sh
-# The engine gate on Linux. Run before committing; everything here must pass.
-# Steps whose tool is missing print SKIPPED and do not fail the run.
-# TESTING.md ("Running the tests") says what each step checks and needs.
+# The engine's gate on Linux: run it before committing, and every step must
+# pass. The RIST, conformance, impairment and split-source steps print
+# SKIPPED when what they need is missing and the run still ends green, so
+# look for those lines; any other missing tool fails the run. TESTING.md
+# ("Running the tests") lists what each step checks and what it needs.
 #
-#   ./tools/ci.sh          # fmt, clippy, tests, the RIST build, deny, vet,
-#                          # and the headless playback checks
-#   ./tools/ci.sh --fuzz   # additionally build the fuzz targets (needs
-#                          # nightly + cargo-fuzz)
+#   tools/ci.sh          # the gate
+#   tools/ci.sh --fuzz   # the gate, then build the fuzz targets
+#                        # (needs nightly Rust and cargo-fuzz)
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -16,25 +17,26 @@ echo "== cargo clippy"
 cargo clippy --workspace --all-targets --examples -- -D warnings
 echo "== cargo test"
 cargo test --workspace
-# RIST feature graph: only when the librist static is staged — the default
-# build stays librist-free.
+# RIST is an optional transport linked against librist, so its steps run
+# only once tools/build-librist.sh has built the library.
 if [ -f third_party/librist/linux-x64/librist.a ]; then
-    echo "== clippy (rist feature)"
+    echo "== RIST clippy"
     cargo clippy -p media-rist -p media-engine --features media-engine/rist --all-targets -- -D warnings
-    echo "== test (rist feature)"
+    echo "== RIST tests"
     cargo test -p media-rist --features librist
 else
-    echo "SKIPPED: rist feature — librist not staged"
+    echo "SKIPPED: RIST, librist not built (tools/build-librist.sh)"
 fi
 echo "== cargo deny check"
 cargo deny check
 echo "== cargo vet"
 cargo vet
+# Conformance: every MP4 and TS fixture must demux to what ffprobe reads.
 if command -v ffprobe >/dev/null 2>&1; then
     echo "== conformance (ffprobe oracle)"
     cargo run -q -p bm-probe -- conformance fixtures
 else
-    echo "SKIPPED: conformance — ffprobe not on PATH"
+    echo "SKIPPED: conformance, ffprobe not on PATH (install ffmpeg)"
 fi
 # Software decode: AV1 and Opus through the whole engine, no GPU needed.
 echo "== software decode (AV1 + Opus)"
@@ -54,7 +56,7 @@ if echo "$caps" | grep -q '"h264"' && echo "$caps" | grep -q '"aac"'; then
     cargo run -q -p bm-probe -- play fixtures/split/h264-640x360-30fps-video.mp4 \
         --audio-url fixtures/split/aac-48k-stereo-audio.m4a --duration 9
 else
-    echo "SKIPPED: impairment and split source — no H.264 or AAC decode on this platform"
+    echo "SKIPPED: impairment and split source, no H.264 or AAC decoder on this platform"
 fi
 if [ "${1:-}" = "--fuzz" ]; then
     echo "== cargo fuzz build"

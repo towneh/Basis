@@ -1,11 +1,13 @@
-# The engine gate on Windows. Run before committing; everything here must pass.
-# Steps whose tool is missing print SKIPPED and do not fail the run.
-# TESTING.md ("Running the tests") says what each step checks and needs.
+# The engine's gate on Windows: run it before committing, and every step must
+# pass. The RIST, Android and conformance steps print SKIPPED when what they
+# need is missing and the run still ends green, so look for those lines; any
+# other missing tool fails the run. TESTING.md ("Running the tests") lists
+# what each step checks and what it needs. Needs PowerShell 7 (pwsh).
 #
-#   .\tools\ci.ps1          # fmt, clippy, tests, the RIST and Android builds,
-#                           # deny, vet, and the headless playback checks
-#   .\tools\ci.ps1 -Fuzz    # additionally build the fuzz targets (needs
-#                           # nightly + cargo-fuzz; Linux/WSL only)
+#   .\tools\ci.ps1          # the gate
+#   .\tools\ci.ps1 -Fuzz    # the gate, then build the fuzz targets (needs
+#                           # nightly Rust and cargo-fuzz, which build only
+#                           # on Linux or WSL)
 
 param([switch]$Fuzz)
 
@@ -24,50 +26,50 @@ function Step($name, $block) {
 Step "cargo fmt --check"   { cargo fmt --check }
 Step "cargo clippy"        { cargo clippy --workspace --all-targets --examples -- -D warnings }
 Step "cargo test"          { cargo test --workspace }
-# RIST feature graph: only when the librist static is staged (built from
-# source by tools/build-librist.ps1) — the default build stays librist-free.
+# RIST is an optional transport linked against librist, so its steps run
+# only once tools/build-librist.ps1 has built the library.
 if (Test-Path "third_party/librist/win-x64/rist.lib") {
-    Step "clippy (rist feature)" { cargo clippy -p media-rist -p media-engine --features media-engine/rist --all-targets -- -D warnings }
-    Step "test (rist feature)"   { cargo test -p media-rist --features librist }
+    Step "RIST clippy" { cargo clippy -p media-rist -p media-engine --features media-engine/rist --all-targets -- -D warnings }
+    Step "RIST tests"  { cargo test -p media-rist --features librist }
 } else {
-    Write-Host "SKIPPED: rist feature — librist not staged (tools/build-librist.ps1)" -ForegroundColor Yellow
+    Write-Host "SKIPPED: RIST, librist not built (tools/build-librist.ps1)" -ForegroundColor Yellow
 }
-# Android: the aarch64 graph must keep compiling on every commit.
-# Needs the rust target plus an NDK (android-env.ps1 finds Unity's);
-# skipped loudly when either is absent. Runs in a child shell so the
-# toolchain env does not leak into later steps.
+# Android: the engine must compile and lint for Quest (aarch64). Needs the
+# Rust target and an Android NDK; android-env.ps1 finds the one Unity's
+# Android support installs. Runs in a child shell so the NDK environment
+# does not leak into later steps.
 $androidTarget = (rustup target list --installed) -contains "aarch64-linux-android"
 if ($androidTarget) {
-    Step "android check (aarch64)" {
+    Step "Android (aarch64)" {
         pwsh -NoProfile -Command {
             Set-Location $args[0]
             . .\tools\android-env.ps1 | Out-Null
             if ($env:BM_ANDROID_ENV_OK -ne "1") {
-                Write-Host "SKIPPED: android check — no NDK found" -ForegroundColor Yellow
+                Write-Host "SKIPPED: Android, no NDK found (install Unity's Android support)" -ForegroundColor Yellow
                 exit 0
             }
-            # RIST rides the shipping Android build, so lint it there too
-            # when the static is staged — skipping it loudly is how the
-            # transport stayed absent from Quest while shipping elsewhere.
+            # The Android plugin ships with RIST, so lint with it when
+            # librist has been built for Android.
             $rist = Join-Path (Get-Location) "third_party\librist\android-arm64\librist.a"
             if (Test-Path $rist) {
                 cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec --features rist -- -D warnings
             } else {
-                Write-Host "NOTE: android clippy without --features rist (no staged librist; run tools/build-librist-android.sh)" -ForegroundColor Yellow
+                Write-Host "NOTE: Android linted without RIST, librist not built for Android (tools/build-librist-android.sh)" -ForegroundColor Yellow
                 cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec -- -D warnings
             }
             exit $LASTEXITCODE
         } -args (Get-Location).Path
     }
 } else {
-    Write-Host "SKIPPED: android check — aarch64-linux-android target not installed" -ForegroundColor Yellow
+    Write-Host "SKIPPED: Android, Rust target not installed (rustup target add aarch64-linux-android)" -ForegroundColor Yellow
 }
 Step "cargo deny check"    { cargo deny check }
 Step "cargo vet"           { cargo vet }
+# Conformance: every MP4 and TS fixture must demux to what ffprobe reads.
 if (Get-Command ffprobe -ErrorAction SilentlyContinue) {
     Step "conformance (ffprobe oracle)" { cargo run -q -p bm-probe -- conformance fixtures }
 } else {
-    Write-Host "SKIPPED: conformance — ffprobe not on PATH" -ForegroundColor Yellow
+    Write-Host "SKIPPED: conformance, ffprobe not on PATH (install ffmpeg)" -ForegroundColor Yellow
 }
 # Software decode: AV1 and Opus through the whole engine, no GPU needed.
 Step "software decode (AV1 + Opus)" {

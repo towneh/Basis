@@ -48,8 +48,10 @@ after that it takes a few minutes.
 | Impairment | A recorded bad-network profile replayed through the engine at 1x; playback has to keep going within the buffer model | H.264 and AAC decoders, so Linux skips it today |
 | Split source | Video and audio from two files play as one session | H.264 and AAC decoders, so Linux skips it today |
 
-**A step whose requirement is missing prints `SKIPPED:` in yellow and the run
-still ends green**, so check for those lines before trusting a pass.
+**RIST, Android, Conformance, Impairment and Split source print `SKIPPED:` in
+yellow when what they need is missing, and the run still ends green**, so check
+for those lines before trusting a pass. Every other step fails the run if its
+tool is missing.
 `-Fuzz` (`--fuzz` on Linux) also builds the fuzz targets, which needs nightly
 Rust on Linux or WSL (see [`fuzz/`](fuzz/README.md)).
 
@@ -310,7 +312,7 @@ row's source, and read the captures and `adb logcat -s basis-media`.
 
 | Row | What it checks | How to run | Runs in |
 | --- | --- | --- | --- |
-| Android build lane | The whole engine graph compiles and lints clean for `aarch64-linux-android`, without the AV1 software decoder. | the gate's `android check (aarch64)` step (skips loudly without an NDK). By hand: `. .\tools\android-env.ps1` then `cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec -- -D warnings` | CI, Android build |
+| Android build lane | The whole engine graph compiles and lints clean for `aarch64-linux-android`, without the AV1 software decoder. | the gate's `Android (aarch64)` step (prints SKIPPED without an NDK). By hand: `. .\tools\android-env.ps1` then `cargo clippy --target aarch64-linux-android -p media-ffi -p decode-mediacodec -- -D warnings` | CI, Android build |
 | Engine .so | `libbasis_media.so` links only against `libmediandk`, `liblog` and the C runtime, and exports the ABI plus `UnityPluginLoad` and `JNI_OnLoad`. | `. .\tools\android-env.ps1; cargo build --target aarch64-linux-android -p media-ffi --release`, then `llvm-readelf -d`/`--dyn-syms` on `target/aarch64-linux-android/release/libbasis_media.so` | By hand |
 | Playback on device | MediaCodec hardware decode presents via Vulkan into a `RenderTexture` under OpenXR, with AAC audio, a mid-run seek and natural end. | a Quest build playing a fixture with a seek | Device (Quest) |
 | Managed package on device | The package plays with Vulkan output, audio resampled to the device rate, and position advancing one second per second. | a Quest build playing a fixture; grade the frame capture | Device (Quest) |

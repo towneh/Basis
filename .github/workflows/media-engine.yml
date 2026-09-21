@@ -38,11 +38,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The full Windows gate: fmt, clippy -D warnings, the test suite (which also
-  # replays every pinned fuzz crash input without sanitizers), the rist feature
-  # graph against a from-source librist, cargo-deny + cargo-vet, the ffprobe
-  # conformance oracle, and the headless playback checks (software decode,
-  # impairment, split source).
+  # The Windows gate, verbatim ci.ps1, with librist built first so the RIST
+  # steps run. The test suite also replays every pinned fuzz crash input,
+  # without sanitizers.
   windows-x64:
     runs-on: windows-latest
     timeout-minutes: 90
@@ -66,7 +64,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2,cargo-vet@0.10.2
-      - name: Build librist (rist feature rows)
+      - name: Build librist (RIST steps)
         working-directory: ${{ env.NATIVE_DIR }}
         run: |
           pip install meson ninja
