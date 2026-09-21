@@ -43,7 +43,7 @@ impl VideoSink {
         coded_height: u32,
         decode_device: Option<*mut std::ffi::c_void>,
     ) -> Result<(), media_present::PresentError> {
-        let presenter = match decode_device {
+        let mut presenter = match decode_device {
             // SAFETY: the contract above admits only a device live
             // across this call; new_on_device clones its own reference.
             Some(device) => unsafe {
@@ -57,6 +57,16 @@ impl VideoSink {
                 media_present::SharedTexturePresenter::new(coded_width.max(2), coded_height.max(2))?
             }
         };
+        let d3d12 = media_present::win_unity::host_is_d3d12();
+        if d3d12 {
+            presenter.enable_d3d12_handoff()?;
+        }
+        // Written on both paths, so it always describes the presenter
+        // being installed.
+        px.present.lookahead_events.store(
+            if d3d12 { 2 } else { 1 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
         px.shared.shared_texture_handle.store(
             presenter.shared_handle(),
             std::sync::atomic::Ordering::Release,

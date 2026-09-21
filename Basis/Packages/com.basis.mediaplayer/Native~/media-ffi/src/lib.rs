@@ -1,4 +1,4 @@
-//! ABI v2 boundary (§7): opaque generational handles, one snapshot poll
+//! ABI v4 boundary (§7): opaque generational handles, one snapshot poll
 //! per frame, SPSC event drain, a lock-free audio pull, and one
 //! render-event function pointer, whose event id selects the pass.
 //! Poll-driven, no reverse callbacks; UTF-8 both directions;
@@ -12,7 +12,18 @@
 //! handle-as-pointer)` once per frame. The render event opens the shared
 //! handle on Unity's device on first use and then only ever runs a
 //! keyed-mutex acquire + `CopyResource` — it never waits on a media-path
-//! lock. Teardown order: stop issuing render events, then
+//! lock.
+//!
+//! Graphics contract (D3D12, normative): the same texture and the same
+//! event, with the texture an `ID3D12Resource`. `UnityPluginLoad` takes
+//! `IUnityGraphicsD3D12v8` from Unity; the render event records a
+//! `CopyResource` from the newest finished shared slot onto Unity's
+//! current command list and never waits. The plugin holds its own
+//! references to the texture and the slots until Unity's frame fence
+//! passes their last copy, so the texture may be released straight after
+//! `bm_session_close`.
+//!
+//! Teardown order: stop issuing render events, then
 //! `bm_session_close`; the Unity texture must outlive the last issued
 //! event, and on Vulkan by a few render events more, which the caller
 //! keeps issuing as `BM_EVENT_COLLECT` (see
@@ -31,7 +42,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use media_engine::{OpenRequest, PipelineShared, Session, SessionShared};
 #[cfg(windows)]
-use media_present::SharedTextureConsumer;
+use media_present::{D3d12Consumer, PresentError, SharedTextureConsumer};
 
 pub const BM_ABI_VERSION: u32 = 4;
 
@@ -289,9 +300,81 @@ struct Entry {
 #[cfg(windows)]
 enum ConsumerSlot {
     Unopened,
-    Open(u64, SharedTextureConsumer),
+    Open(u64, Consumer),
     /// The handle whose open failed, and how many attempts it has had.
     Failed(u64, u32),
+}
+
+/// The render thread's half of the handoff, per the API Unity renders
+/// with. The registered texture is an `ID3D11Texture2D*` or an
+/// `ID3D12Resource*` accordingly, so the choice follows Unity's renderer
+/// and never the presenter, which a busy lock could hide.
+#[cfg(windows)]
+enum Consumer {
+    D3d11(SharedTextureConsumer),
+    D3d12(D3d12Consumer),
+}
+
+/// An open that succeeded, or one that cannot be tried until a later
+/// render event. Only a failed open spends an attempt.
+#[cfg(windows)]
+enum Opened {
+    Open(Consumer),
+    NotReady,
+}
+
+#[cfg(windows)]
+impl Consumer {
+    /// # Safety
+    /// `texture` is the texture the managed side registered, live for the
+    /// render events it is registered for; `shared_handle` is the engine's
+    /// live shared-texture handle for the session `px` belongs to.
+    unsafe fn open(
+        texture: *mut c_void,
+        shared_handle: u64,
+        px: &PipelineShared,
+    ) -> Result<Opened, PresentError> {
+        let Some(host) = media_present::win_unity::unity_d3d12_host() else {
+            if media_present::win_unity::renderer_is_d3d12() {
+                return Err(PresentError(
+                    "Unity is on Direct3D 12 without IUnityGraphicsD3D12v8".into(),
+                ));
+            }
+            // SAFETY: forwarded from this function's contract.
+            return unsafe { SharedTextureConsumer::open(texture, shared_handle) }
+                .map(|c| Opened::Open(Self::D3d11(c)));
+        };
+        // A busy lock, no presenter yet, or one that does not own the
+        // handle this event read (a rebuild publishes the handle before it
+        // installs the presenter) all settle on a later event.
+        let handoff = match px.presenter.try_lock() {
+            Ok(mut presenter) => match presenter.as_mut() {
+                Some(p) if p.shared_handle() == shared_handle => {
+                    // Built while Unity's device was between a shutdown and
+                    // the next initialize: give it the handoff now.
+                    if p.d3d12_handoff().is_none() {
+                        p.enable_d3d12_handoff()?;
+                        px.present.lookahead_events.store(2, Ordering::Relaxed);
+                    }
+                    p.d3d12_handoff()
+                }
+                _ => return Ok(Opened::NotReady),
+            },
+            Err(_) => return Ok(Opened::NotReady),
+        };
+        let handoff = handoff
+            .ok_or_else(|| PresentError("the presenter has no Direct3D 12 handoff".into()))?;
+        // SAFETY: on Direct3D 12 the registered texture is Unity's
+        // `ID3D12Resource*`, per this function's contract.
+        unsafe { D3d12Consumer::open(texture, handoff, host) }.map(|c| Opened::Open(Self::D3d12(c)))
+    }
+
+    fn copy_if_fresh(&mut self) -> Result<bool, PresentError> {
+        match self {
+            Self::D3d11(consumer) => consumer.copy_if_fresh(),
+            Self::D3d12(consumer) => consumer.copy_if_fresh(),
+        }
+    }
 }
 
 /// How many times one shared handle's consumer open is attempted before
@@ -320,6 +403,26 @@ impl ConsumerSlot {
                 }
             }
         }
+    }
+
+    /// Record attempt `attempt` at an open for `handle`. A consumer not
+    /// ready to open leaves the slot as it was. Returns the error of a
+    /// failed open for the caller to log.
+    fn settle(
+        &mut self,
+        handle: u64,
+        attempt: u32,
+        outcome: Result<Opened, PresentError>,
+    ) -> Option<PresentError> {
+        match outcome {
+            Ok(Opened::Open(consumer)) => *self = ConsumerSlot::Open(handle, consumer),
+            Ok(Opened::NotReady) => {}
+            Err(e) => {
+                *self = ConsumerSlot::Failed(handle, attempt);
+                return Some(e);
+            }
+        }
+        None
     }
 }
 
@@ -1063,7 +1166,8 @@ fn copy_utf8(text: Option<&str>, buf: &mut [u8]) -> u32 {
 }
 
 /// Register the Unity-created output texture (from `GetNativeTexturePtr`)
-/// the render event writes into. D3D11: a BGRA32 `Texture2D`. Vulkan on
+/// the render event writes into. D3D11 and D3D12: a BGRA32 `Texture2D`
+/// at the snapshot's display size. Vulkan on
 /// Android: a **linear** (no sRGB) RGBA32 `RenderTexture` with
 /// `enableRandomWrite`, created at the snapshot's display size (see
 /// `media_present::android` for the full contract).
@@ -1078,7 +1182,8 @@ fn copy_utf8(text: Option<&str>, buf: &mut [u8]) -> u32 {
 /// not already doing.
 ///
 /// `texture` must be the live native texture owned by Unity's device
-/// (`ID3D11Texture2D*` on D3D11, `VkImage` on Vulkan). The plugin builds
+/// (`ID3D11Texture2D*` on D3D11, `ID3D12Resource*` on D3D12, `VkImage` on
+/// Vulkan). The plugin builds
 /// its own objects over it — a shared-texture consumer on D3D11, an image
 /// view on Vulkan — and cannot destroy them until it can prove the GPU is
 /// done with them, which takes render events. So on Vulkan the texture
@@ -1143,7 +1248,9 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
         // engine stamps consumer liveness, picks the due frame against
         // its mirrored clock with a vsync of lookahead, and converts into
         // the shared texture; the keyed-mutex copy below then lands it in
-        // Unity's texture within the same event.
+        // Unity's texture within the same event. On Direct3D 12 the copy
+        // takes the newest frame already finished, which is an earlier
+        // event's, and the engine selects a refresh further ahead to match.
         media_engine::render_present(&entry.pipeline);
         let texture = entry.unity_texture.load(Ordering::Acquire);
         let shared_handle = entry.shared.shared_texture_handle.load(Ordering::Acquire);
@@ -1154,25 +1261,21 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
             return;
         };
         if let Some(attempt) = slot.attempt_for(shared_handle) {
-            // SAFETY: texture is the ID3D11Texture2D* the managed side
-            // registered and contracts to keep alive; shared_handle is the
-            // engine's live shared-texture handle for this session.
-            *slot =
-                match unsafe { SharedTextureConsumer::open(texture as *mut c_void, shared_handle) }
-                {
-                    Ok(consumer) => ConsumerSlot::Open(shared_handle, consumer),
-                    Err(e) => {
-                        // The first says a session is in trouble and the
-                        // last says it has stopped trying; the ones
-                        // between would be a line per render event.
-                        if attempt == 1 || attempt == MAX_CONSUMER_OPENS {
-                            media_diag::diag_log!(
-                                "consumer open failed (attempt {attempt}/{MAX_CONSUMER_OPENS}): {e}"
-                            );
-                        }
-                        ConsumerSlot::Failed(shared_handle, attempt)
-                    }
-                };
+            // SAFETY: texture is the one the managed side registered and
+            // contracts to keep alive; shared_handle is the engine's live
+            // shared-texture handle for this session.
+            let outcome =
+                unsafe { Consumer::open(texture as *mut c_void, shared_handle, &entry.pipeline) };
+            // The first says a session is in trouble and the last says it
+            // has stopped trying; the ones between would be a line per
+            // render event.
+            if let Some(e) = slot.settle(shared_handle, attempt, outcome)
+                && (attempt == 1 || attempt == MAX_CONSUMER_OPENS)
+            {
+                media_diag::diag_log!(
+                    "consumer open failed (attempt {attempt}/{MAX_CONSUMER_OPENS}): {e}"
+                );
+            }
         }
         if let ConsumerSlot::Open(_, consumer) = &mut *slot
             && consumer.copy_if_fresh().unwrap_or(false)
@@ -1291,6 +1394,28 @@ pub unsafe extern "C" fn UnityPluginLoad(interfaces: *mut c_void) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn UnityPluginUnload() {}
 
+/// Unity plugin lifecycle on Windows: records Unity's Direct3D 12
+/// interface when that is the renderer. Direct3D 11 needs nothing from it.
+///
+/// # Safety
+/// Called by Unity with its live `IUnityInterfaces*`.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn UnityPluginLoad(interfaces: *mut c_void) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: Unity passes its live interface table.
+        unsafe { media_present::win_unity::plugin_load(interfaces) };
+    }));
+}
+
+/// # Safety
+/// Called by Unity at plugin unload; takes nothing.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn UnityPluginUnload() {
+    let _ = catch_unwind(media_present::win_unity::plugin_unload);
+}
+
 /// `System.loadLibrary` hands over the JavaVM here; the MediaCodec
 /// capability probe uses it for the `MediaCodecList` ceilings query.
 /// It is also the first moment the library runs on this platform, so the
@@ -1391,6 +1516,32 @@ mod tests {
             ConsumerSlot::Failed(HANDLE, MAX_CONSUMER_OPENS).attempt_for(HANDLE + 1),
             Some(1),
             "a new handle starts over"
+        );
+    }
+
+    /// A consumer that cannot be opened yet (the presenter's lock busy, or
+    /// a rebuild half done) is asked again on the next event without
+    /// spending an attempt. Were it counted, a run of busy events would
+    /// exhaust the bound and the session would never present.
+    #[cfg(windows)]
+    #[test]
+    fn an_open_that_is_not_ready_spends_no_attempt() {
+        const HANDLE: u64 = 0x1234;
+
+        let mut slot = ConsumerSlot::Unopened;
+        for _ in 0..MAX_CONSUMER_OPENS * 4 {
+            let attempt = slot.attempt_for(HANDLE).expect("still open to attempts");
+            assert_eq!(attempt, 1, "a not-ready event spent an attempt");
+            assert!(slot.settle(HANDLE, attempt, Ok(Opened::NotReady)).is_none());
+        }
+
+        let attempt = slot.attempt_for(HANDLE).expect("an attempt");
+        let failed = slot.settle(HANDLE, attempt, Err(PresentError("refused".into())));
+        assert!(failed.is_some(), "a failed open reports its error");
+        assert_eq!(
+            slot.attempt_for(HANDLE),
+            Some(2),
+            "a failed open spends its attempt"
         );
     }
 
