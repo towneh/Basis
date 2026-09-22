@@ -1708,6 +1708,7 @@ dependencies = [
  "media-clock",
  "media-decode",
  "media-demux",
+ "media-diag",
  "windows",
 ]
 

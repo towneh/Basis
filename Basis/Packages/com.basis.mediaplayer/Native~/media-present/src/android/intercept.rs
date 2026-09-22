@@ -122,11 +122,22 @@ unsafe extern "C" fn on_device_event(event_type: c_int) {
 /// # Safety
 /// Called only from `on_device_event`, on Unity's graphics thread.
 unsafe fn device_event(event_type: c_int) {
+    let gfx =
+        *GRAPHICS_IFACE.lock().unwrap_or_else(|e| e.into_inner()) as *mut unity::IUnityGraphics;
+    let renderer = if gfx.is_null() {
+        -1
+    } else {
+        // SAFETY: a Unity-owned vtable, valid for the process lifetime; the
+        // renderer query is valid from plugin load (Null before the device
+        // initialises).
+        unsafe { (*gfx).get_renderer.map(|f| f()).unwrap_or(-1) }
+    };
+    unity::log(&format!(
+        "device_event: type {event_type}, renderer {renderer}"
+    ));
     if event_type != unity::DEVICE_EVENT_INITIALIZE {
         return;
     }
-    let gfx =
-        *GRAPHICS_IFACE.lock().unwrap_or_else(|e| e.into_inner()) as *mut unity::IUnityGraphics;
     let v2 = *VULKAN_IFACE.lock().unwrap_or_else(|e| e.into_inner())
         as *mut unity::IUnityGraphicsVulkanV2;
     if gfx.is_null() || v2.is_null() {

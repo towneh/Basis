@@ -84,8 +84,18 @@ static RENDERER: AtomicI32 = AtomicI32::new(-1);
 
 unsafe extern "system" fn on_device_event(event: c_int) {
     match event {
-        DEVICE_EVENT_INITIALIZE => capture(),
+        DEVICE_EVENT_INITIALIZE => {
+            capture();
+            media_diag::diag_log!(
+                "unity device event: initialize, renderer {}",
+                RENDERER.load(Ordering::Acquire)
+            );
+        }
         DEVICE_EVENT_SHUTDOWN => {
+            media_diag::diag_log!(
+                "unity device event: shutdown, renderer {}",
+                RENDERER.load(Ordering::Acquire)
+            );
             D3D12.store(std::ptr::null_mut(), Ordering::Release);
             release_retired();
         }
