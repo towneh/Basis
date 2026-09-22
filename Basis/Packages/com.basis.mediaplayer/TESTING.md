@@ -50,6 +50,8 @@ Give the build its own capture filenames first; both write to the same
 | Resync a page URL | **Resync Everyone** well into a YouTube or Twitch source | All clients land together at the owner's position, not zero, with no seek before the reload. The shared URL stays the page URL |
 | Join mid-resync | Join during a resync reopen | Lands at the owner's position, not near zero |
 | Local resync | A follower presses **Local Resync** | Only that client reopens |
+| Inspector buttons | The same two presses from the networking component's inspector, in Play Mode | Same as from the panel |
+| Untrusted URL | The owner sets a URL on a host outside `BasisTrustedUrls` | The follower loads it with no prompt |
 | A video hours long | Owner seeks deep into a fragmented video of two hours or more, then a client joins. Try a direct URL (see the engine guide's "A fragmented MP4 hours long") and `https://www.youtube.com/watch?v=aNS5o3VJ0-A` (11 h, H.264) | Opens as fast as a short video; the joiner lands beside the owner |
 
 No follower may snap to the start during any resync, even briefly. With the
@@ -121,6 +123,31 @@ script logging `UserDataReceived`:
 | Seek | Seek back | Logging resumes from the landed frame |
 | Late subscriber | Subscribe a few seconds in | Starts with the message then due |
 | Subscriber one frame late | Subscribe from `Update` after `Open` | Receives the first message |
+
+## URL consent
+
+A URL on a host outside `BasisTrustedUrls` prompts before it opens. Pick a host
+that is not on the built-in list (`BasisTrustedUrls.GetBuiltIn()`), and clear
+the user list (`ClearAll()`) between rows that remember. One client unless
+stated.
+
+| Row | Do | Expect |
+| --- | --- | --- |
+| Authored URL | A scene player with an untrusted URL and **Play On Start**, enter Play Mode | The prompt shows; nothing opens until **Accept**. **Decline** leaves the player idle |
+| Panel URL | Type the same URL into the Media Players panel | Opens with no prompt |
+| Declined, then Play | **Decline** the authored prompt, then press the panel's **Play** | Prompts again |
+| Re-open | Let a source end, or **Local Resync** with no networking, then **Play** | Re-opens with no prompt |
+| Remember | Accept with Remember set to the URL, then the host, then the domain, re-entering Play Mode each time | The next entry does not prompt; `GetUserAdded()` shows the pattern |
+| Play while pending | Press the panel's **Play** while the prompt is up, then **Accept** | Plays as soon as the source is up |
+| Page URL | An untrusted YouTube page URL, with the yt-dlp package installed | One prompt; the extracted stream opens with no second one |
+| Split pair | A script calls `Open(video, audio)` with the audio leg on an untrusted host | Prompts for the audio URL as well; nothing opens until both are accepted |
+| World script sets the room's URL | A script calls `SetUrl` on the networking component with an untrusted URL, two clients | The owner is asked first; **Decline** sends nothing, and the follower loads only after **Accept** |
+| Prop | A prop whose script calls `OpenUserUrl` on its player | Prompts, then plays |
+| Prop bypass | The same prop calling `OpenResolved` or `SetSubtitleTracks` | Refused by the sandbox |
+| Avatar auto-start | An avatar carrying a `BasisMediaPlayer` with an authored URL and **Play On Start** | Nothing opens and nothing prompts; **Play On Start** is off on the loaded copy |
+
+Closing the menu does not answer the prompt. It moves to the notification list,
+where it can be brought back up or dismissed; a dismissal is a decline.
 
 ## Admin media lock
 

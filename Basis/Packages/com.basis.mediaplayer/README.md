@@ -83,6 +83,25 @@ the platform has no decoder, and AV1 on Quest Pro.
 `BasisMediaPlayer.EngineCapabilities` lists what the current machine can play,
 with each video codec's route and maximum resolution and frame rate.
 
+### Asking before a URL opens
+
+Before the player opens a URL on a host the user has not trusted, it shows
+them the URL and waits for an answer. This happens whichever route asked for
+the open, including **Play On Start**, world scripts, props and
+`BasisMediaPlayerStreaming`. The prompt can remember the answer for the URL,
+the host or the domain, in the same `BasisTrustedUrls` list the rest of the
+client keeps. If **Play** is pressed while the prompt is up, playback starts
+once the user accepts.
+
+Two routes skip the prompt. A URL typed into the Media Players panel opens
+straight away, since the user chose it, and followers in shared playback load
+whatever the owner chose without being asked. A page URL prompts once, for the
+page; the stream a resolver extracts from it does not prompt again.
+
+Cilbox props can open URLs through the prompting routes only. `OpenResolved`
+and `SetSubtitleTracks` are not available to them, and avatar and prop content
+has **Play On Start** cleared on load.
+
 ## Video output
 
 `BasisVideoMaterialOutput` sets the video on one or more renderers' materials
