@@ -1112,10 +1112,18 @@ fn a_seek_past_the_last_frame_lands_on_it_and_ends() {
             > presented_before,
         "it ended without showing the last frame"
     );
-    let shown = shared.position_us.load(Ordering::Relaxed);
+    // The frame on screen is read separately: position is the clock's, and
+    // the clock runs on to the end of the audio before Ended is reported.
+    let shown = session.pipeline().presented_pts_us.load(Ordering::Relaxed);
     assert!(
         (5_900_000..6_000_000).contains(&shown),
         "it landed on {shown}, not on the last frame"
+    );
+    let position = shared.position_us.load(Ordering::Relaxed);
+    let duration = shared.duration_us.load(Ordering::Relaxed);
+    assert!(
+        position >= 5_900_000 && position <= duration,
+        "position {position} at Ended is not within the media ({duration})"
     );
     session.close();
 }
