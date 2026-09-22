@@ -344,27 +344,18 @@ namespace Cilbox
 		{
 			if (declaringType == typeof(global::BasisMediaPlayer))
 			{
-				// A prop may not open a URL: the player does not yet ask the user before
-				// opening one, so every open route is withheld, including the resolver's
-				// entry and sidecar subtitles, which are fetched from a URL the caller picks.
-				// Play, pause, seek, close, track selection, status and events stay available.
-				if (name == nameof(global::BasisMediaPlayer.Open) ||
-					name == nameof(global::BasisMediaPlayer.OpenUserUrl) ||
-					name == nameof(global::BasisMediaPlayer.OpenResolved) ||
+				// A prop opens URLs only through routes that ask the user first (Open,
+				// OpenUserUrl, and Configure on BasisMediaPlayerStreaming). OpenResolved
+				// takes what a resolver produced on trust, so a prop could hand it a forged
+				// result and skip the prompt; sidecar subtitles are fetched from a URL the
+				// caller picks with no prompt at all. Play, pause, seek, close, track
+				// selection, status and events stay available.
+				if (name == nameof(global::BasisMediaPlayer.OpenResolved) ||
 					name == nameof(global::BasisMediaPlayer.SetSubtitleTracks))
 				{
 					mi = null;
 					return false;
 				}
-			}
-
-			// Configure resolves the streaming URL a prop can author and opens it on the
-			// player, which is the same bypass by another door.
-			if (declaringType == typeof(global::BasisMediaPlayerStreaming) &&
-				name == nameof(global::BasisMediaPlayerStreaming.Configure))
-			{
-				mi = null;
-				return false;
 			}
 
 			return base.CheckMethodAllowed(out mi, declaringType, name, parametersIn, genericArgumentsIn, fullSignature);

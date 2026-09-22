@@ -119,6 +119,10 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     private int lastObservedLoadGeneration;
     private bool announcedThisLoad;
 
+    // Each SetUrl takes the next number; an older one that resumes after a newer
+    // one (a slow answer, a slow control grant) stands down instead of loading.
+    private int setUrlOperation;
+
     // Ownership can arrive without anyone asking for it: the framework's join-time
     // ownership query silently claims an ownerless object server-side and reports the
     // joiner as its owner. Such an implicit owner holds nothing but the scene's default
@@ -469,16 +473,53 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         ClearSyncTarget();
     }
 
-    public async Task SetUrl(string url)
+    /// <summary>Load a URL for the whole room. Completes with true once the load
+    /// has been issued, and with false when the user declined the URL, it was
+    /// refused, a later load superseded it, or control could not be taken.</summary>
+    public Task<bool> SetUrl(string url)
     {
-        if (string.IsNullOrEmpty(url))
+        if (mediaPlayer == null || string.IsNullOrEmpty(url))
         {
-            return;
+            return Task.FromResult(false);
         }
 
-        if (!await AcquireControlAsync())
+        // Asked before anything is announced: a URL the user declines must never
+        // reach the room.
+        int operation = ++setUrlOperation;
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        mediaPlayer.WhenApproved(
+            url,
+            approved => Complete(done, SetApprovedUrl(approved, operation)),
+            () => done.TrySetResult(false));
+        return done.Task;
+    }
+
+    private static async void Complete(TaskCompletionSource<bool> done, Task<bool> load)
+    {
+        try
         {
-            return;
+            done.TrySetResult(await load);
+        }
+        catch (Exception e)
+        {
+            done.TrySetException(e);
+        }
+    }
+
+    /// <summary><see cref="SetUrl"/> for a URL the user has already answered
+    /// for: the one they typed into the Media Players panel.</summary>
+    internal Task<bool> SetApprovedUrl(string url) => SetApprovedUrl(url, ++setUrlOperation);
+
+    private async Task<bool> SetApprovedUrl(string url, int operation)
+    {
+        if (string.IsNullOrEmpty(url) || operation != setUrlOperation)
+        {
+            return false;
+        }
+
+        if (!await AcquireControlAsync() || operation != setUrlOperation)
+        {
+            return false;
         }
 
         currentSyncedUrl = url;
@@ -500,7 +541,8 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         BroadcastFullState(freshLoad: true);
 
         ClearSyncTarget();
-        mediaPlayer.OpenUserUrl(url);
+        mediaPlayer.OpenApprovedUrl(url);
+        return true;
     }
 
     /// <summary>Force every client, this one included, back onto this player's current
@@ -616,7 +658,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         suppressResyncSettleBroadcast = true;
         ClearSyncTarget();
         NotePendingLoadRequest();
-        mediaPlayer.OpenUserUrl(currentSyncedUrl);
+        mediaPlayer.OpenApprovedUrl(currentSyncedUrl);
     }
 
     public async Task Play()
@@ -626,7 +668,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
             return;
         }
 
-        StartOrResumeLocal();
+        StartOrResumeLocal(approved: false);
     }
 
     public async Task Stop()
@@ -658,7 +700,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
             return;
         }
 
-        StartOrResumeLocal();
+        StartOrResumeLocal(approved: false);
     }
 
     public async Task Seek(TimeSpan position)
@@ -936,7 +978,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         applyingRemoteCommand = true;
         try
         {
-            StartOrResumeLocal();
+            StartOrResumeLocal(approved: true);
         }
         finally
         {
@@ -1062,7 +1104,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
                 pendingRemoteStashedAt = Time.realtimeSinceStartup;
                 pendingRemoteApply = true;
                 NotePendingLoadRequest();
-                mediaPlayer.OpenUserUrl(url);
+                mediaPlayer.OpenApprovedUrl(url);
                 return;
             }
 
@@ -1074,7 +1116,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
                     break;
 
                 case SyncedPlaybackState.Playing:
-                    StartOrResumeLocal();
+                    StartOrResumeLocal(approved: true);
                     ApplyOwnerPosition(positionTicks, 0);
                     break;
 
@@ -1226,7 +1268,10 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
     /// <summary>Start playing, whichever state the session is in: resume a paused
     /// one, and re-open the synced URL when there is no session left to resume.</summary>
-    private void StartOrResumeLocal()
+    // approved: the open is the owner's choice arriving over the network, which nobody
+    // here is asked about. The local user's own Play on an idle player is asked, unless
+    // the URL was already approved on this player.
+    private void StartOrResumeLocal(bool approved)
     {
         switch (mediaPlayer.State)
         {
@@ -1241,7 +1286,16 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
                 return;
             default:
                 string url = GetActiveUrl();
-                if (!string.IsNullOrEmpty(url))
+                if (string.IsNullOrEmpty(url))
+                {
+                    return;
+                }
+
+                if (approved)
+                {
+                    mediaPlayer.OpenApprovedUrl(url);
+                }
+                else
                 {
                     mediaPlayer.OpenUserUrl(url);
                 }

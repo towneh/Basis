@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Globalization;
 using System.Text;
+using Basis.BasisUI;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -98,6 +99,17 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     ulong _handle;
     bool _open;
     bool _abiChecked;
+
+    // URL consent. The request id tells a prompt's answer from one another
+    // open or a close has already replaced. _approvedUrl is the last URL
+    // accepted or trusted on this player, so a resolver handing it straight
+    // back to Open is not asked twice for one action.
+    bool _urlApprovalPending;
+    bool _playRequestedWhileApprovalPending;
+    string _pendingApprovalUrl = string.Empty;
+    int _urlApprovalRequestId;
+    Action _pendingApprovalDeclined;
+    string _approvedUrl;
     Texture _texture;
     Texture2D _artwork;
     bool _artworkRead;
@@ -423,7 +435,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         string streamUrl = ActiveStreamUrl;
         string streamAudioUrl = ActiveAudioStreamUrl;
         bool wasPlaying = State == BmState.Playing || State == BmState.Buffering;
-        Open(streamUrl, streamAudioUrl);
+        OpenStreams(streamUrl, streamAudioUrl);
         if (wasPlaying) Play();
     }
 
@@ -571,20 +583,57 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// <summary>Open a split pair: a video-only source and the
     /// audio-only one that belongs with it. Pass null for the second
     /// argument to open an ordinary muxed source and drop any pair
-    /// left over from a previous open.</summary>
+    /// left over from a previous open. An untrusted host asks the user
+    /// first, as <see cref="Open(string)"/> does.</summary>
     public void Open(string sourceUrl, string sourceAudioUrl)
     {
-        audioUrl = sourceAudioUrl;
-        Open(sourceUrl);
+        // Both legs are fetched, so both are asked about. Coming back through
+        // Open after the first answer is what reaches the second check.
+        if (!IsApproved(sourceUrl))
+        {
+            RequestUrlApproval(sourceUrl, approved => Open(approved, sourceAudioUrl));
+            return;
+        }
+        if (!string.IsNullOrEmpty(sourceAudioUrl) && !IsApproved(sourceAudioUrl))
+        {
+            RequestUrlApproval(sourceAudioUrl, approvedAudio => OpenStreams(sourceUrl, approvedAudio));
+            return;
+        }
+        OpenStreams(sourceUrl, sourceAudioUrl);
     }
 
     /// <summary>
     /// Open whatever the user actually typed or a world author authored,
     /// steering page URLs (a YouTube or Twitch watch page) through any
     /// installed resolver. A directly-playable URL opens straight
-    /// through, and with no resolver installed every URL does.
+    /// through, and with no resolver installed every URL does. A host the
+    /// user has not trusted (<see cref="BasisTrustedUrls"/>) is shown to
+    /// them first and opens only if they accept.
     /// </summary>
     public void OpenUserUrl(string sourceUrl)
+    {
+        if (!PrepareUserUrl(ref sourceUrl))
+            return;
+        if (!IsApproved(sourceUrl))
+        {
+            RequestUrlApproval(sourceUrl, OpenPreparedUrl);
+            return;
+        }
+        OpenPreparedUrl(sourceUrl);
+    }
+
+    /// <summary>
+    /// <see cref="OpenUserUrl"/> without the consent prompt, for a URL the
+    /// user has already answered for: one they typed into the menu, or the
+    /// one the shared-playback owner chose for the room.
+    /// </summary>
+    internal void OpenApprovedUrl(string sourceUrl)
+    {
+        if (PrepareUserUrl(ref sourceUrl))
+            OpenPreparedUrl(sourceUrl);
+    }
+
+    bool PrepareUserUrl(ref string sourceUrl)
     {
         // Refused up front as well as at Open, so a locked client never hands a page
         // URL to the resolver: that route leaves this method and comes back through
@@ -594,17 +643,139 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             BasisDebug.LogWarning(
                 "BasisMediaPlayer.OpenUserUrl blocked: media players are locked by an admin.",
                 BasisDebug.LogTag.Video);
-            return;
+            return false;
         }
         sourceUrl = BasisMediaUrlRouter.NormalizeUrl(sourceUrl);
-        if (string.IsNullOrEmpty(sourceUrl))
-            return;
+        return !string.IsNullOrEmpty(sourceUrl);
+    }
+
+    void OpenPreparedUrl(string sourceUrl)
+    {
+        _approvedUrl = sourceUrl;
         // The resolver owns the load once it claims the URL: it opens the
         // player itself, asynchronously, when extraction finishes.
         if (!BasisMediaUrlRouter.IsDirectlyPlayable(sourceUrl)
             && BasisMediaUrlRouter.TryResolveAndLoad(this, sourceUrl))
             return;
-        Open(sourceUrl, null);
+        OpenStreams(sourceUrl, null);
+    }
+
+    bool IsApproved(string sourceUrl)
+        => !string.IsNullOrWhiteSpace(sourceUrl)
+           && (string.Equals(sourceUrl, _approvedUrl, StringComparison.Ordinal)
+               || BasisTrustedUrls.IsTrusted(sourceUrl));
+
+    /// <summary>
+    /// Calls <paramref name="open"/> with the normalised URL once the user has
+    /// approved it (at once when it is trusted or already approved on this
+    /// player), or <paramref name="declined"/> when the URL is refused, the
+    /// user says no, nobody can be asked, or another open supersedes the
+    /// question. Exactly one of the two runs. Shared playback uses this to ask
+    /// before it announces a URL to the room.
+    /// </summary>
+    internal void WhenApproved(string sourceUrl, Action<string> open, Action declined)
+    {
+        if (!PrepareUserUrl(ref sourceUrl))
+        {
+            declined?.Invoke();
+            return;
+        }
+        if (IsApproved(sourceUrl))
+        {
+            open(sourceUrl);
+            return;
+        }
+        RequestUrlApproval(sourceUrl, open, declined);
+    }
+
+    void RequestUrlApproval(string sourceUrl, Action<string> open, Action declined = null)
+    {
+        ClearPendingUrlApproval();
+        if (!Uri.TryCreate(sourceUrl, UriKind.Absolute, out Uri uri))
+        {
+            BasisDebug.LogWarning("[BasisMedia] refused invalid URL.", BasisDebug.LogTag.Video);
+            declined?.Invoke();
+            return;
+        }
+
+        _pendingApprovalUrl = sourceUrl;
+        _urlApprovalPending = true;
+        _pendingApprovalDeclined = declined;
+        int requestId = ++_urlApprovalRequestId;
+        // The question is a newer load than any resolve still in flight, whose
+        // late result would otherwise open and take the prompt down with it.
+        LoadGeneration++;
+
+        if (!BasisNotificationCenter.RouteToNotifications)
+            BasisMainMenu.Open();
+
+        BasisMenuURLPromptPanel panel = BasisMenuURLPromptPanel.CreateNew(
+            sourceUrl,
+            response =>
+            {
+                if (this == null
+                    || !_urlApprovalPending
+                    || _urlApprovalRequestId != requestId
+                    || !string.Equals(_pendingApprovalUrl, sourceUrl, StringComparison.Ordinal))
+                    return;
+
+                bool playAfterApproval = _playRequestedWhileApprovalPending;
+                Action onDeclined = _pendingApprovalDeclined;
+                _pendingApprovalDeclined = null;
+                ClearPendingUrlApproval();
+                if (!response.Accepted)
+                {
+                    onDeclined?.Invoke();
+                    return;
+                }
+
+                if (response.RememberChoice)
+                {
+                    switch (response.Scope)
+                    {
+                        case BasisMenuURLPromptPanel.RememberChoiceScope.URL:
+                            BasisTrustedUrls.Add(sourceUrl);
+                            break;
+                        case BasisMenuURLPromptPanel.RememberChoiceScope.Hostname:
+                            BasisTrustedUrls.Add(uri.Scheme + "://" + uri.Host + "/*");
+                            break;
+                        case BasisMenuURLPromptPanel.RememberChoiceScope.Domain:
+                            BasisTrustedUrls.AddDomain(uri);
+                            break;
+                    }
+                }
+
+                _approvedUrl = sourceUrl;
+                open(sourceUrl);
+                if (playAfterApproval)
+                    Play();
+            },
+            divertible: true);
+
+        // Null is also what a prompt diverted to the notification list
+        // returns; that one is still pending. With nothing to divert to and
+        // no menu to show it in (a headless client), nobody can answer.
+        if (panel == null && !BasisNotificationCenter.RouteToNotifications
+            && _urlApprovalPending && _urlApprovalRequestId == requestId)
+        {
+            BasisDebug.LogWarning(
+                $"[BasisMedia] refused '{BasisMediaUrlRouter.Redact(sourceUrl)}': no way to ask the user.",
+                BasisDebug.LogTag.Video);
+            ClearPendingUrlApproval();
+        }
+    }
+
+    void ClearPendingUrlApproval()
+    {
+        if (!_urlApprovalPending && !_playRequestedWhileApprovalPending)
+            return;
+        Action declined = _pendingApprovalDeclined;
+        _pendingApprovalDeclined = null;
+        _urlApprovalPending = false;
+        _playRequestedWhileApprovalPending = false;
+        _pendingApprovalUrl = string.Empty;
+        _urlApprovalRequestId++;
+        declined?.Invoke();
     }
 
     /// <summary>
@@ -624,9 +795,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         // way. See ActiveStreamUrl for what is really open.
         string askedFor = !string.IsNullOrEmpty(media.SourceUrl) ? media.SourceUrl : url;
         string askedForAudio = audioUrl;
-        // All of this lands after Open, which clears what the previous
-        // source left behind.
-        Open(media.Url, media.AudioUrl);
+        // All of this lands after the open, which clears what the previous
+        // source left behind. No consent prompt: only a resolver builds a
+        // BasisResolvedMedia, and it did so for a URL the user already
+        // answered for.
+        OpenStreams(media.Url, media.AudioUrl);
         url = askedFor;
         audioUrl = askedForAudio;
         Media = media;
@@ -673,7 +846,17 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// </summary>
     public void Open(string sourceUrl)
     {
-        // The load funnel: the split-pair overload, OpenUserUrl's direct path, a
+        if (!IsApproved(sourceUrl))
+        {
+            RequestUrlApproval(sourceUrl, approved => OpenStreams(approved, audioUrl));
+            return;
+        }
+        OpenStreams(sourceUrl, audioUrl);
+    }
+
+    void OpenStreams(string sourceUrl, string sourceAudioUrl)
+    {
+        // The load funnel: both public Open overloads, OpenUserUrl's direct path, a
         // resolver's OpenResolved and the re-open all land here, so the moderation
         // lock is enforced here rather than at each of them.
         if (BasisNetworkModeration.MediaPlayerBlockedLocally)
@@ -683,6 +866,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
                 BasisDebug.LogTag.Video);
             return;
         }
+        ClearPendingUrlApproval();
+        audioUrl = sourceAudioUrl;
         LoadGeneration++;
         // The track list belongs to a source. A switch re-opens the same
         // one and keeps its choice; anything else starts over, because a
@@ -818,6 +1003,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     public void Play()
     {
+        if (_urlApprovalPending)
+        {
+            _playRequestedWhileApprovalPending = true;
+            return;
+        }
         if (_open) BasisMediaNative.bm_session_play(_handle);
     }
 
@@ -882,6 +1072,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     public void Close()
     {
+        ClearPendingUrlApproval();
         // Before the handle goes: the sink pulls on the audio thread, and
         // dropping the source is what stops it.
         if (_audio != null && ReferenceEquals(_audio.NativePcmSource, this))

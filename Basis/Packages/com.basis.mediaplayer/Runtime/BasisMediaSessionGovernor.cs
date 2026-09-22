@@ -305,7 +305,7 @@ public static class BasisMediaSessionGovernor
         entry.SettledAt = Time.unscaledTime;
         if (player == null || string.IsNullOrEmpty(entry.Url)) return;
 
-        player.OpenUserUrl(entry.Url);
+        player.OpenApprovedUrl(entry.Url);
         // Live sources rejoin at the edge; there is nothing to return to.
         if (entry.Live || entry.PositionSeconds <= 0d) return;
         entry.AwaitingResume = true;

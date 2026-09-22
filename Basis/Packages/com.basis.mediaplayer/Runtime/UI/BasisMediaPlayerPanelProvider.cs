@@ -438,8 +438,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             // visibly becomes "https://youtube.com/…" rather than being silently rewritten.
             string normalized = BasisMediaUrlRouter.NormalizeUrl(u);
             if (normalized != u) _urlField.SetValueWithoutNotify(normalized);
-            if (_activeNetworking != null) _ = _activeNetworking.SetUrl(normalized);
-            else _activePlayer.OpenUserUrl(normalized);
+            if (_activeNetworking != null) _ = _activeNetworking.SetApprovedUrl(normalized);
+            else _activePlayer.OpenApprovedUrl(normalized);
         };
 
         PanelButton playBtn = PanelButton.CreateNew(actions);
