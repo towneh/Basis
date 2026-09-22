@@ -1,6 +1,6 @@
 # Basis Media Player
 
-A video and audio player for Basis worlds. It plays live streams (RTSP, WHEP,
+A video and audio player for the Basis framework. It plays live streams (RTSP, WHEP,
 RIST, HLS and MPEG-TS over HTTPS) and on-demand files (MP4, WebM, Matroska,
 HLS and common audio formats), and keeps every client in a world watching the
 same thing. Video is decoded in hardware where the machine supports it and
