@@ -38,12 +38,7 @@ public sealed class BasisMediaPlayerAudioTap : MonoBehaviour
     private bool spreadMono;                       // replicate ch0 across the DSP width (positioned mono sources)
     private volatile float sourceVolume = 1f;      // this AudioSource's own volume/mute, pushed from the main thread
     private volatile bool active;
-    private volatile int observedChannels;         // DSP width seen on the audio thread; read on the main thread
-
-    /// <summary>The DSP output width Unity hands this (spatialised) source.
-    /// Recorded on the audio thread, safe to read from the main thread for
-    /// diagnostics.</summary>
-    public int ObservedChannels => observedChannels;
+    private volatile int observedChannels;         // DSP width seen on the audio thread
 
     /// <summary>
     /// Called on the main thread by <see cref="BasisMediaPlayerAudio"/> during

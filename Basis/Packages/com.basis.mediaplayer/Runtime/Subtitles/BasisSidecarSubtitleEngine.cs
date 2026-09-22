@@ -22,8 +22,6 @@ internal sealed class BasisSidecarSubtitleEngine
     private int generation;
     private UnityWebRequest activeRequest;
 
-    public bool HasCues => cues != null && cues.Length > 0;
-
     // The engine vets its own media legs, but this fetch goes out over
     // UnityWebRequest and never reaches it. Returns null to allow, or a
     // reason to refuse. The literal check runs first because it needs no
