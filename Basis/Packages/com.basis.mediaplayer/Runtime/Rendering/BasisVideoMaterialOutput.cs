@@ -321,8 +321,9 @@ public sealed class BasisVideoMaterialOutput : MonoBehaviour
             if (target.MaterialIndex < 0 || target.MaterialIndex >= shared.Length) return null;
             return shared[target.MaterialIndex];
         }
-        // Access .materials once to take ownership of a cloned array, then
-        // index into it; accessing .materials repeatedly leaks instances.
+        // The first read of .materials instances the renderer's materials;
+        // later reads return the same instances in a fresh array. They live
+        // until the scene unloads, as for any Renderer.material user.
         var instances = renderer.materials;
         if (target.MaterialIndex < 0 || target.MaterialIndex >= instances.Length) return null;
         return instances[target.MaterialIndex];
