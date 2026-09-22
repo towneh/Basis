@@ -447,11 +447,6 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
 
         ushort owner = CurrentOwnerId;
-        if (owner == 0)
-        {
-            return;
-        }
-
         var local = BasisNetworkPlayer.LocalPlayer;
         if (local != null && owner == local.playerId)
         {
