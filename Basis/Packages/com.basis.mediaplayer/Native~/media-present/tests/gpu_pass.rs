@@ -32,6 +32,7 @@ fn synthetic_nv12(width: usize, height: usize) -> Vec<u8> {
 }
 
 fn max_channel_diff(a: &[u8], b: &[u8]) -> u8 {
+    assert_eq!(a.len(), b.len(), "texture byte lengths differ");
     a.iter()
         .zip(b)
         .map(|(x, y)| x.abs_diff(*y))
