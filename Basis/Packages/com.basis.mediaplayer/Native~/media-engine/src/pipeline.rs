@@ -277,6 +277,13 @@ fn presented_this_generation(presented: u64, current: u64) -> bool {
     presented == current
 }
 
+/// Whether a presentation ends Buffering: only the timeline in force
+/// counts, and not while a pause is waiting to complete on it. Split out
+/// as above.
+fn buffering_ends(presented: u64, current: u64, pause_wanted: bool) -> bool {
+    presented == current && !pause_wanted
+}
+
 /// Whether the audio consumer is still pulling, as of `wall`.
 ///
 /// `i64::MIN` is `last_pull_wall_us`'s never-pulled sentinel and would
@@ -404,6 +411,12 @@ pub struct PipelineShared {
     /// Serialises the transport requests (play, pause, seek) against the
     /// decode threads completing a pause. Never taken on the render thread.
     pub transport: Mutex<()>,
+    /// Held by the demux thread while a seek advances the generation and
+    /// publishes Buffering, and tried (never waited on) by a presentation
+    /// leaving Buffering, so the generation it checks is the one its
+    /// Playing lands on. A presentation that finds it held leaves the
+    /// state alone; the next one retries.
+    pub timeline: Mutex<()>,
     /// A pause is asked for and `play` has not withdrawn it. It outlives a
     /// seek: the seek runs unpaused so the pipeline can land it, and the
     /// pause completes once the landed position is showing.
@@ -844,12 +857,41 @@ impl PipelineShared {
         self.shared.state.load(Ordering::Acquire)
     }
 
-    /// Buffering → Playing at a presentation, unless a pause is waiting on
-    /// it, in which case the state stays Buffering for
-    /// [`Self::settle_pause`].
-    pub(crate) fn leave_buffering(&self) {
-        if self.state() == State::Buffering as u32 && !self.pause_wanted.load(Ordering::Relaxed) {
-            self.set_state(State::Playing);
+    /// Buffering → Playing at a presentation of the timeline in force,
+    /// unless a pause is waiting on it, in which case the state stays
+    /// Buffering for [`Self::settle_pause`]. `generation` is the presented
+    /// frame's: between a seek advancing the generation and the video
+    /// thread clearing the pool, a render event can still present the old
+    /// timeline's due frame, and that must not end the new one's Buffering.
+    pub(crate) fn leave_buffering(&self, generation: u64) {
+        // Under the gate the generation cannot advance between the check
+        // and the store. A seek mid-flight holds it; this presentation then
+        // changes nothing and the next one asks again.
+        let Ok(_timeline) = self.timeline.try_lock() else {
+            return;
+        };
+        if !buffering_ends(
+            generation,
+            self.shared.generation.load(Ordering::Relaxed),
+            self.pause_wanted.load(Ordering::Relaxed),
+        ) {
+            return;
+        }
+        // Claimed rather than stored: a Paused or Ended that landed since
+        // the caller presented stays.
+        let claimed = self.shared.state.compare_exchange(
+            State::Buffering as u32,
+            State::Playing as u32,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if claimed.is_ok() {
+            self.diag.event(
+                self.wall.now(),
+                EventCode::StateChange,
+                Stage::Clock,
+                format!("{:?}", State::Playing),
+            );
         }
     }
 
@@ -1099,6 +1141,10 @@ pub fn run_demux_leg(
                         .lock()
                         .expect("bank lock")
                         .advance_generation(generation);
+                    // Held until Buffering is published below, so no
+                    // presentation of the old timeline can end the new
+                    // one's Buffering in between.
+                    let timeline = px.timeline.lock().expect("timeline lock");
                     px.shared.generation.store(generation.0, Ordering::Relaxed);
                     px.seek_floor_us.store(
                         floor.map_or(NO_FLOOR, MediaTime::as_micros),
@@ -1122,6 +1168,7 @@ pub fn run_demux_leg(
                     // command may have flipped the state back to Playing
                     // between the session call and the clock parking here.
                     px.set_state(State::Buffering);
+                    drop(timeline);
                     let _ = video_tx.send(MediaMsg::Flush { generation });
                     let _ = audio_tx.send(MediaMsg::Flush { generation });
                     px.diag.event(
@@ -2016,7 +2063,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         note_presented(px, lease.generation);
                         px.shown_generation
                             .store(lease.generation, Ordering::Relaxed);
-                        px.leave_buffering();
+                        px.leave_buffering(lease.generation);
                     }
                     Err(e) => {
                         px.fail(EngineError::present(e));
@@ -2454,7 +2501,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     // the clock running.
                     px.settle_pause(Some(generation));
                 } else if playing {
-                    px.leave_buffering();
+                    px.leave_buffering(generation.0);
                 }
             } else if state == State::Playing as u32
                 && !px.video_active.load(Ordering::Relaxed)
@@ -3048,6 +3095,23 @@ mod tests {
         assert!(
             !presented_this_generation(8, 7),
             "a generation that has not been reached yet cannot answer either"
+        );
+    }
+
+    /// Buffering ends at a presentation of the timeline in force only. A
+    /// seek advances the generation before the video thread clears the
+    /// pool, so a render event can still present the retired timeline's
+    /// due frame; that frame reports the old picture, not the landing.
+    #[test]
+    fn buffering_ends_only_for_the_timeline_in_force() {
+        assert!(buffering_ends(7, 7, false), "this timeline presented");
+        assert!(
+            !buffering_ends(7, 8, false),
+            "a frame from the retired timeline ended the new one's Buffering"
+        );
+        assert!(
+            !buffering_ends(7, 7, true),
+            "a pause waiting on the landing keeps Buffering for settle_pause"
         );
     }
 

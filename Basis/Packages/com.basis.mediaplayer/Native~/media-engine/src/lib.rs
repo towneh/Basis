@@ -400,6 +400,7 @@ impl Session {
             presented_pts_us: AtomicI64::new(i64::MIN),
             shown_generation: AtomicU64::new(pipeline::NO_GENERATION),
             transport: Mutex::new(()),
+            timeline: Mutex::new(()),
             pause_wanted: AtomicBool::new(false),
             seeks_pending: AtomicU32::new(0),
             seek_floor_us: AtomicI64::new(pipeline::NO_FLOOR),

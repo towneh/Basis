@@ -162,7 +162,7 @@ fn presented(px: &PipelineShared, pts: MediaTime, generation: u64) {
         .store(pts.as_micros(), Ordering::Relaxed);
     crate::pipeline::note_presented(px, generation);
     px.shown_generation.store(generation, Ordering::Relaxed);
-    px.leave_buffering();
+    px.leave_buffering(generation);
 }
 
 /// The Windows render event's engine half: stamp consumer liveness,
