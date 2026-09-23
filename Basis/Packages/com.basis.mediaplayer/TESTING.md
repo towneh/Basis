@@ -39,6 +39,7 @@ Give the build its own capture filenames first; both write to the same
 | Late join | A client joins mid-playback | It lands at the owner's position |
 | Late join, owner paused | Owner paused; a client rejoins. Try a direct `.mp4`, a page URL, and the owner pausing (or resuming) while the client loads | It lands paused on the owner's frame, silently, and plays when the owner does. If the owner resumed during loading, it comes up playing at the owner's position |
 | Ownership | The second client takes control | The first becomes a follower; neither fights |
+| Late join, owner plays mid-load | Owner paused; a client joins, and the owner presses **Play** while the client is still loading | It comes up Buffering until its seek lands, then Playing at the owner's position. The status never reads Playing while the picture is still the pre-seek one |
 | Owner leaves | Close the owner mid-playback | The follower keeps playing |
 | Admin only | `AdminOnly` on, second client without permission | It cannot take control and has no playback tab |
 | Open to everyone | `AnyoneCanControl` on | The other client gains the controls without reopening the panel |
@@ -177,6 +178,8 @@ newer than the managed side prints as a number.
 | Burst | Set `EventDrainBatch` to 4, open a source | The open's events arrive in one frame. Restore |
 | Full log | Set `SessionDiag::default`'s cap to 2, rebuild, play | `diagnostics log full: N event(s) refused, M this session`. Restore |
 | Cut detail | Open a very long bad URL | The `Error/Source` line ends in `…` |
+| Device events | Open a source, then exit Play Mode | A free-text line `unity device event: initialize, renderer 2` (18 on Direct3D 12) once at start-up, and a `shutdown` line on exit. On Quest, `device_event: type 0, renderer 21` in logcat |
+| Two sessions | With **Engine capture** on, open one source, then another, in one Play Mode entry | Both captures carry a numeric `av_offset_us` once sound and picture run, and neither stays on the sentinel |
 | Transport line | Play any RTSP stream (e.g. `rtsp://stream.vrcdn.live/live/vrcdn`) | `rtsp transport: …` within a second |
 | One copy | Three players, a stream on one | Each `process` line once |
 | Severity | Open a bad URL | `session error:` in red, with no crash report |
