@@ -30,7 +30,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
 
-use video_mft::{VideoMft, create_decoder_for};
+use video_mft::{VideoMft, create_decoder_for, request_low_latency};
 
 // MFStartup version: MF_SDK_VERSION (0x0002) << 16 | MF_API_VERSION (0x0070).
 const MF_VERSION: u32 = 0x0002_0070;
@@ -122,7 +122,8 @@ pub struct H264Decoder {
 }
 
 impl H264Decoder {
-    pub fn new() -> Result<Self, DecodeError> {
+    /// `live` puts the decoder in low-latency mode.
+    pub fn new(live: bool) -> Result<Self, DecodeError> {
         mf_startup()?;
         // SAFETY: COM calls through owned wrappers after mf_startup.
         unsafe {
@@ -130,6 +131,9 @@ impl H264Decoder {
                 CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER),
                 "create H.264 decoder MFT",
             )?;
+            if live {
+                request_low_latency(&mft, "h264");
+            }
             let input = video_input_type(&MFVideoFormat_H264, None)?;
             mf(mft.SetInputType(0, &input, 0), "SetInputType")?;
             Ok(Self {

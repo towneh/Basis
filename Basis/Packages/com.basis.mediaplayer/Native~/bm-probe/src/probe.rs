@@ -117,7 +117,7 @@ fn decode_first_frame(
 ) -> ExitCode {
     use media_decode::{SubmitOutcome, VideoDecoder};
 
-    let mut decoder = match decode_mf::H264Decoder::new() {
+    let mut decoder = match decode_mf::H264Decoder::new(false) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("probe: decoder init: {e}");

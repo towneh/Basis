@@ -6,12 +6,13 @@
 use media_decode::{
     ColorInfo, DecodeError, Nv12Frame, SubmitOutcome, YuvMatrix, YuvRange, packed_nv12_len,
 };
+use media_diag::diag_warn;
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMF2DBuffer2, IMFActivate, IMFSample, IMFTransform, MF_E_NOTACCEPTING,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_SIZE, MF_MT_SUBTYPE, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX,
-    MF2DBuffer_LockFlags_Read, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
-    MFNominalRange_0_255, MFNominalRange_16_235, MFT_CATEGORY_VIDEO_DECODER,
+    CODECAPI_AVLowLatencyMode, IMF2DBuffer, IMF2DBuffer2, IMFActivate, IMFSample, IMFTransform,
+    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_SUBTYPE, MF_MT_VIDEO_NOMINAL_RANGE,
+    MF_MT_YUV_MATRIX, MF2DBuffer_LockFlags_Read, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFNominalRange_0_255, MFNominalRange_16_235, MFT_CATEGORY_VIDEO_DECODER,
     MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_NV12,
@@ -74,6 +75,22 @@ pub(crate) fn create_decoder_for(
         }
         windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
         found
+    }
+}
+
+/// Ask the decoder to hand each frame out as soon as it is decoded. Left
+/// off, the H.264 decoder holds output until its reorder window fills,
+/// which on a live join lands every frame behind the audio-led clock. Set
+/// before the first input. A decoder that refuses is logged and left as
+/// it is.
+pub(crate) fn request_low_latency(mft: &IMFTransform, what: &str) {
+    // SAFETY: attribute write on a live owned transform; no pointers cross.
+    let set = unsafe {
+        mft.GetAttributes()
+            .and_then(|attributes| attributes.SetUINT32(&CODECAPI_AVLowLatencyMode, 1))
+    };
+    if let Err(e) = set {
+        diag_warn!("{what}: low-latency mode refused: {e}");
     }
 }
 

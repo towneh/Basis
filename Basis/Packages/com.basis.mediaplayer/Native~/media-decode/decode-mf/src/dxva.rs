@@ -41,7 +41,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::{GUID, Interface};
 
-use crate::video_mft::{create_decoder_for, parse_output_color};
+use crate::video_mft::{create_decoder_for, parse_output_color, request_low_latency};
 use crate::{mf, mf_startup, video_input_type};
 use std::mem::ManuallyDrop;
 
@@ -413,12 +413,13 @@ impl HwVideoDecoder {
     /// the Store HEVC MFT null-derefs on its worker thread when data
     /// arrives on a sizeless input type. `config` carries AV1 config OBUs
     /// (empty for every other codec, and for AV1 streams whose sequence
-    /// header is in-band).
+    /// header is in-band). `live` puts the decoder in low-latency mode.
     pub fn new(
         codec: HwCodec,
         width: u32,
         height: u32,
         config: &[u8],
+        live: bool,
     ) -> Result<Self, DecodeError> {
         if hw_disabled() {
             return Err(DecodeError(format!(
@@ -448,6 +449,9 @@ impl HwVideoDecoder {
                 codec.tag(),
                 MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
             )?;
+            if live {
+                request_low_latency(&mft, codec.tag());
+            }
             // Bind the device manager before setting the input/output
             // types. A refusal is logged, not fatal: the output then lacks
             // DXGI backing and the runtime fallback reroutes to software.

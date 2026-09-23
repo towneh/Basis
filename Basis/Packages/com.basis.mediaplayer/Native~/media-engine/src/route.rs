@@ -143,7 +143,7 @@ fn route_video_decoder(
     codec: media_demux::VideoCodec,
     coded_width: u32,
     coded_height: u32,
-    _live: bool,
+    live: bool,
     preference: DecodePreference,
     codec_private: &[u8],
 ) -> Result<VideoRoute, media_decode::DecodeError> {
@@ -164,7 +164,7 @@ fn route_video_decoder(
     let mut hw_failure: Option<String> = None;
     if preference != DecodePreference::SoftwareOnly {
         if let Some(hw) = hw_codec {
-            match HwVideoDecoder::new(hw, coded_width, coded_height, codec_private) {
+            match HwVideoDecoder::new(hw, coded_width, coded_height, codec_private, live) {
                 Ok(decoder) => {
                     let device = decoder.device_raw();
                     return Ok(VideoRoute {
@@ -194,7 +194,7 @@ fn route_video_decoder(
     // otherwise. The cap is checked before any decoder is built.
     software_cap_check(coded_width, coded_height)?;
     let fallback = hw_failure.map(|e| format!("hardware decode unavailable ({e})"));
-    open_windows_software(codec, coded_width, coded_height, fallback)
+    open_windows_software(codec, coded_width, coded_height, live, fallback)
 }
 
 /// The Windows CPU routes: the in-box H.264 MFT, the Store VP9 extension,
@@ -206,6 +206,7 @@ fn open_windows_software(
     codec: media_demux::VideoCodec,
     coded_width: u32,
     coded_height: u32,
+    live: bool,
     fallback: Option<String>,
 ) -> Result<VideoRoute, media_decode::DecodeError> {
     use decode_mf::{Av1Decoder, H264Decoder, Vp9Decoder};
@@ -213,7 +214,7 @@ fn open_windows_software(
     use media_demux::VideoCodec;
     match codec {
         VideoCodec::H264 => Ok(VideoRoute {
-            decoder: Box::new(H264Decoder::new()?),
+            decoder: Box::new(H264Decoder::new(live)?),
             label: "MF H.264",
             fallback,
             decode_device: None,

@@ -153,7 +153,7 @@ fn gpu_matches_reference_on_fixture_frames() {
     .expect("open fixture");
 
     let mut video_track = None;
-    let mut decoder = decode_mf::H264Decoder::new().expect("decoder");
+    let mut decoder = decode_mf::H264Decoder::new(false).expect("decoder");
     let mut checked = 0usize;
     let mut rig: Option<(
         SharedTexturePresenter,

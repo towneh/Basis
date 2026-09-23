@@ -169,6 +169,7 @@ fn h264_hardware_matches_software() {
         track.width,
         track.height,
         &track.codec_private,
+        false,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -181,7 +182,7 @@ fn h264_hardware_matches_software() {
         &track.aus,
         (track.display_width, track.display_height),
     );
-    let mut sw = decode_mf::H264Decoder::new().expect("software H.264");
+    let mut sw = decode_mf::H264Decoder::new(false).expect("software H.264");
     let sw_frames = decode_all(
         &mut sw,
         &track.aus,
@@ -210,6 +211,7 @@ fn vp9_hardware_matches_software() {
         track.width,
         track.height,
         &track.codec_private,
+        false,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -248,6 +250,7 @@ fn av1_hardware_matches_rav1d() {
         track.width,
         track.height,
         &track.codec_private,
+        false,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -283,6 +286,7 @@ fn av1_submit_never_waits_on_undrained_output() {
         track.width,
         track.height,
         &track.codec_private,
+        false,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -332,6 +336,7 @@ fn hevc_decodes_through_dxva() {
         track.width,
         track.height,
         &track.codec_private,
+        false,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -365,7 +370,7 @@ fn hevc_decodes_through_dxva() {
 /// machine.
 #[test]
 fn sizeless_hevc_refuses_before_configure() {
-    let err = decode_mf::HwVideoDecoder::new(decode_mf::HwCodec::H265, 0, 0, &[])
+    let err = decode_mf::HwVideoDecoder::new(decode_mf::HwCodec::H265, 0, 0, &[], false)
         .err()
         .expect("sizeless HEVC must refuse");
     assert!(err.0.contains("no frame size"), "{}", err.0);
@@ -381,6 +386,7 @@ fn dxva_payload_exposes_slice() {
         track.width,
         track.height,
         &[],
+        false,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -407,4 +413,84 @@ fn dxva_payload_exposes_slice() {
         }
     }
     assert!(seen, "no opaque frame emerged");
+}
+
+/// How many access units a decoder takes in before its first frame
+/// comes out.
+fn inputs_before_first_output(decoder: &mut dyn VideoDecoder, aus: &[(Vec<u8>, i64)]) -> usize {
+    for (i, (au, pts)) in aus.iter().enumerate() {
+        loop {
+            match decoder.submit(au, *pts).expect("submit") {
+                SubmitOutcome::Accepted => break,
+                SubmitOutcome::NotAccepting => {
+                    if decoder.try_output().expect("output").is_some() {
+                        return i;
+                    }
+                }
+            }
+        }
+        if decoder.try_output().expect("output").is_some() {
+            return i + 1;
+        }
+    }
+    aus.len()
+}
+
+/// Live decode hands each frame out as soon as the stream's reordering
+/// allows: this fixture reorders by two frames, so the first frame is due
+/// by the third access unit. Held until the decoder's reorder window
+/// fills instead, it arrives behind a clock that the sound started.
+#[test]
+fn live_h264_hands_out_frames_without_waiting_for_the_reorder_window() {
+    let track = video_track("h264-aac.mkv", VideoCodec::H264);
+    let mut sw = decode_mf::H264Decoder::new(true).expect("software H.264");
+    assert!(inputs_before_first_output(&mut sw, &track.aus) <= 3);
+    let mut hw = match decode_mf::HwVideoDecoder::new(
+        decode_mf::HwCodec::H264,
+        track.width,
+        track.height,
+        &track.codec_private,
+        true,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED: no hardware H.264 on this machine ({e})");
+            return;
+        }
+    };
+    assert!(inputs_before_first_output(&mut hw, &track.aus) <= 3);
+}
+
+/// Low latency changes when frames leave the decoder, not which frames or
+/// in what order.
+#[test]
+fn live_h264_decodes_the_same_frames_in_the_same_order() {
+    let track = video_track("h264-aac.mkv", VideoCodec::H264);
+    let display = (track.display_width, track.display_height);
+    let mut reference = decode_mf::H264Decoder::new(false).expect("software H.264");
+    let expected = decode_all(&mut reference, &track.aus, display);
+    let mut sw = decode_mf::H264Decoder::new(true).expect("software H.264");
+    assert_streams_match(
+        "live h264",
+        &decode_all(&mut sw, &track.aus, display),
+        &expected,
+    );
+    let mut hw = match decode_mf::HwVideoDecoder::new(
+        decode_mf::HwCodec::H264,
+        track.width,
+        track.height,
+        &track.codec_private,
+        true,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED: no hardware H.264 on this machine ({e})");
+            return;
+        }
+    };
+    assert_streams_match(
+        "live dxva h264",
+        &decode_all(&mut hw, &track.aus, display),
+        &expected,
+    );
 }
