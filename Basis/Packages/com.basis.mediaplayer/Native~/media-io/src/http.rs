@@ -26,6 +26,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use media_demux::{ByteSource, SourceError};
@@ -151,8 +152,23 @@ pub struct HttpSource {
     /// body's. Chunked delivery with no length at all is the live shape.
     finite: bool,
     stream: Option<StreamState>,
+    /// Size of the latest ranged request, which the next one doubles when
+    /// it carries on from where this one ended.
+    window: u64,
     cancel: CancelToken,
 }
+
+/// A response with at most this much left on the wire is read to its end
+/// before the next request, rather than dropped: dropping a response part
+/// way closes its connection, and the next request would pay a new one and
+/// a TLS handshake to save a few kilobytes. A read this far ahead of the
+/// open response reads on to it for the same reason.
+const REUSE_BYTES: u64 = 128 * 1024;
+
+/// How long reading a response to its end may take before the connection
+/// is dropped after all. A server that has stopped sending is not worth
+/// waiting on for the sake of reusing its connection.
+const REUSE_WAIT: Duration = Duration::from_millis(500);
 
 struct StreamState {
     response: reqwest::Response,
@@ -245,7 +261,8 @@ impl HttpSource {
             Url::parse(url).map_err(|e| IoError::new(IoErrorKind::Url, format!("{url}: {e}")))?;
 
         let mut clients = PinnedClients::default();
-        let probe_end = limits.chunk_bytes - 1;
+        let window = limits.jump_bytes.clamp(1, limits.chunk_bytes.max(1));
+        let probe_end = window - 1;
         let (current, response) = awaiting(
             &cancel,
             IoErrorKind::Connect,
@@ -277,7 +294,7 @@ impl HttpSource {
             // on-demand, it just reports an unknown size.
             let len = content_range_total(&response);
             let finite = len.is_some() || response.content_length().is_some();
-            let end = response.content_length().map(|n| n.min(limits.chunk_bytes));
+            let end = part_end(&response, 0).map(|end| end.min(window));
             return Ok(Self {
                 origin,
                 url: current,
@@ -289,6 +306,7 @@ impl HttpSource {
                 rangeable: true,
                 finite,
                 stream: Some(StreamState::new(response, 0, end)),
+                window,
                 cancel,
             });
         }
@@ -315,6 +333,7 @@ impl HttpSource {
             rangeable: advertises_ranges,
             finite: len.is_some(),
             stream: Some(StreamState::new(response, 0, None)),
+            window,
             cancel,
         })
     }
@@ -370,12 +389,27 @@ impl HttpSource {
         Ok(response)
     }
 
-    fn reopen_at(&mut self, offset: u64) -> Result<(), IoError> {
-        self.stream = None;
+    /// `want` is the size of the read that asked, which a request after a
+    /// jump is sized to when it wants more than the floor.
+    fn reopen_at(&mut self, offset: u64, want: usize) -> Result<(), IoError> {
+        let carries_on = self.stream.as_ref().is_some_and(|s| s.pos == offset);
+        self.retire_stream();
         if self.ranges {
-            let last = offset + self.limits.chunk_bytes - 1;
+            let chunk = self.limits.chunk_bytes.max(1);
+            let floor = (want as u64).max(self.limits.jump_bytes).clamp(1, chunk);
+            self.window = if carries_on {
+                self.window.saturating_mul(2).clamp(floor, chunk)
+            } else {
+                floor
+            };
+            let last = offset.saturating_add(self.window - 1);
             let response = self.request(Some((offset, last)))?;
             let status = response.status().as_u16();
+            // With no total stated, a range past the end is how the end of
+            // the file shows itself: no stream, and the read returns 0.
+            if status == 416 && self.len.is_none() {
+                return Ok(());
+            }
             if status != 206 {
                 return Err(IoError {
                     kind: IoErrorKind::Read,
@@ -384,7 +418,7 @@ impl HttpSource {
                 });
             }
             require_part_at(&response, offset, &self.url, IoErrorKind::Read)?;
-            let end = response.content_length().map(|n| offset + n);
+            let end = part_end(&response, offset);
             self.stream = Some(StreamState::new(response, offset, end));
             return Ok(());
         }
@@ -402,6 +436,32 @@ impl HttpSource {
         discard_until(&mut stream, &self.cancel, offset)?;
         self.stream = Some(stream);
         Ok(())
+    }
+
+    /// Let go of the open response, reading it to its end first when little
+    /// of it is left, so its connection serves the next request.
+    fn retire_stream(&mut self) {
+        let Some(mut stream) = self.stream.take() else {
+            return;
+        };
+        let Some(end) = stream.end.filter(|_| self.ranges) else {
+            return;
+        };
+        let held = stream
+            .chunk
+            .as_ref()
+            .map_or(0, |(bytes, taken)| (bytes.len() - taken) as u64);
+        if end.saturating_sub(stream.pos + held) > REUSE_BYTES {
+            return;
+        }
+        let cancel = &self.cancel;
+        runtime().block_on(async {
+            let drain = async { while let Ok(Some(_)) = stream.response.chunk().await {} };
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::time::timeout(REUSE_WAIT, drain) => {}
+            }
+        });
     }
 }
 
@@ -424,26 +484,44 @@ impl ByteSource for HttpSource {
         }
         let cancel = self.cancel.clone();
         // Three passes at most: a positioned stream that has reached its
-        // chunk boundary reopens once and reads again, and a read that
-        // fails on a ranged source is answered once with a fresh request.
+        // chunk boundary reopens once and reads again, and a read or a
+        // skip that fails on a ranged source is answered once with a fresh
+        // request.
         let mut reopened_after_failure = false;
         for _ in 0..3 {
             let usable = match &self.stream {
                 Some(s) if s.pos == offset => s.end.is_none_or(|end| offset < end),
-                Some(s) => !self.ranges && offset >= s.pos,
+                Some(s) if !self.ranges => offset >= s.pos,
+                Some(s) => {
+                    offset > s.pos
+                        && offset - s.pos <= REUSE_BYTES
+                        && s.end.is_some_and(|end| offset < end)
+                }
                 None => false,
             };
             if !usable {
-                self.reopen_at(offset)?;
+                self.reopen_at(offset, buf.len())?;
             } else if let Some(stream) = &mut self.stream
                 && offset > stream.pos
                 && let Err(e) = discard_until(stream, &cancel, offset)
             {
                 self.stream = None;
+                // A skip reads on through a response that can die like any
+                // other; asking again from the skip's target costs what the
+                // jump would have cost without the skip.
+                if self.ranges && !reopened_after_failure && !cancel.is_cancelled() {
+                    reopened_after_failure = true;
+                    diag_log!("skip to byte {offset} failed ({e}); reopening there");
+                    continue;
+                }
                 return Err(e.into());
             }
 
-            let stream = self.stream.as_mut().expect("stream present after reopen");
+            // No stream after a reopen is a 416 past the end of a file whose
+            // total was never stated.
+            let Some(stream) = self.stream.as_mut() else {
+                return Ok(0);
+            };
             // A failed read retires the response with it. Left installed,
             // it would pass the check above, and a later read at the same
             // position would poll a `chunk()` future that was dropped
@@ -471,11 +549,12 @@ impl ByteSource for HttpSource {
             if n > 0 {
                 return Ok(n);
             }
-            // Chunk exhausted at the boundary: reopen; a true end of file
-            // (pos at or past the known length) is a clean 0.
+            // Chunk exhausted at the boundary: reopen, keeping the spent
+            // stream so the next request knows it carries on. Only a known
+            // total says the boundary is the end of the file; with none
+            // stated, the next request finds out.
             let pos = stream.pos;
-            if self.len.is_some_and(|len| pos < len) && stream.end == Some(pos) {
-                self.stream = None;
+            if stream.end == Some(pos) && self.len.is_none_or(|len| pos < len) {
                 continue;
             }
             return Ok(0);
@@ -654,10 +733,28 @@ fn require_part_at(
 /// shape with coherent bounds; the total may be `*`.
 fn content_range_first(response: &reqwest::Response) -> Option<u64> {
     let value = response.headers().get("content-range")?.to_str().ok()?;
-    parse_content_range_first(value)
+    parse_content_range(value).map(|(first, _)| first)
 }
 
-fn parse_content_range_first(value: &str) -> Option<u64> {
+/// Where a 206's part ends, exclusive. `Content-Length` is optional on a
+/// chunked 206, but `Content-Range` states the part either way.
+fn part_end(response: &reqwest::Response, offset: u64) -> Option<u64> {
+    let stated = response
+        .headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_content_range)
+        .and_then(|(_, last)| last.checked_add(1));
+    stated.or_else(|| {
+        response
+            .content_length()
+            .and_then(|n| offset.checked_add(n))
+    })
+}
+
+/// `(first, last)` out of `bytes <first>-<last>/<total>`, inclusive. A last
+/// byte with no offset after it has no exclusive end, so it is refused.
+fn parse_content_range(value: &str) -> Option<(u64, u64)> {
     let (unit, spec) = value.trim().split_once(' ')?;
     if !unit.eq_ignore_ascii_case("bytes") {
         return None;
@@ -672,10 +769,10 @@ fn parse_content_range_first(value: &str) -> Option<u64> {
     };
     let (first, last) = (number(first)?, number(last)?);
     let coherent = match total {
-        "*" => first <= last,
+        "*" => first <= last && last < u64::MAX,
         total => first <= last && last < number(total)?,
     };
-    coherent.then_some(first)
+    coherent.then_some((first, last))
 }
 
 fn discard_until(
@@ -699,7 +796,9 @@ fn discard_until(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_content_range_first as first;
+    fn first(value: &str) -> Option<u64> {
+        super::parse_content_range(value).map(|(first, _)| first)
+    }
 
     #[test]
     fn content_range_states_its_first_byte_or_nothing() {
@@ -716,6 +815,7 @@ mod tests {
             "items 0-99/200",
             "not-a-range/123",
             "bytes 0-99",
+            "bytes 0-18446744073709551615/*",
         ] {
             assert_eq!(first(refused), None, "{refused:?}");
         }

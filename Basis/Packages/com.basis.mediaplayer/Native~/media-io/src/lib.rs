@@ -44,9 +44,14 @@ pub struct IoLimits {
     /// Prompt teardown comes from elsewhere: every request and read races
     /// the session's [`CancelToken`].
     pub request_timeout: Duration,
-    /// Size of one ranged request. Bounds the bytes wasted by a discarded
-    /// stream.
+    /// Largest ranged request. A request that carries on where the last one
+    /// ended doubles in size up to this, so playback reads long ranges and
+    /// a discarded stream wastes at most this much.
     pub chunk_bytes: u64,
+    /// Smallest ranged request: the open's, and the first after a jump,
+    /// unless the read wants more. A reader that jumps (a fragment walk, a
+    /// bisection seek) reads a few kilobytes where it lands.
+    pub jump_bytes: u64,
     /// Per-read stall detector on sequential live sources: this long with
     /// no bytes at all is a dead link, surfaced as a typed error for the
     /// resilience path.
@@ -65,6 +70,7 @@ impl Default for IoLimits {
             connect_timeout: Duration::from_secs(8),
             request_timeout: Duration::from_secs(20),
             chunk_bytes: 4 * 1024 * 1024,
+            jump_bytes: 64 * 1024,
             read_stall: Duration::from_secs(10),
             max_url_len: 4096,
             max_signalling_bytes: 256 * 1024,

@@ -77,8 +77,8 @@ impl ByteSource for MemSource {
 /// A two-block read cache over a [`ByteSource`] for demuxers whose read
 /// pattern alternates between file regions (fragmented MP4 interleaves
 /// per-track sample runs; metadata walks revisit headers). Over a ranged
-/// HTTP source every position jump otherwise abandons the open response
-/// and pays a fresh connection; two cached blocks cover the ping-pong.
+/// HTTP source every position jump otherwise costs a fresh request; two
+/// cached blocks cover the ping-pong.
 pub(crate) struct CachedSource {
     src: Box<dyn ByteSource>,
     blocks: [(u64, Vec<u8>); 2],

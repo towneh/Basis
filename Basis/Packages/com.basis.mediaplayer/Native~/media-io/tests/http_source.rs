@@ -1115,3 +1115,456 @@ fn an_opening_answer_that_starts_elsewhere_is_refused() {
         "the refusal names the range that was stated: {err}"
     );
 }
+
+/// One ranged request as a server saw it: which connection carried it and
+/// the inclusive range it asked for.
+#[derive(Clone, Copy, Debug)]
+struct Asked {
+    connection: usize,
+    first: u64,
+    last: u64,
+}
+
+impl Asked {
+    fn len(&self) -> u64 {
+        self.last - self.first + 1
+    }
+}
+
+/// A range server that keeps each connection alive and logs every request
+/// with the connection it arrived on.
+fn spawn_logging_server(body: Vec<u8>) -> (String, Arc<Mutex<Vec<Asked>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::<Asked>::new()));
+    let seen = Arc::clone(&log);
+    let body = Arc::new(body);
+    thread::spawn(move || {
+        for (connection, stream) in listener.incoming().enumerate() {
+            let Ok(stream) = stream else { break };
+            let seen = Arc::clone(&seen);
+            let body = Arc::clone(&body);
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(spec) = line.to_ascii_lowercase().strip_prefix("range: bytes=")
+                        {
+                            let mut parts = spec.split('-');
+                            let first: Option<u64> = parts.next().and_then(|s| s.parse().ok());
+                            let last: Option<u64> = parts.next().and_then(|s| s.parse().ok());
+                            range = first.zip(last);
+                        }
+                    }
+                    let Some((first, last)) = range else { return };
+                    seen.lock().expect("log lock").push(Asked {
+                        connection,
+                        first,
+                        last,
+                    });
+                    let stop = (last as usize + 1).min(body.len());
+                    let first = first as usize;
+                    let mut r = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{}/{}\r\n\
+                         Content-Length: {}\r\n\r\n",
+                        stop - 1,
+                        body.len(),
+                        stop - first
+                    )
+                    .into_bytes();
+                    r.extend_from_slice(&body[first..stop]);
+                    if stream.write_all(&r).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), log)
+}
+
+const MIB: usize = 1024 * 1024;
+
+fn read_some(source: &mut HttpSource, body: &[u8], at: usize, len: usize) {
+    let mut buf = vec![0u8; len];
+    let n = source.read_at(at as u64, &mut buf).expect("read");
+    assert!(n > 0, "bytes at {at}");
+    assert_eq!(&buf[..n], &body[at..at + n], "bytes at {at}");
+}
+
+/// A reader that jumps wants the bytes where it lands, not the megabytes
+/// after them: a fragment walk reads a header and moves on, and an Ogg
+/// seek reads a page per probe. Asked for a whole chunk, the server sends
+/// what the reader then walks away from.
+#[test]
+fn a_jump_asks_for_what_it_reads_not_a_whole_chunk() {
+    let body = patterned(8 * MIB);
+    let (base, log) = spawn_logging_server(body.clone());
+    let mut source = open(&format!("{base}/media")).expect("open");
+
+    read_some(&mut source, &body, 0, 16);
+    read_some(&mut source, &body, 5 * MIB, 16 * 1024);
+
+    let log = log.lock().expect("log lock").clone();
+    assert_eq!(log.len(), 2, "the open and the jump: {log:?}");
+    assert_eq!(log[1].first, 5 * MIB as u64);
+    for asked in &log {
+        assert!(
+            asked.len() <= 64 * 1024,
+            "a request sized to the read, not to a chunk: {asked:?}"
+        );
+    }
+}
+
+/// Reading on from where the last request ended is playback, and playback
+/// wants long requests: the size doubles with each one until it reaches the
+/// chunk size.
+#[test]
+fn sequential_reads_grow_the_request_to_a_whole_chunk() {
+    let body = patterned(16 * MIB);
+    let (base, log) = spawn_logging_server(body.clone());
+    let mut source = open(&format!("{base}/media")).expect("open");
+
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut pos = 0usize;
+    while pos < 12 * MIB {
+        let n = source.read_at(pos as u64, &mut buf).expect("read");
+        assert_eq!(&buf[..n], &body[pos..pos + n], "bytes at {pos}");
+        pos += n;
+    }
+
+    let log = log.lock().expect("log lock").clone();
+    let chunk = IoLimits::default().chunk_bytes;
+    assert!(
+        log[0].len() < chunk,
+        "the open starts small and grows: {log:?}"
+    );
+    for pair in log.windows(2) {
+        assert_eq!(pair[1].first, pair[0].last + 1, "contiguous: {log:?}");
+        assert_eq!(
+            pair[1].len(),
+            (pair[0].len() * 2).min(chunk),
+            "each request doubles to the chunk size: {log:?}"
+        );
+    }
+    assert_eq!(log.last().map(Asked::len), Some(chunk), "{log:?}");
+}
+
+/// A skip a few kilobytes forward lands inside the response already
+/// arriving; reading on to it costs less than asking again.
+#[test]
+fn a_short_forward_jump_rides_the_response_it_has() {
+    let body = patterned(8 * MIB);
+    let (base, log) = spawn_logging_server(body.clone());
+    let mut source = open(&format!("{base}/media")).expect("open");
+
+    read_some(&mut source, &body, 0, 16);
+    read_some(&mut source, &body, 32 * 1024, 16);
+
+    assert_eq!(log.lock().expect("log lock").len(), 1, "no second request");
+}
+
+/// A walk of header reads a fragment apart, the shape of opening a
+/// fragmented MP4 with no index. Each step asks again, but on the same
+/// connection: a response with little left on it is read out so its
+/// connection goes back to the pool, where dropping it would cost a new
+/// connection, and a TLS handshake, per step.
+#[test]
+fn a_walk_of_jumps_keeps_one_connection() {
+    const STEP: usize = 600 * 1024;
+    const STEPS: usize = 30;
+    let body = patterned(STEP * STEPS + MIB);
+    let (base, log) = spawn_logging_server(body.clone());
+    let mut source = open(&format!("{base}/media")).expect("open");
+
+    for step in 0..STEPS {
+        read_some(&mut source, &body, step * STEP, 512);
+    }
+
+    let log = log.lock().expect("log lock").clone();
+    assert_eq!(log.len(), STEPS, "a request per step: {log:?}");
+    assert!(
+        log.iter().all(|asked| asked.connection == 0),
+        "one connection for the walk: {log:?}"
+    );
+    let asked: u64 = log.iter().map(Asked::len).sum();
+    assert!(
+        asked <= (STEPS * 64 * 1024) as u64,
+        "{asked} bytes asked for {STEPS} headers"
+    );
+}
+
+/// A range server that answers every request as a chunked 206: the part
+/// is stated in `Content-Range` and nowhere else, with no `Content-Length`.
+fn spawn_chunked_range_server(body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let body = Arc::new(body);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let body = Arc::clone(&body);
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(spec) = line.to_ascii_lowercase().strip_prefix("range: bytes=")
+                        {
+                            let mut parts = spec.split('-');
+                            let first: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            let last: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            range = first.zip(last);
+                        }
+                    }
+                    let Some((first, last)) = range else { return };
+                    let stop = (last + 1).min(body.len());
+                    let part = &body[first..stop];
+                    let mut r = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{}/{}\r\n\
+                         Transfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+                        stop - 1,
+                        body.len(),
+                        part.len()
+                    )
+                    .into_bytes();
+                    r.extend_from_slice(part);
+                    r.extend_from_slice(b"\r\n0\r\n\r\n");
+                    if stream.write_all(&r).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A 206 need not state a `Content-Length`: a chunked one states its part
+/// only in `Content-Range`. A skip past the end of that part asks again
+/// rather than reading off the end of it, and reading on across the part's
+/// end carries on rather than taking it for the end of the file.
+#[test]
+fn a_chunked_part_is_bounded_by_its_content_range() {
+    let body = patterned(2 * MIB);
+    let base = spawn_chunked_range_server(body.clone());
+    let mut source = open(&format!("{base}/media")).expect("open");
+
+    read_some(&mut source, &body, 0, 16);
+    read_some(&mut source, &body, 96 * 1024, 16);
+    read_through(&mut source, &body).expect("the file reads through part by part");
+}
+
+/// A range server that never states the file's total (`Content-Range:
+/// bytes <first>-<last>/*`) and answers a range starting at or past the end
+/// with 416, which is how such a server says the file has ended.
+fn spawn_unknown_total_server(body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let body = Arc::new(body);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let body = Arc::clone(&body);
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(spec) = line.to_ascii_lowercase().strip_prefix("range: bytes=")
+                        {
+                            let mut parts = spec.split('-');
+                            let first: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            let last: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            range = first.zip(last);
+                        }
+                    }
+                    let Some((first, last)) = range else { return };
+                    let r = if first >= body.len() {
+                        b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n".to_vec()
+                    } else {
+                        let stop = (last + 1).min(body.len());
+                        let mut r = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{}/*\r\n\
+                             Content-Length: {}\r\n\r\n",
+                            stop - 1,
+                            stop - first
+                        )
+                        .into_bytes();
+                        r.extend_from_slice(&body[first..stop]);
+                        r
+                    };
+                    if stream.write_all(&r).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// `bytes <first>-<last>/*` is a valid part of a file whose total the
+/// server does not state. The end of one part is not the end of the file:
+/// reads carry on part by part, and the 416 that answers a range past the
+/// end is where the file ends.
+#[test]
+fn a_part_with_no_stated_total_is_not_the_end_of_the_file() {
+    let body = patterned(MIB + 1000);
+    let base = spawn_unknown_total_server(body.clone());
+    let mut source = open(&format!("{base}/media")).expect("open");
+
+    read_through(&mut source, &body).expect("the file reads through part by part");
+    let mut buf = [0u8; 16];
+    assert_eq!(
+        source
+            .read_at(body.len() as u64, &mut buf)
+            .expect("the 416 is the end"),
+        0
+    );
+}
+
+/// A `Content-Range` whose last byte is the largest number a byte offset
+/// can hold has no exclusive end to read to. It is refused as a malformed
+/// answer, not carried into arithmetic that would overflow on it.
+#[test]
+fn a_range_ending_at_the_largest_offset_is_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut stream = stream;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim_end().is_empty() {
+                break;
+            }
+        }
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/*\r\n\
+                 Content-Length: 16\r\n\r\n",
+                u64::MAX
+            )
+            .as_bytes(),
+        );
+        let _ = stream.write_all(&[0u8; 16]);
+        thread::sleep(Duration::from_secs(1));
+    });
+
+    let err = open(&format!("http://127.0.0.1:{port}/media"))
+        .map(|_| ())
+        .expect_err("the unrepresentable range is refused");
+    assert_eq!(err.kind, IoErrorKind::Http, "{err}");
+}
+
+/// A short skip reads on through the response it has, and that response
+/// can die part-way like any other. The server here promises the opening
+/// part, sends 16 KiB of it and closes; a skip to 32 KiB then asks again
+/// from where it was going rather than failing.
+#[test]
+fn a_skip_through_a_dropped_response_asks_again_from_its_target() {
+    const SENT: usize = 16 * 1024;
+    let body = patterned(MIB);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let starts = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let seen = Arc::clone(&starts);
+    let served = body.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let seen = Arc::clone(&seen);
+            let body = served.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(spec) = line.to_ascii_lowercase().strip_prefix("range: bytes=")
+                        {
+                            let mut parts = spec.split('-');
+                            let start: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            let end: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                            range = start.zip(end);
+                        }
+                    }
+                    let Some((start, end)) = range else { return };
+                    let first = {
+                        let mut seen = seen.lock().expect("starts lock");
+                        seen.push(start);
+                        seen.len() == 1
+                    };
+                    let stop = (end + 1).min(body.len());
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{}\r\n\
+                         Content-Length: {}\r\n\r\n",
+                        stop - 1,
+                        body.len(),
+                        stop - start
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    if first {
+                        let _ = stream.write_all(&body[start..start + SENT]);
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    if stream.write_all(&body[start..stop]).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let mut source = open(&format!("http://127.0.0.1:{port}/media")).expect("open");
+    read_some(&mut source, &body, 0, 16);
+    read_some(&mut source, &body, 32 * 1024, 16);
+
+    assert_eq!(
+        *starts.lock().expect("starts lock"),
+        vec![0, 32 * 1024],
+        "the skip's failure is answered with a request from its target"
+    );
+}
