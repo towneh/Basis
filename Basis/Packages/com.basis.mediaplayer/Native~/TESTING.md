@@ -152,7 +152,7 @@ connection. Set **Liveness** to Live for those.
 | TS demuxer unit rows | The TS demuxer gets expected counts, joins mid-stream on an SPS keyframe, unwraps 33-bit timestamps, and handles m2ts and LPCM. | `cargo test -p media-demux --test ts_stream` | CI |
 | TS table parsing | Each PAT/PMT section is parsed once per version, and malformed, bad-CRC, not-yet-applicable or other-program sections never bind the wrong streams. | `cargo test -p media-demux --test ts_stream`; `cargo run -p bm-probe -- conformance fixtures` | CI |
 | Demux note caps | Diagnostic notes from stream content (TS, HLS, Matroska, MP4, Ogg) are deduplicated and capped at 64. | `cargo test -p media-demux --lib demuxer` + `--test ts_stream` + `--test mkv_stream` + `cargo test -p media-hls --test hls` | CI |
-| Fragmented MP4 opened from its index | Fragmented MP4 opens from a trustworthy `sidx`, loads fragments on demand, seeks like a full parse, otherwise walking the file. | `cargo test -p media-demux --lib mp4` + `--lib mp4_index` + `--lib mp4_fragment` + `--test mp4_stream` | CI |
+| Fragmented MP4 opened from its index | Fragmented MP4 opens from a trustworthy `sidx`, or else from the `tfra` in a trailing `mfra`, loads fragments on demand, seeks like a full parse, otherwise walking the file. | `cargo test -p media-demux --lib mp4` + `--lib mp4_index` + `--lib mp4_fragment` + `--test mp4_stream` | CI |
 | Matroska demuxer rows | Matroska/WebM gets expected counts, converts H.264 to Annex-B, announces VP9 and Opus, applies CodecDelay and cue-seeks to keyframes. | `cargo test -p media-demux --test mkv_stream` | CI |
 | Raw audio demuxer rows | FLAC, Ogg Opus, MP3, ADTS and WAV demux with exact timestamps, report duration, seek, and refuse unsupported layouts with a typed error. | `cargo test -p media-demux --test raw_audio` + `cargo test -p media-demux --lib` | CI |
 | Embedded cover art | Cover art is extracted undecoded from FLAC, Ogg, ID3v2 and MP4 tags, refusing hostile lengths and preferring the front cover. | `cargo test -p media-demux --lib artwork` + `--test raw_audio`; by hand: play an audio-only source with an asymmetric picture and check it on the output texture | CI; by hand |
@@ -327,8 +327,11 @@ row's source, and read the captures and `adb logcat -s basis-media`.
 
 - No test covers the ordering that stops the A/V offset reading a new timeline
   against the old one after a seek.
-- A fragmented MP4 without a segment index reads every fragment header at
-  open, which is slow on a long file over HTTP.
+- A fragmented MP4 with neither a segment index nor an `mfra` reads every
+  fragment header at open, which is slow on a long file over HTTP.
+- A seek in a fragmented MP4 opened from its index fetches the target's
+  fragment, and can fetch its neighbour, before it lands; over a long
+  round trip that is slower than a file whose whole table was read at open.
 - A seek into a fragmented file whose audio and video fragments are cut at
   different points does not replay audio from the fragment before the landing.
 - A hostname lookup cannot be cancelled once started; a queued lookup is

@@ -446,3 +446,107 @@ fn video_only_fixture_still_demuxes() {
     assert!(s.video_aus > 0);
     assert_eq!(s.audio_aus, 0);
 }
+
+/// Open a fixture spread out with its `mfra` as the only index, and hold
+/// the open to that index: the walk it falls back to yields the same
+/// stream, so a row comparing streams alone would pass without it. A
+/// refusal is noted, and the walk reads a cache block per fragment.
+fn open_by_mfra(name: &str) -> (Mp4Demuxer, common::Counters) {
+    let source = common::inflate_mfra(&fixture(name));
+    let counters = source.counters();
+    let mut demux = Mp4Demuxer::open(Box::new(source), DemuxLimits::default(), Generation(1))
+        .unwrap_or_else(|e| panic!("{name} with only an mfra must open: {e:?}"));
+    let notes = demux.take_notes();
+    assert!(
+        !notes.iter().any(|n| n.starts_with("mfra not used")),
+        "{name} must open from its mfra: {notes:?}"
+    );
+    let fetched = counters.bytes();
+    assert!(
+        fetched < 1536 * 1024,
+        "{name} opened from its mfra fetched {fetched} bytes"
+    );
+    (demux, counters)
+}
+
+/// A fragmented file with no segment index usually still ends in an
+/// `mfra`, which lists where the fragments are, so the file opens from it:
+/// `ftyp` and `moov`, the tail of the file that holds the `mfra`, the last
+/// fragment, which says where the media ends, and the first. A handful of
+/// cache blocks, where the walk reads one per fragment. What comes out is
+/// what the walk yields.
+#[test]
+fn a_file_with_only_an_mfra_opens_from_it() {
+    let (mut indexed, counters) = open_by_mfra("h264-aac-manyfrag.mp4");
+    let fetched = counters.bytes();
+
+    let (mut walked, walk_counters) = open_spread("h264-aac-manyfrag.mp4");
+    assert!(
+        walk_counters.bytes() > fetched * 4,
+        "the walk must cost more, or this row proves nothing: {} against {fetched}",
+        walk_counters.bytes()
+    );
+    assert_eq!(
+        indexed.duration().map(|d| d.as_millis() / 100),
+        walked.duration().map(|d| d.as_millis() / 100),
+    );
+    assert_eq!(access_units(&mut indexed), access_units(&mut walked));
+}
+
+/// A seek on a file opened from its `mfra` lands where a seek over the
+/// whole table does, swept across the file, on fragments that open on a
+/// keyframe and on fragments with keyframes inside them.
+#[test]
+fn an_mfra_seek_lands_where_the_whole_table_does() {
+    for (name, until) in [
+        ("h264-aac-manyfrag-sidx.mp4", 40_500i64),
+        ("h264-aac-longfrag-sidx.mp4", 20_500),
+    ] {
+        for ms in (0..until).step_by(311) {
+            let target = MediaTime::from_millis(ms);
+            let mut indexed = open_by_mfra(name).0;
+            let mut walked = open_walked(name);
+            assert_eq!(
+                indexed.seek(target, Generation(2)).expect("mfra seek"),
+                walked.seek(target, Generation(2)).expect("table seek"),
+                "{name} landing for {target}"
+            );
+            assert_eq!(
+                first_access_units(&mut indexed, 24),
+                first_access_units(&mut walked, 24),
+                "{name} stream after {target}"
+            );
+        }
+        for ms in [0, until / 2, until * 2] {
+            let target = MediaTime::from_millis(ms);
+            let mut indexed = open_by_mfra(name).0;
+            let mut walked = open_walked(name);
+            assert_eq!(
+                indexed.seek(target, Generation(3)).expect("mfra seek"),
+                walked.seek(target, Generation(3)).expect("table seek"),
+                "{name} landing for {target}"
+            );
+            assert_eq!(
+                access_units(&mut indexed),
+                access_units(&mut walked),
+                "{name} to the end from {ms} ms"
+            );
+        }
+    }
+}
+
+/// An `mfra` whose offsets do not land on this file's fragments (written
+/// for another layout, or hostile) is not believed, and the file is walked.
+#[test]
+fn an_mfra_that_misses_the_fragments_is_not_used() {
+    let source = common::inflate_stale_mfra(&fixture("h264-aac-manyfrag.mp4"));
+    let mut demux = Mp4Demuxer::open(Box::new(source), DemuxLimits::default(), Generation(1))
+        .expect("the file still opens");
+    let notes = demux.take_notes();
+    assert!(
+        notes.iter().any(|n| n.starts_with("mfra not used")),
+        "the stale mfra must be read and refused: {notes:?}"
+    );
+    let (mut walked, _) = open_spread("h264-aac-manyfrag.mp4");
+    assert_eq!(access_units(&mut demux), access_units(&mut walked));
+}

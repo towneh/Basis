@@ -128,17 +128,38 @@ pub fn pad_moov(data: &[u8], pad: u64) -> SparseSource {
 /// `sidx` reference grows by the same amount so an index still tiles the
 /// file; and the `mfra`, whose offsets are absolute, is dropped.
 pub fn inflate(data: &[u8]) -> SparseSource {
-    inflate_with(data, true)
+    inflate_with(data, Indexes::Sidx)
 }
 
 /// As [`inflate`], leaving any index behind describing the file it was
 /// written for rather than the one that comes out: every reference is
 /// then short of its subsegment and the index covers none of the file.
 pub fn inflate_untiled(data: &[u8]) -> SparseSource {
-    inflate_with(data, false)
+    inflate_with(data, Indexes::StaleSidx)
 }
 
-fn inflate_with(data: &[u8], pad_indexes: bool) -> SparseSource {
+/// As [`inflate`], with the `mfra` as the only index: any `sidx` is
+/// dropped, and every `tfra` entry is moved to where its fragment now is.
+pub fn inflate_mfra(data: &[u8]) -> SparseSource {
+    inflate_with(data, Indexes::Mfra)
+}
+
+/// As [`inflate_mfra`], leaving the `mfra` pointing at the fragments where
+/// they were before the file was spread out.
+pub fn inflate_stale_mfra(data: &[u8]) -> SparseSource {
+    inflate_with(data, Indexes::StaleMfra)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Indexes {
+    Sidx,
+    StaleSidx,
+    Mfra,
+    StaleMfra,
+}
+
+fn inflate_with(data: &[u8], indexes: Indexes) -> SparseSource {
+    let mut moved: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
     let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut run: Vec<u8> = Vec::new();
     let mut run_start = 0u64;
@@ -153,13 +174,17 @@ fn inflate_with(data: &[u8], pad_indexes: bool) -> SparseSource {
         );
         let kind: [u8; 4] = data[pos + 4..pos + 8].try_into().expect("four bytes");
         let mut boxed = data[pos..pos + size].to_vec();
+        if &kind == b"moof" {
+            moved.insert(pos as u64, out);
+        }
         pos += size;
 
-        if &kind == b"mfra" {
-            continue;
-        }
-        if &kind == b"sidx" && pad_indexes {
-            pad_index(&mut boxed);
+        match (&kind, indexes) {
+            (b"mfra", Indexes::Sidx | Indexes::StaleSidx) => continue,
+            (b"mfra", Indexes::Mfra) => move_fragment_offsets(&mut boxed, &moved),
+            (b"sidx", Indexes::Sidx) => pad_index(&mut boxed),
+            (b"sidx", Indexes::Mfra | Indexes::StaleMfra) => continue,
+            _ => {}
         }
         if &kind == b"mdat" {
             let grown =
@@ -179,6 +204,43 @@ fn inflate_with(data: &[u8], pad_indexes: bool) -> SparseSource {
         runs.push((run_start, run));
     }
     SparseSource::new(runs, out)
+}
+
+/// Point every `tfra` entry in an `mfra` at the offset its fragment moved to.
+fn move_fragment_offsets(boxed: &mut [u8], moved: &std::collections::BTreeMap<u64, u64>) {
+    let mut child = 8;
+    while child + 8 <= boxed.len() {
+        let size =
+            u32::from_be_bytes(boxed[child..child + 4].try_into().expect("four bytes")) as usize;
+        if &boxed[child + 4..child + 8] == b"tfra" {
+            let version = boxed[child + 8];
+            let sizes = u32::from_be_bytes(boxed[child + 16..child + 20].try_into().expect("four"));
+            let count = u32::from_be_bytes(boxed[child + 20..child + 24].try_into().expect("four"))
+                as usize;
+            let wide = if version == 1 { 8 } else { 4 };
+            let numbers = ((sizes >> 4) & 3) + ((sizes >> 2) & 3) + (sizes & 3) + 3;
+            let mut p = child + 24;
+            for _ in 0..count {
+                let at = p + wide;
+                let old = if wide == 8 {
+                    u64::from_be_bytes(boxed[at..at + 8].try_into().expect("eight"))
+                } else {
+                    u64::from(u32::from_be_bytes(
+                        boxed[at..at + 4].try_into().expect("four"),
+                    ))
+                };
+                let new = *moved.get(&old).expect("a tfra entry names a fragment");
+                if wide == 8 {
+                    boxed[at..at + 8].copy_from_slice(&new.to_be_bytes());
+                } else {
+                    let new = u32::try_from(new).expect("moved offset stays 32-bit");
+                    boxed[at..at + 4].copy_from_slice(&new.to_be_bytes());
+                }
+                p += 2 * wide + numbers as usize;
+            }
+        }
+        child += size;
+    }
 }
 
 /// Grow every reference in a `sidx` by the padding its subsegment gained.

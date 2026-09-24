@@ -206,6 +206,16 @@ impl Mp4Demuxer {
                         })
                         .collect();
                     index = choose_index(trusted, video);
+                    if index.is_none() && media_end < len {
+                        let found = MfraSearch {
+                            header: &header,
+                            video,
+                            first,
+                            media_end,
+                            len,
+                        };
+                        index = found.index(&mut src, &mut budget, &limits, &mut notes);
+                    }
                 }
                 if index.is_some() {
                     mp4 = Some(header);
@@ -988,6 +998,114 @@ fn choose_index(trusted: Vec<SegmentIndex>, video: Option<u32>) -> Option<Segmen
         .position(|candidate| Some(candidate.reference_id) == video)
         .unwrap_or(0);
     trusted.into_iter().nth(at)
+}
+
+/// What an opener that found no usable `sidx` knows when it looks for an
+/// index in the file's trailing `mfra` instead.
+struct MfraSearch<'a> {
+    header: &'a re_mp4::Mp4,
+    video: Option<u32>,
+    first: u64,
+    media_end: u64,
+    len: u64,
+}
+
+impl MfraSearch<'_> {
+    /// An index built from the `mfra`'s video `tfra` (the first `tfra`
+    /// when there is no video), believed only when it starts at the first
+    /// fragment and its last entry lands on one. That last fragment is read
+    /// here, for the end of its samples: the `tfra` says where each
+    /// fragment starts but not where the media ends.
+    fn index(
+        &self,
+        src: &mut CachedSource,
+        budget: &mut u64,
+        limits: &DemuxLimits,
+        notes: &mut Vec<String>,
+    ) -> Option<SegmentIndex> {
+        match self.build(src, budget, limits) {
+            Ok(index) => Some(index),
+            Err(why) => {
+                push_note(notes, || format!("mfra not used: {why}"));
+                None
+            }
+        }
+    }
+
+    fn build(
+        &self,
+        src: &mut CachedSource,
+        budget: &mut u64,
+        limits: &DemuxLimits,
+    ) -> Result<SegmentIndex, String> {
+        let size = self.len - self.media_end;
+        if !(8..=MAX_INDEX_BYTES.min(*budget)).contains(&size) {
+            return Err(format!("{size} bytes is not an index to read"));
+        }
+        let mut boxed = vec![0u8; size as usize];
+        src.read_exact_at(self.media_end, &mut boxed)
+            .map_err(|e| e.to_string())?;
+        *budget -= size;
+        if &boxed[4..8] != b"mfra" {
+            return Err("the tail box is not an mfra".into());
+        }
+        let tables = crate::mp4_index::parse_mfra(&boxed[8..])?;
+        let table = tables
+            .iter()
+            .find(|table| Some(table.track_id) == self.video)
+            .or_else(|| tables.first())
+            .ok_or("no tfra")?;
+        let timescale = self
+            .header
+            .tracks()
+            .get(&table.track_id)
+            .and_then(|track| u32::try_from(track.timescale).ok())
+            .ok_or("the tfra names no track with a timescale")?;
+        let mut index = crate::mp4_index::from_random_access(table, timescale, self.media_end)?;
+        if !index.starts_at(self.first) {
+            return Err("the first fragment is not where the tfra starts".into());
+        }
+
+        let last = *index.entries.last().expect("an index has entries");
+        let defaults = crate::mp4_fragment::track_defaults(&self.header.moov);
+        let mut cursors = Cursors::new();
+        for (id, track) in &defaults {
+            let at = rescale(last.time, u64::from(timescale), track.timescale);
+            cursors.insert(*id, at.cast_signed());
+        }
+        // The media ends where the last of any track's samples does, in the
+        // index's timescale: a file's last fragment can hold audio alone.
+        let mut end = None::<u64>;
+        for moof in read_subsegment(src, last, limits).map_err(|e| format!("{e:?}"))? {
+            let built = crate::mp4_fragment::build(&moof, &defaults, &mut cursors)?;
+            for (track_id, samples) in built {
+                let Some(track) = defaults.get(&track_id) else {
+                    continue;
+                };
+                for sample in samples {
+                    let after = sample
+                        .dts
+                        .saturating_add(i64::from(sample.duration))
+                        .max(0)
+                        .cast_unsigned();
+                    let after = rescale(after, track.timescale, u64::from(timescale));
+                    end = Some(end.map_or(after, |e| e.max(after)));
+                }
+            }
+        }
+        let end = end.ok_or("the last fragment holds no samples")?;
+        let duration = end
+            .checked_sub(last.time)
+            .and_then(|d| u32::try_from(d).ok())
+            .filter(|d| *d > 0)
+            .ok_or("the last fragment ends before it starts")?;
+        index
+            .entries
+            .last_mut()
+            .expect("an index has entries")
+            .duration = duration;
+        Ok(index)
+    }
 }
 
 /// Where the file's media ends: its length, or the start of a trailing

@@ -10,6 +10,10 @@
 //! media. A short or shifted index would otherwise put a seek in the
 //! middle of a box, and hostile input is the normal case for a player
 //! that opens arbitrary URLs.
+//!
+//! A file with no `sidx` often ends in an `mfra` instead (8.8.9), whose
+//! `tfra` lists the fragments holding each sync sample. That builds the
+//! same index, held to the same test.
 
 /// One subsegment: a `moof` and the `mdat` it indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +143,124 @@ pub(crate) fn parse(body: &[u8], after_box: u64) -> Result<SegmentIndex, &'stati
         timescale,
         entries,
         end: offset,
+    })
+}
+
+/// One track's `tfra` (8.8.10): the time of each sync sample it lists and
+/// the offset of the movie fragment that holds it.
+pub(crate) struct RandomAccess {
+    pub track_id: u32,
+    pub points: Vec<(u64, u64)>,
+}
+
+/// Parse an `mfra` body (the box contents past its eight-byte header) into
+/// the `tfra` it holds, one per track.
+pub(crate) fn parse_mfra(body: &[u8]) -> Result<Vec<RandomAccess>, &'static str> {
+    let mut tables = Vec::new();
+    let mut rest = body;
+    while rest.len() >= 8 {
+        let size = be32(&rest[0..4]) as usize;
+        if size < 8 || size > rest.len() {
+            return Err("mfra child box overruns the mfra");
+        }
+        if &rest[4..8] == b"tfra" {
+            tables.push(parse_tfra(&rest[8..size])?);
+        }
+        rest = &rest[size..];
+    }
+    Ok(tables)
+}
+
+fn parse_tfra(body: &[u8]) -> Result<RandomAccess, &'static str> {
+    if body.len() < 16 {
+        return Err("tfra shorter than its header");
+    }
+    let wide = match body[0] {
+        0 => 4usize,
+        1 => 8usize,
+        _ => return Err("tfra version is not 0 or 1"),
+    };
+    let track_id = be32(&body[4..8]);
+    let sizes = be32(&body[8..12]);
+    // The traf, trun and sample numbers that follow each time and offset
+    // are one to four bytes each, as the low six bits say.
+    let numbers = (((sizes >> 4) & 3) + ((sizes >> 2) & 3) + (sizes & 3) + 3) as usize;
+    let count = be32(&body[12..16]) as usize;
+    let stride = 2 * wide + numbers;
+    let table = &body[16..];
+    if count
+        .checked_mul(stride)
+        .is_none_or(|need| need > table.len())
+    {
+        return Err("tfra entry count overruns the box");
+    }
+    let read = |bytes: &[u8]| {
+        if wide == 8 {
+            be64(bytes)
+        } else {
+            u64::from(be32(bytes))
+        }
+    };
+    let points = table
+        .chunks_exact(stride)
+        .take(count)
+        .map(|entry| (read(&entry[..wide]), read(&entry[wide..2 * wide])))
+        .collect();
+    Ok(RandomAccess { track_id, points })
+}
+
+/// A segment index from one track's random-access points: a subsegment
+/// from each fragment the points name to the next, the last running to
+/// `media_end`. The last subsegment's duration is left at zero, because a
+/// `tfra` does not say where the media ends; the opener reads that out of
+/// the last fragment itself.
+pub(crate) fn from_random_access(
+    table: &RandomAccess,
+    timescale: u32,
+    media_end: u64,
+) -> Result<SegmentIndex, &'static str> {
+    if timescale == 0 {
+        return Err("tfra track has no timescale");
+    }
+    // A fragment holding several sync samples is listed once per sample;
+    // its first is where it starts. The times are presentation times, so
+    // with reordered frames one can sit a frame before the last: it is
+    // held at the last, since a seek steps to its landing from wherever
+    // the index puts it. Fragments going backwards is another file.
+    let mut starts: Vec<(u64, u64)> = Vec::with_capacity(table.points.len());
+    for &(time, offset) in &table.points {
+        match starts.last() {
+            Some(&(_, last)) if offset == last => {}
+            Some(&(_, last)) if offset < last => return Err("tfra fragments go backwards"),
+            Some(&(last_time, _)) => starts.push((time.max(last_time), offset)),
+            None => starts.push((time, offset)),
+        }
+    }
+    if starts.is_empty() {
+        return Err("tfra lists no fragment");
+    }
+
+    let mut entries = Vec::with_capacity(starts.len());
+    for (i, &(time, offset)) in starts.iter().enumerate() {
+        let (next_time, next_offset) = starts.get(i + 1).copied().unwrap_or((time, media_end));
+        if next_offset <= offset {
+            return Err("a tfra fragment lies past the media");
+        }
+        let size = u32::try_from(next_offset - offset).map_err(|_| "tfra fragment above 4 GiB")?;
+        let duration =
+            u32::try_from(next_time - time).map_err(|_| "tfra fragment too long to index")?;
+        entries.push(IndexEntry {
+            offset,
+            size,
+            time,
+            duration,
+        });
+    }
+    Ok(SegmentIndex {
+        reference_id: table.track_id,
+        timescale,
+        entries,
+        end: media_end,
     })
 }
 
@@ -273,6 +395,89 @@ mod tests {
         assert!(
             parse(&wrapping, u64::MAX - 1).is_err(),
             "sizes that wrap the file"
+        );
+    }
+
+    /// A version 1 `tfra` for `track`, with one-byte traf, trun and sample
+    /// numbers after each time and offset.
+    fn tfra(track: u32, points: &[(u64, u64)]) -> Vec<u8> {
+        let mut b = vec![1, 0, 0, 0];
+        b.extend_from_slice(&track.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&(points.len() as u32).to_be_bytes());
+        for (time, offset) in points {
+            b.extend_from_slice(&time.to_be_bytes());
+            b.extend_from_slice(&offset.to_be_bytes());
+            b.extend_from_slice(&[1, 1, 1]);
+        }
+        let mut boxed = ((b.len() + 8) as u32).to_be_bytes().to_vec();
+        boxed.extend_from_slice(b"tfra");
+        boxed.extend_from_slice(&b);
+        boxed
+    }
+
+    #[test]
+    fn a_tfra_indexes_its_fragments_to_the_media_end() {
+        let body = [
+            tfra(2, &[(0, 100)]),
+            tfra(1, &[(0, 100), (0, 100), (90, 600), (80, 900)]),
+        ]
+        .concat();
+        let tables = parse_mfra(&body).expect("parses");
+        assert_eq!(tables.len(), 2);
+        let video = tables.iter().find(|t| t.track_id == 1).expect("track 1");
+        let index = from_random_access(video, 30, 1000).expect("indexes");
+        let entries: Vec<_> = index
+            .entries
+            .iter()
+            .map(|e| (e.offset, e.size, e.time, e.duration))
+            .collect();
+        // One entry per fragment; a time a frame early is held at the last.
+        assert_eq!(
+            entries,
+            vec![(100, 500, 0, 90), (600, 300, 90, 0), (900, 100, 90, 0)]
+        );
+        assert!(index.starts_at(100) && index.tiles(1000));
+    }
+
+    #[test]
+    fn hostile_tfras_are_refused() {
+        let backwards = parse_mfra(&tfra(1, &[(0, 600), (10, 100)])).expect("parses");
+        assert!(
+            from_random_access(&backwards[0], 30, 1000).is_err(),
+            "offsets going back"
+        );
+
+        let past = parse_mfra(&tfra(1, &[(0, 100), (10, 1000)])).expect("parses");
+        assert!(
+            from_random_access(&past[0], 30, 1000).is_err(),
+            "a fragment past the media"
+        );
+
+        let huge = parse_mfra(&tfra(1, &[(0, 0), (10, 1 << 33)])).expect("parses");
+        assert!(
+            from_random_access(&huge[0], 30, (1 << 33) + 10).is_err(),
+            "a 4 GiB fragment"
+        );
+
+        let empty = parse_mfra(&tfra(1, &[])).expect("parses");
+        assert!(
+            from_random_access(&empty[0], 30, 1000).is_err(),
+            "no fragments"
+        );
+
+        let mut overcount = tfra(1, &[(0, 100)]);
+        overcount[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(parse_mfra(&overcount).is_err(), "a count past the box");
+
+        let mut overrun = tfra(1, &[(0, 100)]);
+        overrun[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(parse_mfra(&overrun).is_err(), "a child past the mfra");
+
+        let untimed = parse_mfra(&tfra(1, &[(0, 100)])).expect("parses");
+        assert!(
+            from_random_access(&untimed[0], 0, 1000).is_err(),
+            "no timescale"
         );
     }
 }
