@@ -4,8 +4,8 @@
 
 use media_clock::{Generation, MediaTime};
 use media_demux::{
-    AudioCodec, DemuxLimits, Demuxer, Format, MAX_NOTES, MemSource, MkvDemuxer, StreamEvent,
-    VideoCodec,
+    AudioCodec, ByteSource, DemuxError, DemuxLimits, Demuxer, Format, MAX_NOTES, MemSource,
+    MkvDemuxer, SourceError, StreamEvent, VideoCodec,
 };
 
 /// Just enough EBML to state a track list. The committed fixtures carry
@@ -14,15 +14,21 @@ use media_demux::{
 mod ebml {
     /// The eight-byte size form throughout: marker `0x01`, then a 56-bit
     /// length. Valid at any length, and it keeps the writer trivial.
-    fn size(len: usize) -> Vec<u8> {
+    fn size(len: u64) -> Vec<u8> {
         let mut v = vec![0x01u8];
-        v.extend_from_slice(&(len as u64).to_be_bytes()[1..]);
+        v.extend_from_slice(&len.to_be_bytes()[1..]);
         v
     }
 
     pub fn elem(id: &[u8], body: &[u8]) -> Vec<u8> {
+        claiming(id, body.len() as u64, body)
+    }
+
+    /// An element whose size field states `declared` bytes, whatever
+    /// follows it.
+    pub fn claiming(id: &[u8], declared: u64, body: &[u8]) -> Vec<u8> {
         let mut v = id.to_vec();
-        v.extend_from_slice(&size(body.len()));
+        v.extend_from_slice(&size(declared));
         v.extend_from_slice(body);
         v
     }
@@ -38,13 +44,9 @@ mod ebml {
     }
 }
 
-/// A Matroska file naming `tracks` audio tracks whose codec id maps to
-/// nothing, so each one offers a note, behind one playable video track.
-/// Video rather than audio for the playable one: a file the demuxer can
-/// make nothing of is refused outright and a refused open hands back no
-/// notes, but an audio track that binds sends every later audio track to
-/// the catch-all arm instead of the one that names the codec id.
-fn mkv_with_unmapped_audio_tracks(tracks: u64) -> Vec<u8> {
+/// A Matroska file around the given DocType element, track list and
+/// cluster body.
+fn mkv_file(doc_type: &[u8], track_list: &[u8], cluster: &[u8]) -> Vec<u8> {
     use ebml::{elem, uint, utf8};
 
     let mut header = Vec::new();
@@ -52,7 +54,7 @@ fn mkv_with_unmapped_audio_tracks(tracks: u64) -> Vec<u8> {
     header.extend(uint(&[0x42, 0xF7], 1)); // EBMLReadVersion
     header.extend(uint(&[0x42, 0xF2], 4)); // EBMLMaxIDLength
     header.extend(uint(&[0x42, 0xF3], 8)); // EBMLMaxSizeLength
-    header.extend(utf8(&[0x42, 0x82], "matroska")); // DocType
+    header.extend_from_slice(doc_type);
     header.extend(uint(&[0x42, 0x87], 4)); // DocTypeVersion
     header.extend(uint(&[0x42, 0x85], 2)); // DocTypeReadVersion
 
@@ -61,34 +63,52 @@ fn mkv_with_unmapped_audio_tracks(tracks: u64) -> Vec<u8> {
     info.extend(utf8(&[0x4D, 0x80], "basis")); // MuxingApp
     info.extend(utf8(&[0x57, 0x41], "basis")); // WritingApp
 
-    let mut track_list = Vec::new();
-    let mut video = Vec::new();
-    video.extend(uint(&[0xD7], 1)); // TrackNumber
-    video.extend(uint(&[0x73, 0xC5], 1)); // TrackUID
-    video.extend(uint(&[0x83], 1)); // TrackType: video
-    video.extend(utf8(&[0x86], "V_VP9")); // CodecID, and none is needed
-    track_list.extend(elem(&[0xAE], &video)); // TrackEntry
-
-    for number in 2..=tracks + 1 {
-        let mut entry = Vec::new();
-        entry.extend(uint(&[0xD7], number)); // TrackNumber
-        entry.extend(uint(&[0x73, 0xC5], number)); // TrackUID
-        entry.extend(uint(&[0x83], 2)); // TrackType: audio
-        entry.extend(utf8(&[0x86], "A_BASIS/UNMAPPED")); // CodecID
-        track_list.extend(elem(&[0xAE], &entry)); // TrackEntry
-    }
-
     let mut segment = Vec::new();
     segment.extend(elem(&[0x15, 0x49, 0xA9, 0x66], &info)); // Info
-    segment.extend(elem(&[0x16, 0x54, 0xAE, 0x6B], &track_list)); // Tracks
-    // One empty cluster: the walker wants to find the first one before it
-    // will call the file open, and this row is about what open noted on
-    // the way rather than about any frame.
-    segment.extend(elem(&[0x1F, 0x43, 0xB6, 0x75], &uint(&[0xE7], 0))); // Cluster
+    segment.extend(elem(&[0x16, 0x54, 0xAE, 0x6B], track_list)); // Tracks
+    segment.extend(elem(&[0x1F, 0x43, 0xB6, 0x75], cluster)); // Cluster
 
     let mut out = elem(&[0x1A, 0x45, 0xDF, 0xA3], &header); // EBML
     out.extend(elem(&[0x18, 0x53, 0x80, 0x67], &segment)); // Segment
     out
+}
+
+fn doc_type() -> Vec<u8> {
+    ebml::utf8(&[0x42, 0x82], "matroska")
+}
+
+/// A TrackEntry of `kind` (1 video, 2 audio), with `extra` children.
+fn track_entry(number: u64, kind: u64, codec_id: &str, extra: &[u8]) -> Vec<u8> {
+    use ebml::{elem, uint, utf8};
+
+    let mut entry = Vec::new();
+    entry.extend(uint(&[0xD7], number)); // TrackNumber
+    entry.extend(uint(&[0x73, 0xC5], number)); // TrackUID
+    entry.extend(uint(&[0x83], kind)); // TrackType
+    entry.extend(utf8(&[0x86], codec_id)); // CodecID
+    entry.extend_from_slice(extra);
+    elem(&[0xAE], &entry) // TrackEntry
+}
+
+/// One empty cluster: the walker wants to find the first one before it
+/// will call the file open.
+fn empty_cluster() -> Vec<u8> {
+    ebml::uint(&[0xE7], 0) // Timestamp
+}
+
+/// A Matroska file naming `tracks` audio tracks whose codec id maps to
+/// nothing, so each one offers a note, behind one playable video track.
+/// Video rather than audio for the playable one: a file the demuxer can
+/// make nothing of is refused outright and a refused open hands back no
+/// notes, but an audio track that binds sends every later audio track to
+/// the catch-all arm instead of the one that names the codec id.
+fn mkv_with_unmapped_audio_tracks(tracks: u64) -> Vec<u8> {
+    // VP9 needs no codec private data.
+    let mut track_list = track_entry(1, 1, "V_VP9", &[]);
+    for number in 2..=tracks + 1 {
+        track_list.extend(track_entry(number, 2, "A_BASIS/UNMAPPED", &[]));
+    }
+    mkv_file(&doc_type(), &track_list, &empty_cluster())
 }
 
 /// How many notes track selection offers is the container's to choose:
@@ -109,6 +129,108 @@ fn matroska_track_notes_are_capped() {
         "the row has to overrun the cap"
     );
     assert_eq!(notes.len(), MAX_NOTES, "filled and stopped");
+}
+
+/// A source that states its own size, as a server does in its
+/// `Content-Length` or `Content-Range` total. Nothing makes the bytes
+/// exist.
+struct ClaimedSize {
+    bytes: Vec<u8>,
+    claimed: u64,
+}
+
+impl ByteSource for ClaimedSize {
+    fn size(&mut self) -> Result<Option<u64>, SourceError> {
+        Ok(Some(self.claimed))
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, SourceError> {
+        let Some(rest) = usize::try_from(offset)
+            .ok()
+            .and_then(|offset| self.bytes.get(offset..))
+        else {
+            return Ok(0);
+        };
+        let n = buf.len().min(rest.len());
+        buf[..n].copy_from_slice(&rest[..n]);
+        Ok(n)
+    }
+}
+
+/// What the hostile server claims for a file of a few hundred bytes.
+const CLAIMED: u64 = 2 << 40;
+/// What a hostile element states: past any allocation the host can make,
+/// but inside the claimed file, so a check against the stream's end
+/// passes it.
+const DECLARED: u64 = 1 << 40;
+
+fn open_claimed(bytes: Vec<u8>) -> Result<MkvDemuxer, DemuxError> {
+    MkvDemuxer::open(
+        Box::new(ClaimedSize {
+            bytes,
+            claimed: CLAIMED,
+        }),
+        DemuxLimits::default(),
+        Generation(0),
+    )
+}
+
+fn assert_capped<T>(result: Result<T, DemuxError>) {
+    match result {
+        Err(DemuxError::Cap(_)) => {}
+        Err(other) => panic!("refused, but not as a cap: {other}"),
+        Ok(_) => panic!("accepted"),
+    }
+}
+
+/// Strings in the EBML header, segment info and track entries are read
+/// whole during open. One stating a terabyte is refused before anything
+/// is allocated for it.
+#[test]
+fn a_string_element_stating_a_terabyte_is_refused() {
+    let doc_type = ebml::claiming(&[0x42, 0x82], DECLARED, b"matroska");
+    let file = mkv_file(
+        &doc_type,
+        &track_entry(1, 1, "V_VP9", &[]),
+        &empty_cluster(),
+    );
+    assert_capped(open_claimed(file));
+}
+
+/// Codec private data is binary and read whole during open, the same way.
+#[test]
+fn codec_private_data_stating_a_terabyte_is_refused() {
+    let private = ebml::claiming(&[0x63, 0xA2], DECLARED, &[0; 4]); // CodecPrivate
+    let file = mkv_file(
+        &doc_type(),
+        &track_entry(1, 1, "V_VP9", &private),
+        &empty_cluster(),
+    );
+    assert_capped(open_claimed(file));
+}
+
+/// A block's frame is read whole when it is pulled. One stating more than
+/// an access unit may hold is refused before anything is allocated for
+/// it.
+#[test]
+fn a_frame_stating_a_terabyte_is_refused() {
+    let mut cluster = empty_cluster();
+    // Track 1, timestamp 0, keyframe, no lacing, then four bytes of the
+    // terabyte the size field states.
+    cluster.extend(ebml::claiming(
+        &[0xA3], // SimpleBlock
+        DECLARED,
+        &[0x81, 0x00, 0x00, 0x80, 0, 0, 0, 0],
+    ));
+    let file = mkv_file(&doc_type(), &track_entry(1, 1, "V_VP9", &[]), &cluster);
+    let mut demux = open_claimed(file).expect("open");
+    let pulled = loop {
+        match demux.next_event() {
+            Ok(StreamEvent::Format(..)) => continue,
+            other => break other,
+        }
+    };
+    assert_capped(pulled);
 }
 
 fn open(name: &str) -> MkvDemuxer {

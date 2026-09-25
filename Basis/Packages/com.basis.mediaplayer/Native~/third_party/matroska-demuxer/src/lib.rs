@@ -36,9 +36,9 @@ use std::{
 };
 
 use ebml::{
-    collect_children, expect_master, find_bool_or, find_custom_type, find_float_or, find_nonzero,
-    find_nonzero_or, find_string, find_unsigned, find_unsigned_or, next_element,
-    parse_children_at_offset, parse_element_header, remaining_len, try_find_binary,
+    check_size_limit, collect_children, expect_master, find_bool_or, find_custom_type,
+    find_float_or, find_nonzero, find_nonzero_or, find_string, find_unsigned, find_unsigned_or,
+    next_element, parse_children_at_offset, parse_element_header, remaining_len, try_find_binary,
     try_find_custom_type, try_find_custom_type_or, try_find_date, try_find_float, try_find_nonzero,
     try_find_string, try_find_unsigned, try_parse_child, try_parse_children, ElementData,
     ParsableElement,
@@ -1456,6 +1456,8 @@ pub struct MatroskaFile<R: Read + Seek> {
     cluster_timestamp: u64,
     /// Queued frames of a block we are currently reading.
     queued_frames: VecDeque<LacedFrame>,
+    /// The largest frame `next_frame` will read.
+    max_frame_size: u64,
 }
 
 impl<R: Read + Seek> MatroskaFile<R> {
@@ -1526,7 +1528,16 @@ impl<R: Read + Seek> MatroskaFile<R> {
             tags,
             cluster_timestamp: 0,
             queued_frames: VecDeque::with_capacity(8),
+            max_frame_size: u64::MAX,
         })
+    }
+
+    /// Sets the largest frame `next_frame` will read, in bytes. A block
+    /// stating a larger one is refused before anything is allocated for it;
+    /// otherwise a frame is bounded only by the stream length the reader
+    /// reports.
+    pub fn set_max_frame_size(&mut self, bytes: u64) {
+        self.max_frame_size = bytes;
     }
 
     /// Returns the EBML header.
@@ -1658,6 +1669,7 @@ impl<R: Read + Seek> MatroskaFile<R> {
             frame.is_keyframe = queued_frame.is_keyframe;
             frame.duration = None; // Clean duration, as it's reported in different block than other frame content
 
+            check_size_limit(queued_frame.size, self.max_frame_size)?;
             let available = remaining_len(&mut self.file)?;
             if queued_frame.size > available {
                 return Err(DemuxError::ElementSizeExceedsStream {

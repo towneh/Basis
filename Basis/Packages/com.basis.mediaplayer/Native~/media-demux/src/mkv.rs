@@ -190,7 +190,6 @@ struct SelectedAudio {
 
 pub struct MkvDemuxer {
     file: MatroskaFile<SourceIo>,
-    limits: DemuxLimits,
     generation: Generation,
     /// Nanoseconds per Matroska tick.
     scale_ns: u64,
@@ -202,6 +201,17 @@ pub struct MkvDemuxer {
     ended: bool,
     frame: Frame,
     audio_tracks: Vec<AudioTrackInfo>,
+}
+
+/// The reader's size ceilings are the demuxer limits, so they surface as
+/// caps; anything else it refuses is a parse failure.
+fn reader_error(e: matroska_demuxer::DemuxError) -> DemuxError {
+    match e {
+        matroska_demuxer::DemuxError::ElementSizeExceedsLimit { .. } => {
+            DemuxError::Cap("matroska element size")
+        }
+        e => DemuxError::Parse(format!("matroska: {e:?}")),
+    }
 }
 
 fn map_video_codec(codec_id: &str) -> Option<VideoCodec> {
@@ -253,8 +263,8 @@ impl MkvDemuxer {
             eof_reads: 0,
             cache: [(u64::MAX, Vec::new()), (u64::MAX, Vec::new())],
         };
-        let file =
-            MatroskaFile::open(io).map_err(|e| DemuxError::Parse(format!("matroska: {e:?}")))?;
+        let mut file = MatroskaFile::open(io).map_err(reader_error)?;
+        file.set_max_frame_size(limits.max_au_bytes);
 
         let scale_ns = file.info().timestamp_scale().get();
         // An implausible declaration is reported as no duration rather
@@ -268,7 +278,6 @@ impl MkvDemuxer {
 
         let mut this = Self {
             file,
-            limits,
             generation,
             scale_ns,
             duration,
@@ -469,12 +478,23 @@ impl MkvDemuxer {
         Ok(())
     }
 
+    /// Reads the next frame into `self.frame`; `false` at the end.
+    fn pull_frame(&mut self) -> Result<bool, DemuxError> {
+        // Same containment as the open boundary: a parser panic on a
+        // hostile block is a typed refusal, not a session abort.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.file.next_frame(&mut self.frame)
+        })) {
+            Ok(result) => result.map_err(reader_error),
+            Err(_) => Err(DemuxError::Parse(
+                "matroska parser panicked on a hostile block".into(),
+            )),
+        }
+    }
+
     fn frame_to_au(&mut self) -> Result<Option<StreamEvent>, DemuxError> {
         let pts_us = (self.frame.timestamp.saturating_mul(self.scale_ns) / 1000) as i64;
         let pts = MediaTime::from_micros(pts_us);
-        if self.frame.data.len() as u64 > self.limits.max_au_bytes {
-            return Err(DemuxError::Cap("matroska frame size"));
-        }
         if let Some(video) = &self.video
             && self.frame.track == video.number
         {
@@ -526,19 +546,7 @@ impl Demuxer for MkvDemuxer {
             if self.ended {
                 return Ok(StreamEvent::Eos(EosReason::Natural));
             }
-            // Same containment as the open boundary: a parser panic on a
-            // hostile block is a typed refusal, not a session abort.
-            let more = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.file.next_frame(&mut self.frame)
-            })) {
-                Ok(Ok(more)) => more,
-                Ok(Err(e)) => return Err(DemuxError::Parse(format!("matroska: {e:?}"))),
-                Err(_) => {
-                    return Err(DemuxError::Parse(
-                        "matroska parser panicked on a hostile block".into(),
-                    ));
-                }
-            };
+            let more = self.pull_frame()?;
             if !more {
                 self.ended = true;
                 continue;
@@ -565,17 +573,7 @@ impl Demuxer for MkvDemuxer {
         // Pull the first landed frame to learn the actual position; it is
         // served from `pending` on the next pull.
         loop {
-            let more = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.file.next_frame(&mut self.frame)
-            })) {
-                Ok(Ok(more)) => more,
-                Ok(Err(e)) => return Err(DemuxError::Parse(format!("matroska: {e:?}"))),
-                Err(_) => {
-                    return Err(DemuxError::Parse(
-                        "matroska parser panicked on a hostile block".into(),
-                    ));
-                }
-            };
+            let more = self.pull_frame()?;
             if !more {
                 // Seek past the end: serve Eos from here.
                 self.ended = true;

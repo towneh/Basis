@@ -52,6 +52,13 @@ pub enum DemuxError {
     },
     /// A block declared a size that is inconsistent with its own contents.
     InvalidBlockSize,
+    /// An element or frame declared more data than the reader will hold at once.
+    ElementSizeExceedsLimit {
+        /// The size declared by the element.
+        declared: u64,
+        /// The most the reader will allocate for it.
+        limit: u64,
+    },
 }
 
 impl std::fmt::Display for DemuxError {
@@ -145,6 +152,12 @@ impl std::fmt::Display for DemuxError {
             }
             DemuxError::InvalidBlockSize => {
                 write!(f, "a block declared a size inconsistent with its contents")
+            }
+            DemuxError::ElementSizeExceedsLimit { declared, limit } => {
+                write!(
+                    f,
+                    "element declared size of {declared} bytes but at most {limit} bytes are read"
+                )
             }
         }
     }

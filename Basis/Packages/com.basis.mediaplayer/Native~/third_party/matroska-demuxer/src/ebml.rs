@@ -12,6 +12,21 @@ use crate::{
     DemuxError, Result,
 };
 
+/// The most a string or binary element may hold. Strings are names, codec
+/// ids and languages, binary elements codec setup data, and none comes near
+/// it. The stream-length check alone does not bound the allocation: the
+/// length is whatever the reader reports, which over a network is the
+/// server's word.
+pub(crate) const MAX_ELEMENT_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Refuses a declared size above `limit` before anything is allocated for it.
+pub(crate) fn check_size_limit(declared: u64, limit: u64) -> Result<()> {
+    if declared > limit {
+        return Err(DemuxError::ElementSizeExceedsLimit { declared, limit });
+    }
+    Ok(())
+}
+
 /// The data an element can contain.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ElementData {
@@ -391,6 +406,7 @@ pub(crate) fn try_find_binary<R: Read + Seek>(
 ) -> Result<Option<Vec<u8>>> {
     if let Some((_, data)) = fields.iter().find(|(id, _)| *id == element_id) {
         if let ElementData::Location { offset, size } = data {
+            check_size_limit(*size, MAX_ELEMENT_SIZE)?;
             r.seek(SeekFrom::Start(*offset))?;
             let available = remaining_len(r)?;
             if *size > available {
@@ -631,6 +647,7 @@ fn parse_string<R: Read + Seek>(r: &mut R, size: u64) -> Result<String> {
     if size == 0 {
         return Ok(String::from(""));
     }
+    check_size_limit(size, MAX_ELEMENT_SIZE)?;
     let available = remaining_len(r)?;
     if size > available {
         return Err(DemuxError::ElementSizeExceedsStream {
