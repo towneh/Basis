@@ -170,7 +170,7 @@ connection. Set **Liveness** to Live for those.
 
 | Row | What it checks | How to run | Runs in |
 | --- | --- | --- | --- |
-| Software decode adapters | claxon FLAC, libopus Opus and rav1d AV1 decode fixtures with correct timestamps; surround Opus and broken headers get typed errors. | `cargo test -p decode-sw` | CI |
+| Software decode adapters | claxon FLAC, libopus Opus and rav1d AV1 decode fixtures with correct timestamps; surround Opus, broken headers and a FLAC AU decoding past its ceiling or overfilling the output queue get typed errors. | `cargo test -p decode-sw` | CI |
 | PCM adapter | WAV and Blu-ray 16- and 24-bit PCM converts to float identically in WAV channel order, and unsupported formats are refused. | `cargo test -p decode-sw` | CI |
 | MF adapter contracts | H.264, AAC and MP3 decode through Windows' built-in Media Foundation decoders, and VP9 and AV1 through installed Store extensions. | `cargo test -p decode-mf` | CI, Windows |
 | Strided plane copies | Decoder-reported strides, sizes and dimensions are checked before plane copies, and negative, short, overflowing or odd-sized geometry is refused. | `cargo test -p decode-mf --lib` + `cargo test -p decode-sw --lib` | CI (decode-mf half Windows only) |

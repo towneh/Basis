@@ -12,8 +12,14 @@ use claxon::frame::FrameReader;
 use media_decode::{AudioDecoder, DecodeError, PcmChunk, SubmitOutcome};
 
 /// Decoded chunks the queue holds before `submit` pushes back; the release
-/// schedule bounds arrivals well below this in practice.
+/// schedule bounds arrivals well below this in practice. An AU with more
+/// frames than it holds is refused; one that fits only once the queue
+/// drains is pushed back.
 const READY_CAP: usize = 64;
+/// Sample frames one AU may decode to: four blocks of the largest size
+/// FLAC allows. A frame of constant subframes is a few dozen bytes and
+/// decodes to a full block, so the AU's size bounds nothing.
+const MAX_AU_FRAMES: u32 = 4 * 65_535;
 
 pub struct FlacDecoder {
     sample_rate: u32,
@@ -70,6 +76,10 @@ impl AudioDecoder for FlacDecoder {
         }
         let mut frames = FrameReader::new(Cursor::new(au));
         let mut pts_us = pts_us;
+        let mut decoded = 0u32;
+        // Held until the whole AU decodes, so a refused one leaves nothing
+        // queued.
+        let mut staged = Vec::new();
         loop {
             match frames.read_next_or_eof(std::mem::take(&mut self.buffer)) {
                 Ok(Some(block)) => {
@@ -81,13 +91,28 @@ impl AudioDecoder for FlacDecoder {
                             self.channels
                         )));
                     }
+                    decoded = decoded.saturating_add(frames_n);
+                    if decoded > MAX_AU_FRAMES {
+                        return Err(DecodeError(format!(
+                            "FLAC access unit decodes to more than {MAX_AU_FRAMES} sample frames"
+                        )));
+                    }
+                    if staged.len() >= READY_CAP {
+                        return Err(DecodeError(format!(
+                            "FLAC access unit holds more frames than the {READY_CAP}-chunk queue"
+                        )));
+                    }
+                    if self.ready.len() + staged.len() >= READY_CAP {
+                        self.buffer = block.into_buffer();
+                        return Ok(SubmitOutcome::NotAccepting);
+                    }
                     let mut data = Vec::with_capacity((frames_n * channels) as usize);
                     for i in 0..frames_n {
                         for ch in 0..channels {
                             data.push(block.channel(ch)[i as usize] as f32 * self.scale);
                         }
                     }
-                    self.ready.push_back(PcmChunk {
+                    staged.push(PcmChunk {
                         sample_rate: self.sample_rate,
                         channels,
                         pts_us,
@@ -96,7 +121,10 @@ impl AudioDecoder for FlacDecoder {
                     pts_us += i64::from(frames_n) * 1_000_000 / i64::from(self.sample_rate);
                     self.buffer = block.into_buffer();
                 }
-                Ok(None) => return Ok(SubmitOutcome::Accepted),
+                Ok(None) => {
+                    self.ready.extend(staged);
+                    return Ok(SubmitOutcome::Accepted);
+                }
                 Err(e) => return Err(DecodeError(format!("FLAC frame: {e}"))),
             }
         }

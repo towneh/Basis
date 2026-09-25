@@ -131,6 +131,104 @@ fn flac_71_fixture_decodes_eight_channels() {
     assert!(peak > 0.05 && peak <= 1.0, "peak {peak} out of range");
 }
 
+/// An AU holding more frames than any real one is refused rather than
+/// decoded: its size says nothing about what it decodes to. The whole
+/// 6 s fixture in one AU is past the ceiling; its first frame alone is
+/// accepted.
+#[test]
+fn flac_refuses_an_au_decoding_past_the_ceiling() {
+    let demuxed = demux("sine-48k-stereo.flac");
+    let mut decoder = FlacDecoder::new(&demuxed.codec_private).expect("decoder");
+    let whole: Vec<u8> = demuxed.aus.iter().flat_map(|(au, _)| au.clone()).collect();
+    let refused = decoder.submit(&whole, 0).expect_err("refused");
+    assert!(refused.0.contains("sample frames"), "{}", refused.0);
+    assert!(decoder.try_output().expect("output").is_none());
+
+    let mut decoder = FlacDecoder::new(&demuxed.codec_private).expect("decoder");
+    assert!(matches!(
+        decoder.submit(&demuxed.aus[0].0, 0),
+        Ok(SubmitOutcome::Accepted)
+    ));
+}
+
+/// A FLAC frame of two constant 16-bit subframes, 16 samples long: the
+/// smallest block FLAC allows, stated in 14 bytes.
+fn flac_constant_frame() -> Vec<u8> {
+    fn crc(bytes: &[u8], poly: u16, width: u32) -> u16 {
+        let top = 1u16 << (width - 1);
+        let mask = if width == 16 {
+            u16::MAX
+        } else {
+            (1 << width) - 1
+        };
+        let mut crc = 0u16;
+        for &byte in bytes {
+            crc ^= u16::from(byte) << (width - 8);
+            for _ in 0..8 {
+                crc = if crc & top != 0 {
+                    (crc << 1) ^ poly
+                } else {
+                    crc << 1
+                } & mask;
+            }
+        }
+        crc
+    }
+    // Fixed blocking; block size from an 8-bit field, 48 kHz; stereo,
+    // 16-bit; frame number 0; block size 16.
+    let mut frame = vec![0xFF, 0xF8, 0x6A, 0x18, 0x00, 15];
+    frame.push(crc(&frame, 0x07, 8) as u8);
+    for _ in 0..2 {
+        frame.extend_from_slice(&[0x00, 0x10, 0x00]);
+    }
+    frame.extend_from_slice(&crc(&frame, 0x8005, 16).to_be_bytes());
+    frame
+}
+
+/// An AU of small blocks stays under the frame ceiling but would fill
+/// the output queue many times over; it is refused and leaves nothing
+/// queued. One such frame decodes, so the refusal is the queue's.
+/// An AU that fits an empty queue but not the room left is pushed back
+/// instead, and accepted once the queue drains.
+#[test]
+fn flac_refuses_an_au_overfilling_the_queue() {
+    let demuxed = demux("sine-48k-stereo.flac");
+    let mut decoder = FlacDecoder::new(&demuxed.codec_private).expect("decoder");
+    assert!(matches!(
+        decoder.submit(&flac_constant_frame(), 0),
+        Ok(SubmitOutcome::Accepted)
+    ));
+    let chunk = decoder.try_output().expect("output").expect("a chunk");
+    assert_eq!(chunk.data.len(), 32);
+
+    let au = flac_constant_frame().repeat(100);
+    let refused = decoder.submit(&au, 0).expect_err("refused");
+    assert!(refused.0.contains("queue"), "{}", refused.0);
+    assert!(decoder.try_output().expect("output").is_none());
+
+    for _ in 0..63 {
+        assert!(matches!(
+            decoder.submit(&flac_constant_frame(), 0),
+            Ok(SubmitOutcome::Accepted)
+        ));
+    }
+    let pair = flac_constant_frame().repeat(2);
+    assert!(matches!(
+        decoder.submit(&pair, 0),
+        Ok(SubmitOutcome::NotAccepting)
+    ));
+    decoder.try_output().expect("output").expect("a chunk");
+    assert!(matches!(
+        decoder.submit(&pair, 0),
+        Ok(SubmitOutcome::Accepted)
+    ));
+    let mut queued = 0;
+    while decoder.try_output().expect("output").is_some() {
+        queued += 1;
+    }
+    assert_eq!(queued, 64);
+}
+
 #[test]
 fn flac_refuses_a_broken_header() {
     assert!(FlacDecoder::new(b"not flac").is_err());
