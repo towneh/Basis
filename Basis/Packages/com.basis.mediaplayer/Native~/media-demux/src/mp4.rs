@@ -15,10 +15,11 @@
 //! [`Mp4Demuxer::take_notes`] so the engine can surface them as diagnostics
 //! rather than dropping them silently.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use media_bitstream::{AudioSpecificConfig, parse_asc};
 use media_clock::{Generation, MediaTime};
 use re_mp4::{BoxHeader, BoxType, MoofBox, ReadBox as _};
 
@@ -27,11 +28,6 @@ use crate::mp4_fragment::{Cursors, FragmentSample, TrackDefaults};
 use crate::mp4_index::{IndexEntry, SegmentIndex};
 use crate::source::{ByteSource, CachedSource, SourceReader};
 use crate::{Au, AudioCodec, DemuxError, EosReason, Format, StreamEvent, TrackId, VideoCodec};
-
-/// ISO/IEC 14496-3 sampling-frequency-index table.
-const AAC_RATES: [u32; 13] = [
-    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
-];
 
 #[derive(Debug, Clone, Copy)]
 struct SampleRef {
@@ -178,9 +174,13 @@ impl Mp4Demuxer {
         // fragment would exhaust the budget part-way down a long file).
         let mut index = None;
         let mut mp4 = None;
+        let mut configs = None;
         let mut fragmented = head.first_fragment.is_some();
         if let Some(moov_end) = head.moov_end {
             let header = read_metadata(&mut src, moov_end, &mut budget, false)?;
+            // Read while `moov` is still in the cache, ahead of any index
+            // at the far end of the file.
+            configs = Some(audio_configs(&header, &mut src, moov_end, &mut budget));
             // A fragmented file states `mvex` and keeps no samples in
             // `moov`. Anything else has described itself entirely by
             // here, and this parse is the whole of it.
@@ -231,6 +231,8 @@ impl Mp4Demuxer {
             None => read_metadata(&mut src, len, &mut budget, fragmented)?,
         };
 
+        let configs = configs.unwrap_or_else(|| audio_configs(&mp4, &mut src, len, &mut budget));
+
         let fragments = index.map(|index| Fragments {
             defaults: crate::mp4_fragment::track_defaults(&mp4.moov),
             cursors: Cursors::new(),
@@ -252,7 +254,7 @@ impl Mp4Demuxer {
             fragments,
             runs: crate::mp4_runs::HeldRuns::default(),
         };
-        this.extract_tracks(&mp4, options)?;
+        this.extract_tracks(&mp4, options, &configs)?;
 
         if this.video.is_none() && this.audio.is_none() {
             return Err(DemuxError::Unsupported(
@@ -291,6 +293,7 @@ impl Mp4Demuxer {
         &mut self,
         mp4: &re_mp4::Mp4,
         options: &DemuxOptions,
+        configs: &HashMap<u32, Vec<u8>>,
     ) -> Result<(), DemuxError> {
         let mut duration = MediaTime::ZERO;
 
@@ -310,7 +313,8 @@ impl Mp4Demuxer {
                 .iter()
                 .filter_map(|id| {
                     let track = mp4.tracks().get(id)?;
-                    Some(describe_audio(mp4, track, TrackId(*id)))
+                    let config = configs.get(id).and_then(|raw| parse_asc(raw));
+                    Some(describe_audio(mp4, track, TrackId(*id), config))
                 })
                 .collect();
         }
@@ -341,7 +345,8 @@ impl Mp4Demuxer {
                 Some(re_mp4::TrackKind::Audio)
                     if self.audio.is_none() && wanted.is_none_or(|w| *id >= w) =>
                 {
-                    if self.extract_audio(mp4, track, track_id).is_none() {
+                    let config = configs.get(id).map(Vec::as_slice);
+                    if self.extract_audio(mp4, track, track_id, config).is_none() {
                         continue;
                     }
                 }
@@ -476,6 +481,7 @@ impl Mp4Demuxer {
         mp4: &re_mp4::Mp4,
         track: &re_mp4::Track,
         track_id: TrackId,
+        config: Option<&[u8]>,
     ) -> Option<()> {
         let trak = track.trak(mp4);
         let stsd = &trak.mdia.minf.stbl.stsd;
@@ -502,17 +508,42 @@ impl Mp4Demuxer {
             });
             return None;
         }
+        // Where the walk to the `esds` did not reach, the fields the box
+        // parser kept still make a whole config for a plain AAC core,
+        // though not for HE-AAC, which the parse then refuses.
         let spec = &dec.dec_specific;
-
-        // The parser keeps the decoded ASC fields, not the raw bytes;
-        // rebuild the two-byte AudioSpecificConfig for the explicit
-        // common case and refuse the escapes (AOT 31, freq index 15) whose
-        // reconstruction would be a guess.
-        if spec.profile == 0 || spec.profile > 31 || spec.freq_index >= 15 {
+        let raw = match config {
+            Some(raw) => Some(raw.to_vec()),
+            None if (1..=31).contains(&spec.profile) && spec.freq_index < 15 => {
+                push_note(&mut self.notes, || {
+                    format!(
+                        "track {}: AudioSpecificConfig rebuilt from esds fields",
+                        track_id.0
+                    )
+                });
+                Some(vec![
+                    (spec.profile << 3) | (spec.freq_index >> 1),
+                    ((spec.freq_index & 1) << 7) | ((spec.chan_conf & 0xF) << 3),
+                ])
+            }
+            None => None,
+        };
+        let Some((asc, parsed)) = raw.and_then(|raw| {
+            let parsed = parse_asc(&raw)?;
+            Some((raw, parsed))
+        }) else {
+            push_note(&mut self.notes, || {
+                format!("track {}: no readable AudioSpecificConfig", track_id.0)
+            });
+            return None;
+        };
+        // Main, LC, SSR and LTP: the cores an AAC decoder takes. HE-AAC
+        // reports its LC core here.
+        if !(1..=4).contains(&parsed.object_type) {
             push_note(&mut self.notes, || {
                 format!(
-                    "track {}: refused AAC config (AOT {}, freq index {})",
-                    track_id.0, spec.profile, spec.freq_index
+                    "track {}: skipped audio (object type {}, not AAC)",
+                    track_id.0, parsed.object_type
                 )
             });
             return None;
@@ -520,25 +551,17 @@ impl Mp4Demuxer {
         // The in-box platform decoders handle at most 6 explicitly
         // signalled channels; wider layouts fault with an access violation
         // inside the Media Foundation decoder rather than returning an
-        // error. PCE-defined layouts (chan_conf 0) leave the real width
-        // unknown and are refused too.
-        if spec.chan_conf < 1 || spec.chan_conf > 6 {
+        // error. PCE-defined layouts (channel configuration 0) leave the
+        // real width unknown and are refused too.
+        if parsed.channel_config < 1 || parsed.channel_config > 6 {
             push_note(&mut self.notes, || {
                 format!(
                     "track {}: refused AAC channel configuration {}",
-                    track_id.0, spec.chan_conf
+                    track_id.0, parsed.channel_config
                 )
             });
             return None;
         }
-        let asc = vec![
-            (spec.profile << 3) | (spec.freq_index >> 1),
-            ((spec.freq_index & 1) << 7) | (spec.chan_conf << 3),
-        ];
-        let sample_rate = AAC_RATES
-            .get(spec.freq_index as usize)
-            .copied()
-            .unwrap_or_else(|| u32::from(mp4a.samplerate.value()));
 
         // re_mp4 parses the edit list but does not apply it. For audio the
         // initial media_time offset is the encoder priming (video's reorder
@@ -571,8 +594,8 @@ impl Mp4Demuxer {
             track_id,
             Format::Audio {
                 codec: AudioCodec::Aac,
-                sample_rate,
-                channels: u32::from(spec.chan_conf),
+                sample_rate: parsed.output_rate,
+                channels: u32::from(parsed.channels()),
                 codec_private: asc,
             },
         ));
@@ -1173,6 +1196,30 @@ fn read_metadata(
     }
 }
 
+/// Each `mp4a` track's config as the file states it, from the boxes
+/// before `upto`, charged to the open's budget. A file with no `mp4a`
+/// track is not walked.
+fn audio_configs(
+    mp4: &re_mp4::Mp4,
+    src: &mut CachedSource,
+    upto: u64,
+    budget: &mut u64,
+) -> HashMap<u32, Vec<u8>> {
+    let has_mp4a = mp4.tracks().values().any(|track| {
+        matches!(
+            track.trak(mp4).mdia.minf.stbl.stsd.contents,
+            re_mp4::StsdBoxContent::Mp4a(_)
+        )
+    });
+    if !has_mp4a {
+        return HashMap::new();
+    }
+    let mut reader = SourceReader::new(src, upto, *budget);
+    let configs = crate::mp4_esds::audio_configs(&mut reader, upto);
+    *budget = reader.remaining_budget();
+    configs
+}
+
 /// Duration for a file whose tracks state none, which is every file
 /// written with an empty `moov`: the movie header, then the fragment
 /// duration `mvex` declares, then what the index spans.
@@ -1289,7 +1336,12 @@ fn rescale(value: u64, from: u64, to: u64) -> u64 {
 /// What a picker needs to show for one audio track, read straight from
 /// the container rather than from a bound decoder: a track that is never
 /// selected still has to be describable.
-fn describe_audio(mp4: &re_mp4::Mp4, track: &re_mp4::Track, id: TrackId) -> AudioTrackInfo {
+fn describe_audio(
+    mp4: &re_mp4::Mp4,
+    track: &re_mp4::Track,
+    id: TrackId,
+    config: Option<AudioSpecificConfig>,
+) -> AudioTrackInfo {
     let trak = track.trak(mp4);
     // ISO 639-2/T, with the unset marker spelled out rather than shown.
     let language = match trak.mdia.mdhd.language.as_str() {
@@ -1297,18 +1349,13 @@ fn describe_audio(mp4: &re_mp4::Mp4, track: &re_mp4::Track, id: TrackId) -> Audi
         other => Some(other.to_string()),
     };
     let (sample_rate, channels) = match &trak.mdia.minf.stbl.stsd.contents {
-        re_mp4::StsdBoxContent::Mp4a(mp4a) => {
-            let rate = mp4a
-                .esds
-                .as_ref()
-                .and_then(|esds| {
-                    AAC_RATES
-                        .get(esds.es_desc.dec_config.dec_specific.freq_index as usize)
-                        .copied()
-                })
-                .unwrap_or_else(|| u32::from(mp4a.samplerate.value()));
-            (rate, u32::from(mp4a.channelcount))
-        }
+        re_mp4::StsdBoxContent::Mp4a(mp4a) => match config {
+            Some(config) => (config.output_rate, u32::from(config.channels())),
+            None => (
+                u32::from(mp4a.samplerate.value()),
+                u32::from(mp4a.channelcount),
+            ),
+        },
         _ => (0, 0),
     };
     AudioTrackInfo {
@@ -1764,6 +1811,29 @@ mod tests {
             whole - budget,
             2 * (whole - after_one),
             "two parses of one file cost twice one"
+        );
+    }
+
+    /// The walk down to each `esds` reads metadata like any parse at
+    /// open, so it spends from the same budget.
+    #[test]
+    fn the_audio_config_walk_spends_the_open_budget() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures/h264-aac-640x360-30fps.mp4"),
+        )
+        .expect("fixture readable");
+        let len = bytes.len() as u64;
+        let mut src = CachedSource::new(Box::new(MemSource(bytes)));
+
+        let mut budget = DemuxLimits::default().max_metadata_bytes;
+        let mp4 = read_metadata(&mut src, len, &mut budget, false).expect("the fixture parses");
+        let after_parse = budget;
+        let configs = audio_configs(&mp4, &mut src, len, &mut budget);
+        assert_eq!(configs.len(), 1, "the fixture's one AAC track");
+        assert!(
+            budget < after_parse,
+            "the walk spent nothing: {budget} left after {after_parse}"
         );
     }
 

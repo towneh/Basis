@@ -94,6 +94,7 @@ impl McAudioDecoder {
                     AMediaFormat_delete(format);
                     return Err(DecodeError("AAC without AudioSpecificConfig".into()));
                 }
+                let codec_private = media_bitstream::strip_inert_sbr(codec_private);
                 AMediaFormat_setBuffer(
                     format,
                     c"csd-0".as_ptr(),

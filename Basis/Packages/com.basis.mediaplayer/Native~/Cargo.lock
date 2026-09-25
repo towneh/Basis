@@ -638,6 +638,7 @@ version = "0.1.0"
 dependencies = [
  "jni",
  "libc",
+ "media-bitstream",
  "media-decode",
 ]
 

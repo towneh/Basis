@@ -105,7 +105,7 @@ fn faststart_demuxes_the_full_fixture() {
 }
 
 #[test]
-fn audio_format_reconstructs_the_asc() {
+fn audio_format_carries_the_files_asc() {
     let mut demux = open("h264-aac-640x360-30fps.mp4");
     loop {
         if let StreamEvent::Format(
@@ -120,11 +120,108 @@ fn audio_format_reconstructs_the_asc() {
         {
             assert_eq!(sample_rate, 48000);
             assert_eq!(channels, 2);
-            // AOT 2 (LC), frequency index 3 (48 kHz), channel config 2.
-            assert_eq!(codec_private, vec![0x11, 0x90]);
+            // AOT 2 (LC), frequency index 3 (48 kHz), channel config 2,
+            // and the SBR sync extension saying SBR is absent.
+            assert_eq!(codec_private, vec![0x11, 0x90, 0x56, 0xE5, 0x00]);
             return;
         }
     }
+}
+
+fn first_audio_format(demux: &mut Mp4Demuxer) -> Option<(u32, u32, Vec<u8>)> {
+    loop {
+        match demux.next_event().expect("event") {
+            StreamEvent::Format(
+                _,
+                Format::Audio {
+                    sample_rate,
+                    channels,
+                    codec_private,
+                    ..
+                },
+            ) => return Some((sample_rate, channels, codec_private)),
+            StreamEvent::Eos(..) => return None,
+            _ => {}
+        }
+    }
+}
+
+/// Pad the file's one `esds` with `extra` zero bytes, growing every box
+/// that holds it. The fixture keeps `moov` after the media, so no sample
+/// offset moves.
+fn grow_esds(mut bytes: Vec<u8>, extra: u32) -> Vec<u8> {
+    let at = bytes
+        .windows(4)
+        .position(|w| w == b"esds")
+        .expect("an esds")
+        - 4;
+    let mut pos = 0;
+    let mut end = bytes.len();
+    loop {
+        let size = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap());
+        let box_end = pos + size as usize;
+        if !(pos..box_end).contains(&at) {
+            pos = box_end;
+            assert!(pos < end, "the esds is inside a box");
+            continue;
+        }
+        bytes[pos..pos + 4].copy_from_slice(&(size + extra).to_be_bytes());
+        if pos == at {
+            bytes.splice(box_end..box_end, vec![0u8; extra as usize]);
+            return bytes;
+        }
+        let skip = match &bytes[pos + 4..pos + 8] {
+            b"stsd" => 8,
+            b"mp4a" => 28,
+            _ => 0,
+        };
+        end = box_end;
+        pos += 8 + skip;
+    }
+}
+
+#[test]
+fn an_unreachable_esds_falls_back_to_the_parsed_fields() {
+    let bytes = grow_esds(fixture("h264-aac-moov-trailing.mp4"), 8192);
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(bytes)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("opens");
+    let notes = demux.take_notes();
+    assert!(
+        notes.iter().any(|n| n.contains("rebuilt from esds fields")),
+        "the fallback is noted: {notes:?}"
+    );
+    assert_eq!(
+        first_audio_format(&mut demux),
+        Some((48000, 2, vec![0x11, 0x90]))
+    );
+}
+
+#[test]
+fn an_audio_object_type_that_is_not_aac_is_skipped() {
+    let mut bytes = fixture("h264-aac-640x360-30fps.mp4");
+    let config = [0x05, 0x80, 0x80, 0x80, 0x05, 0x11, 0x90];
+    let at = bytes
+        .windows(config.len())
+        .position(|w| w == config)
+        .expect("the fixture's config");
+    // Object type 23 (ER AAC-LD) in place of 2, the rest unchanged.
+    bytes[at + 5] = 0xB9;
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(bytes)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("opens on its video");
+    assert_eq!(demux.audio_track(), None);
+    let notes = demux.take_notes();
+    assert!(
+        notes.iter().any(|n| n.contains("object type 23, not AAC")),
+        "the refusal is noted: {notes:?}"
+    );
 }
 
 #[test]
