@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -121,8 +122,15 @@ pub fn log_at(level: Level, line: &str) {
     let sink = *SINK.lock().unwrap_or_else(|e| e.into_inner());
     match sink {
         Some(sink) => sink(line),
-        None => eprintln!("[basis-media] {line}"),
+        None => stderr_sink(line),
     }
+}
+
+/// The default sink: the line to stderr, tagged. A failed write is
+/// dropped, not a panic: stderr can be a pipe whose reader has gone, and
+/// this runs on whichever thread is logging, some of them called from C.
+pub fn stderr_sink(line: &str) {
+    let _ = writeln!(std::io::stderr(), "[basis-media] {line}");
 }
 
 /// [`log`] with `format!` arguments, at `Info`.
@@ -860,6 +868,41 @@ mod tests {
     /// For a row that cares about the ring and not the sink: the default
     /// stderr branch would put its lines in the harness's output.
     fn swallow(_line: &str) {}
+
+    /// A launcher that piped the player's stderr and then exited leaves
+    /// every later write failing. Logging must carry on regardless. The
+    /// child waits on stdin until the parent has closed the read end, so
+    /// every line meets a closed pipe rather than a pipe buffer.
+    #[test]
+    fn a_line_to_a_stderr_nobody_reads_is_dropped_quietly() {
+        const CHILD: &str = "MEDIA_DIAG_CLOSED_STDERR_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut release = [0u8; 1];
+            std::io::Read::read_exact(&mut std::io::stdin().lock(), &mut release).unwrap();
+            for i in 0..10_000 {
+                log(&format!("line {i} to a closed pipe"));
+            }
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "tests::a_line_to_a_stderr_nobody_reads_is_dropped_quietly",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stderr.take());
+        let mut release = child.stdin.take().unwrap();
+        std::io::Write::write_all(&mut release, &[1]).unwrap();
+        drop(release);
+        let status = child.wait().unwrap();
+        assert!(status.success(), "the logging child failed: {status}");
+    }
 
     fn capture_marked(line: &str) {
         CAPTURED

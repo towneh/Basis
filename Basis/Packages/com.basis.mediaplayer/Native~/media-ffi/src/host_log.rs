@@ -30,9 +30,8 @@ pub fn install() {
 /// exist is cheaper than silence where one does not.
 #[cfg(windows)]
 fn windows_sink(line: &str) {
-    let tagged = format!("[basis-media] {line}");
-    eprintln!("{tagged}");
-    let wide: Vec<u16> = format!("{tagged}\n\0").encode_utf16().collect();
+    media_diag::stderr_sink(line);
+    let wide: Vec<u16> = format!("[basis-media] {line}\n\0").encode_utf16().collect();
     // SAFETY: wide is NUL-terminated and outlives the call.
     unsafe { OutputDebugStringW(wide.as_ptr()) };
 }
