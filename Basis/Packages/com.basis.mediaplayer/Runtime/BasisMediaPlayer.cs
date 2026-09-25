@@ -165,6 +165,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// it was refused (a track no decoder here can play). Null when there is
     /// nothing to say. <see cref="State"/> tells the two apart.</summary>
     public string LastErrorMessage { get; private set; }
+
+    /// <summary>Seeks the engine has acted on, landed or refused. Once it
+    /// moves past the count read when seeking, the position can be from that
+    /// seek's timeline rather than the one it left.</summary>
+    internal int SeeksActedOn { get; private set; }
     public double PositionSeconds { get; private set; }
     public double DurationSeconds { get; private set; }
     public long BankedMilliseconds { get; private set; }
@@ -1399,6 +1404,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
                 // these two events.
                 if (events[i].Code == (uint)BmEventCode.Error || events[i].Code == (uint)BmEventCode.CodecRefused)
                     LastErrorMessage = detail;
+                if (events[i].Code == (uint)BmEventCode.Seek && events[i].Stage == (uint)BmStage.Demux)
+                    SeeksActedOn++;
                 // WallUs is the session's own monotonic clock, so a line can be
                 // lined up against either diagnostics CSV without hand-aligning.
                 string at = (events[i].WallUs / 1_000_000.0).ToString("F3", CultureInfo.InvariantCulture);

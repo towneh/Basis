@@ -68,6 +68,7 @@ One client, in a scene with more than one player.
 | Visibility | A scene with no players, then one | The menu entry appears with the first player |
 | Selection | Switch players | Status, URL and controls follow |
 | Scrubber | Drag the seek bar, playing and paused | One seek when the handle stops, no bounce back, and the frame at the dropped position (not the keyframe before it). Paused stays paused |
+| Chained scrub | On a WebM or Ogg Opus file, drag the seek bar, then drag it again before the first seek lands | The handle stays on the second position until that seek lands, never showing the first target or the old playhead. Playback lands on the second position |
 | Slow decoder | Start the player with `BASIS_MEDIA_SLOW_VIDEO_DECODE_MS=80` in its environment and play an on-demand source with sound, and one with captions or SEI data | Sound unbroken at real time. The picture moves, holds and rejoins, in step whenever it moves. Captions and user data stay on time. `LateVideoSkip` in the Console. Unset the variable afterwards |
 | Long pause | Pause a minute, then play, on a video and an audio-only file | Resumes with no error |
 | Live stream | Open one | The seek bar hides |

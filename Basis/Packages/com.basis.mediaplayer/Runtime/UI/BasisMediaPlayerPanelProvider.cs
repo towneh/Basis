@@ -53,9 +53,11 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     private float _seekPendingPct;
     private bool _drivingSeekSlider;      /* our write, not the user's drag */
     private double _seekAwaitPosS;        /* issued seek target, held until position lands */
-    private double _seekAwaitFromS;       /* pre-seek position, to tell "landed" from "not yet moved" */
+    private int _seekAwaitActedOn;        /* player's SeeksActedOn when the seek was issued */
     private float _seekAwaitUntil = -1f;
     private const float SeekDebounceSeconds = 0.35f;
+    private const double SeekLandedWithinSeconds = 0.5;
+    private const float SeekHoldSeconds = 12f;
     private int _lastPosSec = -1;
     private int _lastDurSec = -1;
     private string _metaTitle;
@@ -1046,30 +1048,29 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             if (Time.unscaledTime - _seekPendingAt < SeekDebounceSeconds) return; /* still dragging */
             _seekPendingAt = -1f;
             double targetS = Mathf.Clamp(_seekPendingPct, 0f, 100f) / 100.0 * durS;
-            // Capture where we're seeking FROM before the seek applies: the
-            // networking path is asynchronous, so the reported position keeps
-            // reading the pre-seek playhead until it lands.
-            double fromS = _activePlayer.PositionSeconds;
             if (_activeNetworking != null) _ = _activeNetworking.Seek(System.TimeSpan.FromSeconds(targetS));
             else _activePlayer.Seek(targetS);
-            // Hold the handle at the target until the reported position lands
-            // (or give up after a refetch-worth of time), instead of tweening
-            // back to the old playhead and forward again.
-            _seekAwaitFromS = fromS;
+            // Hold the handle at the target until the reported position lands,
+            // instead of tweening back to the old playhead and forward again.
+            // The time limit only covers a seek that never lands near its
+            // target (a keyframe further back than the engine decodes forward
+            // from, or a seek event the engine's log dropped).
             _seekAwaitPosS = targetS;
-            _seekAwaitUntil = Time.unscaledTime + 6f;
+            _seekAwaitActedOn = _activePlayer.SeeksActedOn;
+            _seekAwaitUntil = Time.unscaledTime + SeekHoldSeconds;
             return;
         }
 
         double posS = _activePlayer.PositionSeconds;
         if (_seekAwaitUntil > 0f)
         {
-            // Landed once the reported position is nearer the target than the
-            // pre-seek playhead. A plain "within N seconds of target" test can't
-            // tell a not-yet-applied seek from a landed one when the jump is
-            // shorter than N, and would bounce the bar back to the old position
-            // on small seeks.
-            bool landed = System.Math.Abs(posS - _seekAwaitPosS) <= System.Math.Abs(posS - _seekAwaitFromS);
+            // Landed once the engine has acted on a seek since this one was
+            // issued and the position is at the target, where a seek lands
+            // and holds until its first frame. Before that the position is
+            // the old playhead, or an earlier seek's, and may pass near the
+            // target without the seek having landed.
+            bool landed = _activePlayer.SeeksActedOn != _seekAwaitActedOn
+                && System.Math.Abs(posS - _seekAwaitPosS) <= SeekLandedWithinSeconds;
             if (!landed && Time.unscaledTime < _seekAwaitUntil)
             {
                 posS = _seekAwaitPosS;
