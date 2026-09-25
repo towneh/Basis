@@ -1015,7 +1015,14 @@ impl PipelineShared {
         }
     }
 
+    /// End the session in Error. Once the session is stopping, a failure is
+    /// what the stop's cancellation looks like from the thread it cut short
+    /// (a read cancelled, a container cut off mid-box), so it is not
+    /// reported, and the first failure stays the one reported.
     pub fn fail(&self, error: EngineError) {
+        if self.shared.stop.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.shared.last_error.store(error.code, Ordering::Relaxed);
         self.shared
             .last_error_category
@@ -1028,7 +1035,6 @@ impl PipelineShared {
         );
         diag_err!("session error: {}", error.detail);
         self.set_state(State::Error);
-        self.shared.stop.store(true, Ordering::Relaxed);
         self.bank.changed.notify_all();
     }
 
