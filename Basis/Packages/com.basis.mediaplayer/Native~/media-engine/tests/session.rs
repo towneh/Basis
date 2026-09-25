@@ -1170,6 +1170,39 @@ fn a_seek_past_the_last_frame_lands_on_it_and_ends() {
     session.close();
 }
 
+/// Two seeks queued while the demux thread is busy land on the second: the
+/// first is superseded, not run after it.
+#[test]
+fn a_seek_queued_behind_another_supersedes_it() {
+    let mut session = open_playing();
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    {
+        // Holding the Bank stalls the demux thread in its pump, so both
+        // seeks are queued before it looks for one.
+        let _bank = px.bank.bank.lock().expect("bank lock");
+        std::thread::sleep(Duration::from_millis(300));
+        session.seek(MediaTime::from_millis(3_000));
+        session.seek(MediaTime::from_millis(1_000));
+    }
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            px.seeks_pending.load(Ordering::Acquire) == 0
+                && shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && px.presented_pts_us.load(Ordering::Relaxed) != i64::MIN
+        }),
+        "the seeks never settled (state {}, pending {})",
+        shared.state.load(Ordering::Relaxed),
+        px.seeks_pending.load(Ordering::Acquire),
+    );
+    let shown = px.presented_pts_us.load(Ordering::Relaxed);
+    assert!(
+        (1_000_000..2_000_000).contains(&shown),
+        "it landed on {shown}, not on the second seek's target"
+    );
+    session.close();
+}
+
 /// `diag_csv` writes the capture-recorder CSV on close: a header row per
 /// the pinned column contract plus at least one 100 ms sample per second
 /// of playback.

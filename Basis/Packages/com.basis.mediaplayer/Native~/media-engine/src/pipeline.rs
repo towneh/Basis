@@ -1222,10 +1222,15 @@ pub fn run_demux_leg(
         }
 
         // Seeks run here, where both the demuxer and the Bank are owned.
-        let command = if leg == Leg::Audio {
-            None
+        // The newest seek queued supersedes any queued before it.
+        let (command, taken) = if leg == Leg::Audio {
+            (None, 0)
         } else {
-            px.commands.lock().expect("commands lock").pop()
+            let mut commands = px.commands.lock().expect("commands lock");
+            let taken = commands.len() as u32;
+            let newest = commands.pop();
+            commands.clear();
+            (newest, taken)
         };
         if let Some(Command::Seek(target)) = command {
             let generation = px.bank.bank.lock().expect("bank lock").generation().next();
@@ -1329,7 +1334,7 @@ pub fn run_demux_leg(
             // After the generation advance, and a release, so a pause that
             // reads zero also reads the new generation and cannot take the
             // old timeline's picture for its own.
-            px.seeks_pending.fetch_sub(1, Ordering::Release);
+            px.seeks_pending.fetch_sub(taken, Ordering::Release);
             continue;
         }
 
