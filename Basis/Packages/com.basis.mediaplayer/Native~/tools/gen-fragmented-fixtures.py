@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Generate the two many-fragment MP4 fixtures:
+"""Generate the fragmented MP4 fixtures:
 
     fixtures/h264-aac-manyfrag-sidx.mp4   fragmented, with a segment index
     fixtures/h264-aac-manyfrag.mp4        the same streams, no index
     fixtures/h264-aac-longfrag-sidx.mp4   indexed, keyframes inside fragments
+    fixtures/h264-aac-bigfrag-sidx.mp4    indexed, a fragment of a megabyte
 
 40 s of H.264 (320x180, 24 fps, GOP 12, two B-frames so pts and dts
 differ) + stereo AAC, cut into a fragment every 100 ms and at every
@@ -25,6 +26,10 @@ keyframes fall inside fragments rather than at their starts: a seek into
 it lands part-way through a fragment, where the fragment's earlier
 samples belong to the seek before it rather than after.
 
+The fourth is 3 s of 640x360 at 3 Mbit/s in one fragment, which holds
+about a megabyte of video ahead of its audio: several of the demuxer's
+cache blocks, as a real file's fragment is.
+
 Needs ffmpeg on PATH. Run from Native~ (the fixture paths are relative
 to it):
 
@@ -39,6 +44,7 @@ import sys
 INDEXED = os.path.join("fixtures", "h264-aac-manyfrag-sidx.mp4")
 PLAIN = os.path.join("fixtures", "h264-aac-manyfrag.mp4")
 LONGFRAG = os.path.join("fixtures", "h264-aac-longfrag-sidx.mp4")
+BIGFRAG = os.path.join("fixtures", "h264-aac-bigfrag-sidx.mp4")
 SECONDS = 40
 LONGFRAG_SECONDS = 20
 FRAGMENT = ["-frag_duration", "100000"]
@@ -126,9 +132,19 @@ def main():
          "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "2",
          "-movflags", "+empty_moov+default_base_moof+global_sidx",
          "-frag_duration", "2000000", *BITEXACT, LONGFRAG], check=True)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=duration=3:size=640x360:rate=24",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+         "-c:v", "libx264", "-preset", "slow", "-b:v", "3M", "-maxrate", "3M",
+         "-bufsize", "3M", "-g", "72", "-bf", "2", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "2",
+         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+global_sidx",
+         "-frag_duration", "3000000", *BITEXACT, BIGFRAG], check=True)
     check(INDEXED, want_index=True)
     check(PLAIN, want_index=False)
     check(LONGFRAG, want_index=True, min_fragments=8)
+    check(BIGFRAG, want_index=True, min_fragments=1)
     return 0
 
 

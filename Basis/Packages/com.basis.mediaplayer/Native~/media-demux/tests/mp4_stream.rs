@@ -550,3 +550,27 @@ fn an_mfra_that_misses_the_fragments_is_not_used() {
     let (mut walked, _) = open_spread("h264-aac-manyfrag.mp4");
     assert_eq!(access_units(&mut demux), access_units(&mut walked));
 }
+
+/// A real file's fragment holds more media than one cache block: here a
+/// megabyte of video, then its audio. Read in decode order, the samples
+/// alternate between the two runs, so each read lands away from the last
+/// and the video run is fetched a block at a time, a request and a round
+/// trip each over HTTP, which a 6 Mbit/s file from far away cannot keep
+/// up with. A fragment this size is read whole instead: its header, then
+/// its data in one read. The first fragment's header came in with the
+/// open's read past `moov`, so draining costs its data, then the second
+/// fragment's header and data. A fragment too large to read whole is read
+/// a run per track, which the rows in `mp4_runs` cover.
+#[test]
+fn a_fragment_is_read_in_one_pass() {
+    const READS: u64 = 1 + (1 + 1);
+    let (mut demux, counters) = open_spread("h264-aac-bigfrag-sidx.mp4");
+    let before = counters.jumps();
+    let streamed = access_units(&mut demux);
+    let jumps = counters.jumps() - before;
+    assert_eq!(
+        streamed,
+        access_units(&mut open_walked("h264-aac-bigfrag-sidx.mp4"))
+    );
+    assert_eq!(jumps, READS, "draining the file cost {jumps} jumps");
+}

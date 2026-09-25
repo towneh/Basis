@@ -22,11 +22,18 @@ pub const FRAGMENT_PAD: u64 = 320 * 1024;
 pub struct Counters {
     pub reads: Arc<AtomicU64>,
     pub bytes: Arc<AtomicU64>,
+    /// Reads that did not start where the one before ended: over HTTP,
+    /// each is a request of its own and a round trip.
+    pub jumps: Arc<AtomicU64>,
 }
 
 impl Counters {
     pub fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn jumps(&self) -> u64 {
+        self.jumps.load(Ordering::Relaxed)
     }
 }
 
@@ -36,6 +43,8 @@ pub struct SparseSource {
     runs: Vec<(u64, Vec<u8>)>,
     len: u64,
     counters: Counters,
+    /// Where the last read ended.
+    reached: Option<u64>,
 }
 
 impl SparseSource {
@@ -44,6 +53,7 @@ impl SparseSource {
             runs,
             len,
             counters: Counters::default(),
+            reached: None,
         }
     }
 
@@ -83,6 +93,10 @@ impl ByteSource for SparseSource {
             }
         };
         self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        if self.reached != Some(offset) {
+            self.counters.jumps.fetch_add(1, Ordering::Relaxed);
+        }
+        self.reached = Some(offset + available as u64);
         self.counters
             .bytes
             .fetch_add(available as u64, Ordering::Relaxed);

@@ -16,6 +16,7 @@ mod mp3;
 mod mp4;
 mod mp4_fragment;
 mod mp4_index;
+mod mp4_runs;
 mod ogg_opus;
 mod source;
 mod ts;

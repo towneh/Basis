@@ -130,6 +130,8 @@ pub struct Mp4Demuxer {
     artwork: Option<crate::Artwork>,
     /// Present when the file's fragments are read as they are reached.
     fragments: Option<Fragments>,
+    /// The data of the fragments whose samples are queued.
+    runs: crate::mp4_runs::HeldRuns,
 }
 
 impl Mp4Demuxer {
@@ -248,6 +250,7 @@ impl Mp4Demuxer {
             audio_tracks: Vec::new(),
             artwork: artwork_from_moov(&mp4),
             fragments,
+            runs: crate::mp4_runs::HeldRuns::default(),
         };
         this.extract_tracks(&mp4, options)?;
 
@@ -624,6 +627,12 @@ impl Mp4Demuxer {
     }
 
     fn read_sample(&mut self, sample: SampleRef) -> Result<Vec<u8>, DemuxError> {
+        if let Some(held) = self
+            .runs
+            .serve(self.src.inner_mut(), sample.offset, sample.size)
+        {
+            return held.map_err(DemuxError::Source);
+        }
         let mut data = vec![0u8; sample.size as usize];
         self.src
             .read_exact_at(sample.offset, &mut data)
@@ -734,6 +743,7 @@ impl Mp4Demuxer {
                 break;
             }
             let at = fragments.next;
+            self.runs.finish(self.src.inner_mut());
             let loaded = self.load_fragment(at, false)?;
             self.queue(loaded);
             self.fragments.as_mut().expect("checked above").next = at + 1;
@@ -742,6 +752,11 @@ impl Mp4Demuxer {
     }
 
     fn queue(&mut self, loaded: Loaded) {
+        let offsets = |samples: &[SampleRef]| -> Vec<(u64, u32)> {
+            samples.iter().map(|s| (s.offset, s.size)).collect()
+        };
+        let tracks = [offsets(&loaded.video), offsets(&loaded.audio)];
+        self.runs.hold(self.src.inner_mut(), &tracks);
         if let Some(Samples::Held(held)) = self.video.as_mut().map(|v| &mut v.samples) {
             held.extend(loaded.video);
         }
@@ -751,6 +766,7 @@ impl Mp4Demuxer {
     }
 
     fn clear_queues(&mut self) {
+        self.runs.clear();
         if let Some(Samples::Held(held)) = self.video.as_mut().map(|v| &mut v.samples) {
             held.clear();
         }
