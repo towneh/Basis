@@ -440,7 +440,7 @@ impl Sps {
                 // H.265 section 7.3.2.2.3, `sps_scc_extension`.
                 r.skip(1, "sps_curr_pic_ref_enabled_flag")?;
                 if r.read_bool("palette_mode_enabled_flag")? {
-                    let _ = r.read_ue("palette_max_size");
+                    let _ = r.read_ue("palette_max_size")?;
                     let _ = r.read_ue("delta_palette_max_predictor_size")?;
                     if r.read_bool("sps_palette_predictor_initializers_present_flag")? {
                         let _ = r.read_ue("sps_num_palette_predictor_initializers_minus1")?;
@@ -867,7 +867,7 @@ impl ScalingListData {
                         let _ = r.read_se("scaling_list_dc_coef_minus8")?;
                     }
                     for _ in 0..coef_num {
-                        let _ = r.read_se("scaling_list_delta_coef");
+                        let _ = r.read_se("scaling_list_delta_coef")?;
                     }
                 }
             }

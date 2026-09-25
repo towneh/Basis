@@ -57,6 +57,11 @@ dropped. The source matches the crates.io release apart from these changes:
   beside them. The H.265 depacketizer has the same shape and is left
   alone: the engine sets up no H.265 stream. Covered by
   `media-rtsp/tests/h264_access_unit_bound.rs`.
+- `src/codec/h265/nal.rs`, `Sps::from_bits` and `ScalingListData::from_bits`:
+  the reads of `palette_max_size` and `scaling_list_delta_coef` propagate
+  their errors. Upstream dropped them, so an SPS with an unreadable code in
+  either place parsed on from the wrong bit position and was accepted.
+  Covered by `media-rtsp/tests/h265_sps_refusal.rs`.
 
 Each is a candidate for an upstream report or pull request to
 scottlamb/retina. The copy can go once a release carries them.
