@@ -293,7 +293,7 @@ pub struct D3d12Consumer {
 // one thread); the wrapped D3D12 interfaces are free-threaded.
 unsafe impl Send for D3d12Consumer {}
 
-fn copy_compatible(format: DXGI_FORMAT) -> bool {
+pub(crate) fn copy_compatible(format: DXGI_FORMAT) -> bool {
     [
         DXGI_FORMAT_B8G8R8A8_UNORM,
         DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,

@@ -451,6 +451,31 @@ fn present_slice_drops_a_slice_from_another_device() {
     }
 }
 
+/// `CopyResource` between textures of different sizes is dropped without
+/// an error, which would leave a picture that never updates. The consumer
+/// refuses such a destination when it opens instead.
+#[test]
+fn the_consumer_refuses_a_destination_of_another_size() {
+    let (w, h) = (64u32, 32u32);
+    let presenter = SharedTexturePresenter::new(w, h).expect("presenter");
+    for (tw, th) in [(w + 1, h), (w - 1, h), (w, h + 1), (w, h - 1)] {
+        let target = TestConsumerTarget::new(tw, th).expect("target");
+        // SAFETY: the target texture is live for the loop body, its device
+        // can open the handle, and the presenter keeps the handle open.
+        let opened =
+            unsafe { SharedTextureConsumer::open(target.texture_ptr(), presenter.shared_handle()) };
+        assert!(
+            opened.is_err(),
+            "a {tw}x{th} destination opened on a {w}x{h} texture"
+        );
+    }
+    let target = TestConsumerTarget::new(w, h).expect("target");
+    // SAFETY: as above.
+    let opened =
+        unsafe { SharedTextureConsumer::open(target.texture_ptr(), presenter.shared_handle()) };
+    assert!(opened.is_ok(), "a matching destination was refused");
+}
+
 /// The presenter owns the NT handle `CreateSharedHandle` hands back, so
 /// dropping it must close the handle. Otherwise every rebuild strands a
 /// kernel handle and pins the texture's video memory for the process's life.

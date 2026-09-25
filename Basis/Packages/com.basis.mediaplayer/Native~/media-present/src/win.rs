@@ -487,10 +487,12 @@ pub struct SharedTextureConsumer {
 unsafe impl Send for SharedTextureConsumer {}
 
 impl SharedTextureConsumer {
+    /// Refuses a destination whose size or format the producer's texture
+    /// cannot be copied into.
+    ///
     /// # Safety
     /// `destination_texture` must be a live `ID3D11Texture2D*` whose device
-    /// can open `shared_handle`, and whose dimensions/format match the
-    /// producer's texture.
+    /// can open `shared_handle`.
     pub unsafe fn open(
         destination_texture: *mut c_void,
         shared_handle: u64,
@@ -508,6 +510,24 @@ impl SharedTextureConsumer {
                 device1.OpenSharedResource1(HANDLE(shared_handle as usize as *mut c_void)),
                 "OpenSharedResource1",
             )?;
+            // CopyResource needs both descriptions to match; a mismatched
+            // copy would be dropped without a word.
+            let mut want = D3D11_TEXTURE2D_DESC::default();
+            destination.GetDesc(&mut want);
+            let mut have = D3D11_TEXTURE2D_DESC::default();
+            shared.GetDesc(&mut have);
+            if want.Width != have.Width
+                || want.Height != have.Height
+                || want.MipLevels != 1
+                || want.ArraySize != 1
+                || want.SampleDesc.Count != 1
+                || !crate::win_d3d12::copy_compatible(want.Format)
+            {
+                return Err(PresentError(format!(
+                    "destination {}x{} {:?} ({} mips) cannot take a {}x{} BGRA copy",
+                    want.Width, want.Height, want.Format, want.MipLevels, have.Width, have.Height
+                )));
+            }
             let keyed: IDXGIKeyedMutex = d3d(shared.cast(), "cast IDXGIKeyedMutex (consumer)")?;
             let context = d3d(device.GetImmediateContext(), "GetImmediateContext")?;
             Ok(Self {
