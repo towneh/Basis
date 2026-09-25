@@ -50,9 +50,51 @@ const FEED_STALL: Duration = Duration::from_secs(10);
 /// firewall/NAT-blackhole case, invisible at SETUP time.
 const UDP_PROBE: Duration = Duration::from_secs(5);
 
+/// Longest one transport's DESCRIBE/SETUP/PLAY exchange may take. The
+/// client sets no deadline of its own, so a server that accepts the
+/// connection and never answers would otherwise hold the open for good.
+const OPEN_DEADLINE: Duration = Duration::from_secs(15);
+/// How often a blocked open samples the cancel probe.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
 /// The engine's teardown probe: sampled between blocking receives so a
 /// closing session never waits out the stall timeout.
 pub type CancelProbe = Box<dyn Fn() -> bool + Send>;
+
+enum Interrupted {
+    Cancelled,
+    TimedOut,
+}
+
+/// Runs `work` until it finishes, `cancelled` reports true, or `limit`
+/// passes. The thread running an open is one `bm_session_close` joins from
+/// the client's main thread, so every wait in it has to see the cancel.
+fn drive<T>(
+    runtime: &tokio::runtime::Handle,
+    cancelled: &CancelProbe,
+    limit: Duration,
+    work: impl Future<Output = T>,
+) -> Result<T, Interrupted> {
+    runtime.block_on(async {
+        let deadline = tokio::time::Instant::now() + limit;
+        tokio::pin!(work);
+        loop {
+            if cancelled() {
+                return Err(Interrupted::Cancelled);
+            }
+            tokio::select! {
+                biased;
+                outcome = &mut work => return Ok(outcome),
+                () = tokio::time::sleep_until(deadline) => return Err(Interrupted::TimedOut),
+                () = tokio::time::sleep(CANCEL_POLL) => {}
+            }
+        }
+    })
+}
+
+fn open_cancelled() -> DemuxError {
+    DemuxError::Source("rtsp open cancelled".into())
+}
 
 /// Which transport the open negotiated (transport choices are
 /// diagnosable, never silent).
@@ -105,12 +147,13 @@ impl RtspDemuxer {
 
         let mut fallback = None;
         if want_udp {
-            match runtime.block_on(udp::setup_udp_session(
-                parsed.clone(),
-                servers.clone(),
-                udp_peer_allowed,
-            )) {
-                Ok(ready) => {
+            match drive(
+                &runtime,
+                &cancelled,
+                OPEN_DEADLINE,
+                udp::setup_udp_session(parsed.clone(), servers.clone(), udp_peer_allowed),
+            ) {
+                Ok(Ok(ready)) => {
                     let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
                     let (first_tx, first_rx) = tokio::sync::oneshot::channel();
                     let task = runtime.spawn(async move {
@@ -126,9 +169,7 @@ impl RtspDemuxer {
                     // A set-up session that never delivers a datagram is
                     // the UDP-blackhole case; only arrival proves the
                     // path works.
-                    match runtime
-                        .block_on(async { tokio::time::timeout(UDP_PROBE, first_rx).await })
-                    {
+                    match drive(&runtime, &cancelled, UDP_PROBE, first_rx) {
                         Ok(Ok(())) => {
                             return Ok(Self {
                                 rx,
@@ -141,13 +182,21 @@ impl RtspDemuxer {
                                 fallback: None,
                             });
                         }
+                        Err(Interrupted::Cancelled) => {
+                            task.abort();
+                            return Err(open_cancelled());
+                        }
                         _ => {
                             task.abort();
                             fallback = Some(format!("no UDP datagrams within {UDP_PROBE:?}"));
                         }
                     }
                 }
-                Err(detail) => fallback = Some(format!("UDP setup failed: {detail}")),
+                Ok(Err(detail)) => fallback = Some(format!("UDP setup failed: {detail}")),
+                Err(Interrupted::Cancelled) => return Err(open_cancelled()),
+                Err(Interrupted::TimedOut) => {
+                    fallback = Some(format!("UDP setup unanswered within {OPEN_DEADLINE:?}"));
+                }
             }
         }
 
@@ -155,9 +204,20 @@ impl RtspDemuxer {
         // 404 path fails the open itself, and the engine's reconnect
         // budget counts it rather than seeing a session that dies on
         // first pull.
-        let ready = runtime
-            .block_on(setup_session(parsed, servers))
-            .map_err(|detail| DemuxError::Source(detail.into()))?;
+        let ready = match drive(
+            &runtime,
+            &cancelled,
+            OPEN_DEADLINE,
+            setup_session(parsed, servers),
+        ) {
+            Ok(ready) => ready.map_err(|detail| DemuxError::Source(detail.into()))?,
+            Err(Interrupted::Cancelled) => return Err(open_cancelled()),
+            Err(Interrupted::TimedOut) => {
+                return Err(DemuxError::Source(
+                    format!("rtsp setup unanswered within {OPEN_DEADLINE:?}").into(),
+                ));
+            }
+        };
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
         let task = runtime.spawn(async move {
             let result = run_session(ready, generation, &tx).await;
