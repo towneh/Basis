@@ -309,6 +309,7 @@ impl MkvDemuxer {
             .iter()
             .filter(|entry| entry.track_type() == TrackType::Audio)
             .filter_map(|entry| {
+                let id = TrackId(u32::try_from(entry.track_number().get()).ok()?);
                 let codec = map_audio_codec(entry.codec_id())?;
                 // A track with no Audio element at all has an unknown
                 // geometry rather than an implausible one, announced as zero.
@@ -321,7 +322,7 @@ impl MkvDemuxer {
                     None => (0, 0),
                 };
                 Some(AudioTrackInfo {
-                    id: TrackId(entry.track_number().get() as u32),
+                    id,
                     language: match entry.language() {
                         Some("und") | Some("") | None => None,
                         Some(other) => Some(other.to_string()),
@@ -349,7 +350,16 @@ impl MkvDemuxer {
 
         for entry in self.file.tracks() {
             let number = entry.track_number().get();
-            let track = TrackId(number as u32);
+            // Track numbers are 64-bit here and track ids 32-bit: a
+            // narrowed number could take another track's id, and with it
+            // that track's decoder.
+            let Ok(id) = u32::try_from(number) else {
+                push_note(&mut self.notes, || {
+                    format!("track {number}: skipped (number past 32 bits)")
+                });
+                continue;
+            };
+            let track = TrackId(id);
             match entry.track_type() {
                 TrackType::Video if self.video.is_none() => {
                     let codec_id = entry.codec_id().to_string();
@@ -421,9 +431,7 @@ impl MkvDemuxer {
                 // reached; an undecodable choice falls through to the next
                 // decodable track, which is why this is not an equality
                 // test.
-                TrackType::Audio
-                    if self.audio.is_none() && wanted.is_none_or(|w| number as u32 >= w.0) =>
-                {
+                TrackType::Audio if self.audio.is_none() && wanted.is_none_or(|w| id >= w.0) => {
                     let codec_id = entry.codec_id().to_string();
                     let Some(codec) = map_audio_codec(&codec_id) else {
                         push_note(&mut self.notes, || {

@@ -233,6 +233,30 @@ fn a_frame_stating_a_terabyte_is_refused() {
     assert_capped(pulled);
 }
 
+/// Matroska track numbers are 64-bit and the engine's track ids 32-bit.
+/// A number that does not fit is passed over: narrowed, it lands on
+/// another track's id, and that track's decoder is handed its frames.
+#[test]
+fn a_track_number_past_32_bits_does_not_alias_another_track() {
+    let mut track_list = track_entry(1, 1, "V_VP9", &[]);
+    track_list.extend(track_entry((1 << 32) + 1, 2, "A_OPUS", &[]));
+    let demux = MkvDemuxer::open(
+        Box::new(MemSource(mkv_file(
+            &doc_type(),
+            &track_list,
+            &empty_cluster(),
+        ))),
+        DemuxLimits::default(),
+        Generation(0),
+    )
+    .expect("open");
+    assert!(demux.video_track().is_some(), "the video track binds");
+    assert!(
+        demux.audio_track().is_none(),
+        "the audio track is passed over"
+    );
+}
+
 fn open(name: &str) -> MkvDemuxer {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/mkv");
     let bytes = std::fs::read(path.join(name)).expect("fixture");
