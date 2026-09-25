@@ -919,9 +919,9 @@ fn open_http_live_with(
 /// RTSP: always live. `rtsp://` tries UDP first (media-rtp under retina)
 /// and falls back to TCP-interleaved; `rtspt://` is pinned to TCP. The
 /// Bank absorbs jitter either way, and the reconnect factory rebuilds the
-/// whole session on transport loss. The host is vetted against the
-/// address gate before the client dials, and the same gate vets the SETUP
-/// response's UDP peer address.
+/// whole session on transport loss. The host is resolved and vetted
+/// against the address gate here, and the client dials those addresses in
+/// turn; the same gate vets the SETUP response's UDP peer address.
 fn open_rtsp(
     px: Arc<PipelineShared>,
     url: &str,
@@ -944,12 +944,14 @@ fn open_rtsp(
             let host = parsed
                 .host_str()
                 .ok_or_else(|| EngineError::config("rtsp url without host"))?;
-            media_io::vet_host(host, parsed.port().unwrap_or(554), gate.as_ref())
-                .map_err(EngineError::io)?;
+            let servers =
+                media_io::resolve_vetted_all(host, parsed.port().unwrap_or(554), gate.as_ref())
+                    .map_err(EngineError::io)?;
             let cancel = px.io_cancel.clone();
             let peer_gate = Arc::clone(&gate);
             let demuxer = media_rtsp::RtspDemuxer::open(
                 &url,
+                servers,
                 generation,
                 media_io::io_runtime_handle(),
                 Box::new(move || cancel.is_cancelled()),

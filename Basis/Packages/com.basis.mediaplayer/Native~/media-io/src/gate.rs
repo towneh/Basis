@@ -77,19 +77,11 @@ impl AddressGate for AllowAllGate {
     }
 }
 
-/// Resolve a bare host and vet every returned address: the pre-connect
-/// check for transports whose clients do their own dialling (RTSP). A
-/// mixed public/private answer is the rebinding shape and is refused
-/// whole. The transport re-resolves at connect, so a TOCTOU window
-/// remains; it is accepted for these lanes until their clients take
-/// pinned addresses.
-pub fn vet_host(host: &str, port: u16, gate: &dyn AddressGate) -> Result<(), crate::IoError> {
-    resolve_vetted(host, port, gate).map(|_| ())
-}
-
-/// [`vet_host`], returning the first vetted address so a transport that owns
-/// its own sockets (librist) can be pinned to the checked literal instead of
-/// re-resolving the hostname — the same TOCTOU close as the pinned-IP HTTP
+/// Resolve a bare host and vet every returned address, returning the first,
+/// for transports whose clients do their own dialling and take one address
+/// (librist). A mixed public/private answer is the rebinding shape and is
+/// refused whole. The client dials the returned literal rather than
+/// resolving the hostname again, the same TOCTOU close as the pinned-IP HTTP
 /// connect.
 pub fn resolve_vetted(
     host: &str,
@@ -102,6 +94,19 @@ pub fn resolve_vetted(
             let addrs = crate::resolve::resolve_blocking(host, port)?;
             first_vetted(host, addrs, gate)
         }
+    }
+}
+
+/// [`resolve_vetted`], returning the whole answer in resolver order for a
+/// client that tries each address in turn until one connects (RTSP).
+pub fn resolve_vetted_all(
+    host: &str,
+    port: u16,
+    gate: &dyn AddressGate,
+) -> Result<Vec<std::net::SocketAddr>, crate::IoError> {
+    match literal_vetted(host, port, gate)? {
+        Some(addr) => Ok(vec![addr]),
+        None => all_vetted(host, crate::resolve::resolve_blocking(host, port)?, gate),
     }
 }
 
@@ -153,6 +158,14 @@ fn first_vetted(
     addrs: Vec<std::net::SocketAddr>,
     gate: &dyn AddressGate,
 ) -> Result<std::net::SocketAddr, crate::IoError> {
+    all_vetted(host, addrs, gate).map(|addrs| addrs[0])
+}
+
+fn all_vetted(
+    host: &str,
+    addrs: Vec<std::net::SocketAddr>,
+    gate: &dyn AddressGate,
+) -> Result<Vec<std::net::SocketAddr>, crate::IoError> {
     if addrs.is_empty() {
         return Err(crate::IoError::new(
             crate::IoErrorKind::Resolve,
@@ -167,7 +180,7 @@ fn first_vetted(
             ));
         }
     }
-    Ok(addrs[0])
+    Ok(addrs)
 }
 
 #[cfg(test)]

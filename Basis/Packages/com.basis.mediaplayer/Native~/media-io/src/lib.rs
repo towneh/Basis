@@ -22,7 +22,8 @@ pub use cancel::CancelToken;
 pub use fetch::ResourceFetcher;
 pub use file::FileSource;
 pub use gate::{
-    AddressGate, AllowAllGate, PublicAddressGate, resolve_vetted, resolve_vetted_async, vet_host,
+    AddressGate, AllowAllGate, PublicAddressGate, resolve_vetted, resolve_vetted_all,
+    resolve_vetted_async,
 };
 pub use http::{HttpSource, vet_url_async};
 pub use live::HttpLiveSource;

@@ -467,6 +467,9 @@ fn keepalive_interval(session: &SessionHeader) -> std::time::Duration {
     std::time::Duration::from_secs(std::cmp::min(u64::from(session.timeout_sec), 60)) / 2
 }
 
+/// Longest a dropped session keeps retrying `TEARDOWN` in the background.
+const MAX_TEARDOWN_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Options which must be known right as a session is created.
 ///
 /// Decisions which can be deferred are in [`SetupOptions`] or [`PlayOptions`] instead.
@@ -479,6 +482,7 @@ pub struct SessionOptions {
     unassigned_channel_data: UnassignedChannelDataPolicy,
     session_id: SessionIdPolicy,
     udp_peer_validator: Option<Arc<dyn Fn(IpAddr) -> bool + Send + Sync>>,
+    connect_addrs: Vec<SocketAddr>,
 }
 
 /// Policy for handling data received on unassigned RTSP interleaved channels.
@@ -642,6 +646,18 @@ impl SessionOptions {
         validator: Arc<dyn Fn(IpAddr) -> bool + Send + Sync>,
     ) -> Self {
         self.udp_peer_validator = Some(validator);
+        self
+    }
+
+    /// Connects to these addresses, tried in order, instead of resolving the
+    /// URL's host. `DESCRIBE` uses them, and any fresh connection a
+    /// `TEARDOWN` makes uses the one `DESCRIBE` reached. The URL still names
+    /// the host in every request. A caller that vetted the addresses it
+    /// resolved passes them here, so a second lookup cannot answer
+    /// differently and the server cannot redirect a `TEARDOWN` elsewhere
+    /// through `Content-Base`.
+    pub fn connect_addrs(mut self, addrs: Vec<SocketAddr>) -> Self {
+        self.connect_addrs = addrs;
         self
     }
 
@@ -1172,13 +1188,16 @@ enum SessionFlag {
 }
 
 impl RtspConnection {
-    async fn connect(url: &Url) -> Result<Self, Error> {
+    async fn connect(url: &Url, pinned: &[SocketAddr]) -> Result<Self, Error> {
         let host =
             RtspConnection::validate_url(url).map_err(|e| wrap!(ErrorInt::InvalidArgument(e)))?;
         let port = url.port().unwrap_or(554);
-        let inner = crate::tokio::Connection::connect(host, port)
-            .await
-            .map_err(|e| wrap!(ErrorInt::ConnectError(e)))?;
+        let inner = if pinned.is_empty() {
+            crate::tokio::Connection::connect(host, port).await
+        } else {
+            crate::tokio::Connection::connect_addrs(pinned).await
+        }
+        .map_err(|e| wrap!(ErrorInt::ConnectError(e)))?;
         Ok(Self {
             inner,
             channels: ChannelMappings::default(),
@@ -1470,8 +1489,11 @@ impl Session<Described> {
     /// returned from `Stream<Playing>::demuxed`.
     ///
     /// Expects to be called from a tokio runtime.
-    pub async fn describe(url: Url, options: SessionOptions) -> Result<Self, Error> {
-        let conn = RtspConnection::connect(&url).await?;
+    pub async fn describe(url: Url, mut options: SessionOptions) -> Result<Self, Error> {
+        let conn = RtspConnection::connect(&url, &options.connect_addrs).await?;
+        if !options.connect_addrs.is_empty() {
+            options.connect_addrs = vec![conn.inner.ctx().peer_addr];
+        }
         Self::describe_with_conn(conn, options, url).await
     }
 
@@ -2563,9 +2585,11 @@ impl PinnedDrop for SessionInner {
             None => return,
         };
 
-        // For now, assume the whole timeout is left.
+        // For now, assume the whole timeout is left. The server states the
+        // timeout, so it is capped: past it the retries stop regardless.
         let expires = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(session.timeout_sec.into());
+            + std::time::Duration::from_secs(session.timeout_sec.into())
+                .min(MAX_TEARDOWN_WINDOW);
 
         // Track the session, if there is a group.
         let (teardown_tx, teardown_rx) = tokio::sync::watch::channel(None);

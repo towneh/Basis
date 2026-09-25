@@ -71,6 +71,20 @@ dropped. The source matches the crates.io release apart from these changes:
   `UnitType` converts through a table and a cast rather than
   `transmute`). The one left, `CaseInsensitive::new` in `src/rtsp/msg.rs`,
   carries the allow.
+- `src/client/mod.rs`, `SessionOptions::connect_addrs`, `RtspConnection::connect`
+  and `src/client/teardown.rs`: optional addresses that `DESCRIBE` dials in
+  order instead of resolving the URL's host, starting the next when one
+  fails or has gone 250 ms unanswered and keeping the first to connect
+  (`CONNECT_STAGGER` in `src/tokio.rs`, after RFC 8305), so silent
+  addresses cannot use up the caller's deadline; a `TEARDOWN`'s fresh
+  connections dial the one `DESCRIBE` reached. The engine resolves and vets
+  the host itself, and upstream's own lookup was a second answer the
+  vetting never saw; a `TEARDOWN` also followed the server's `Content-Base`
+  to whatever host it named. Covered by
+  `media-rtsp/tests/rtsp_pinned_address.rs`.
+- `src/client/mod.rs`, `Session` drop: a dropped session retries `TEARDOWN`
+  in the background for at most two minutes (`MAX_TEARDOWN_WINDOW`), not for
+  the whole session timeout the server states, which may be decades.
 
 Each is a candidate for an upstream report or pull request to
 scottlamb/retina. The copy can go once a release carries them.

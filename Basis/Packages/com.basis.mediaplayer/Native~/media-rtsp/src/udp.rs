@@ -70,10 +70,12 @@ fn local_ssrc(index: usize) -> u32 {
 
 pub(crate) async fn setup_udp_session(
     url: url::Url,
+    servers: Vec<std::net::SocketAddr>,
     peer_allowed: UdpPeerAllowed,
 ) -> Result<UdpReady, String> {
     let options = SessionOptions::default()
         .user_agent("basis-media".into())
+        .connect_addrs(servers)
         .udp_peer_validator(Arc::new(move |ip| peer_allowed(ip)));
     let mut session = retina::client::Session::describe(url, options)
         .await

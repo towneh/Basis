@@ -17,6 +17,7 @@
 //! window anyway, so the join pays nothing extra.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -85,11 +86,14 @@ impl RtspDemuxer {
     /// Open and start pulling. `runtime` hosts the async session (the
     /// shared bm-io runtime); `cancelled` is polled during blocking
     /// waits. `rtsp://` negotiates UDP first and falls back to
-    /// TCP-interleaved; `rtspt://` pins TCP-interleaved. `udp_peer_allowed`
-    /// vets the UDP peer address from the SETUP response before any
-    /// packet is sent to it.
+    /// TCP-interleaved; `rtspt://` pins TCP-interleaved. `servers` are the
+    /// addresses to dial, tried in order, resolved from the URL's host and
+    /// vetted by the caller; the host is never looked up again. `udp_peer_allowed` vets
+    /// the UDP peer address from the SETUP response before any packet is
+    /// sent to it.
     pub fn open(
         url: &str,
+        servers: Vec<SocketAddr>,
         generation: Generation,
         runtime: tokio::runtime::Handle,
         cancelled: CancelProbe,
@@ -101,7 +105,11 @@ impl RtspDemuxer {
 
         let mut fallback = None;
         if want_udp {
-            match runtime.block_on(udp::setup_udp_session(parsed.clone(), udp_peer_allowed)) {
+            match runtime.block_on(udp::setup_udp_session(
+                parsed.clone(),
+                servers.clone(),
+                udp_peer_allowed,
+            )) {
                 Ok(ready) => {
                     let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
                     let (first_tx, first_rx) = tokio::sync::oneshot::channel();
@@ -148,7 +156,7 @@ impl RtspDemuxer {
         // budget counts it rather than seeing a session that dies on
         // first pull.
         let ready = runtime
-            .block_on(setup_session(parsed))
+            .block_on(setup_session(parsed, servers))
             .map_err(|detail| DemuxError::Source(detail.into()))?;
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
         let task = runtime.spawn(async move {
@@ -304,8 +312,10 @@ struct ReadySession {
     audio_index: Option<usize>,
 }
 
-async fn setup_session(url: url::Url) -> Result<ReadySession, String> {
-    let options = SessionOptions::default().user_agent("basis-media".into());
+async fn setup_session(url: url::Url, servers: Vec<SocketAddr>) -> Result<ReadySession, String> {
+    let options = SessionOptions::default()
+        .user_agent("basis-media".into())
+        .connect_addrs(servers);
     let mut session = retina::client::Session::describe(url, options)
         .await
         .map_err(|e| format!("rtsp describe: {e}"))?;

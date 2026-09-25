@@ -24,6 +24,13 @@ use super::{ConnectionContext, ReceivedMessage, WallTime};
 /// length.
 const MAX_MESSAGE_BYTES: usize = 1 << 20;
 
+/// How long a pinned address's connection attempt runs alone before the next
+/// address starts alongside it (RFC 8305's connection attempt delay). An
+/// address that drops the attempt holds it for the OS's own connect timeout
+/// (about 21 s on Windows), so waiting each one out in turn could spend a
+/// caller's whole deadline before a reachable address was tried.
+const CONNECT_STAGGER: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A RTSP connection which implements `Stream`, `Sink`, and `Unpin`.
 pub(crate) struct Connection(Framed<TcpStream, Codec>);
 
@@ -35,6 +42,48 @@ impl Connection {
             Host::Ipv6(h) => TcpStream::connect((h, port)).await,
         }?;
         Self::from_stream(stream)
+    }
+
+    /// Tries `addrs` in order, starting the next one when an attempt fails or
+    /// has gone unanswered for [`CONNECT_STAGGER`], and keeps the first
+    /// connection made. Attempts still pending are dropped with it.
+    pub(crate) async fn connect_addrs(
+        addrs: &[std::net::SocketAddr],
+    ) -> Result<Self, std::io::Error> {
+        let mut pending = futures::stream::FuturesUnordered::new();
+        let mut next = 0;
+        let mut last_err = None;
+        loop {
+            if pending.is_empty() {
+                let Some(&addr) = addrs.get(next) else {
+                    return Err(last_err.unwrap_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "no addresses to connect to",
+                        )
+                    }));
+                };
+                pending.push(TcpStream::connect(addr));
+                next += 1;
+            }
+            tokio::select! {
+                biased;
+                Some(result) = pending.next() => match result {
+                    Ok(stream) => return Self::from_stream(stream),
+                    Err(e) => {
+                        last_err = Some(e);
+                        if let Some(&addr) = addrs.get(next) {
+                            pending.push(TcpStream::connect(addr));
+                            next += 1;
+                        }
+                    }
+                },
+                () = tokio::time::sleep(CONNECT_STAGGER), if next < addrs.len() => {
+                    pending.push(TcpStream::connect(addrs[next]));
+                    next += 1;
+                }
+            }
+        }
     }
 
     pub(crate) fn from_stream(stream: TcpStream) -> Result<Self, std::io::Error> {
