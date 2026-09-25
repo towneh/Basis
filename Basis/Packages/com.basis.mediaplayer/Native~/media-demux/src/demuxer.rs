@@ -92,9 +92,16 @@ pub trait Demuxer: Send {
         None
     }
 
-    /// Drain per-track findings (skipped tracks, refused layouts) for the
-    /// engine to surface as diagnostics.
+    /// Drain per-track findings (tracks left aside, fallbacks taken) for
+    /// the engine to surface as diagnostics.
     fn take_notes(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Drain the tracks left out because nothing here can play them, each
+    /// with its reason. Unlike a note, a refusal is put in front of the
+    /// viewer: it is part of the source they asked for and will not get.
+    fn take_refusals(&mut self) -> Vec<String> {
         Vec::new()
     }
 }

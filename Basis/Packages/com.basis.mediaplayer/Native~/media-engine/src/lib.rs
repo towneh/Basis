@@ -112,6 +112,7 @@ impl EngineError {
             DemuxError::Parse(_) => 3,
             DemuxError::Unsupported(_) => 4,
             DemuxError::Cap(_) => 5,
+            DemuxError::Refused(_) => 6,
         };
         Self {
             code: 200 + sub,
@@ -1573,7 +1574,7 @@ fn finish_open(
 fn finish_open_split(
     px: Arc<PipelineShared>,
     mut demuxer: Box<dyn media_demux::Demuxer>,
-    audio_leg: Option<Box<dyn media_demux::Demuxer>>,
+    mut audio_leg: Option<Box<dyn media_demux::Demuxer>>,
     bank_cfg: BankConfig,
     reconnect_factory: Option<pipeline::DemuxFactory>,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -1584,6 +1585,21 @@ fn finish_open_split(
             EventCode::CapabilityProbe,
             Stage::Demux,
             note,
+        );
+    }
+    // Kept as reasons too: if what the demuxer did keep is refused as
+    // well, the failure names everything the source was refused for.
+    let mut refusals = demuxer.take_refusals();
+    if let Some(leg) = audio_leg.as_mut() {
+        refusals.extend(leg.take_refusals());
+    }
+    for refusal in refusals {
+        px.playable.reason(&refusal);
+        px.diag.event(
+            px.wall.now(),
+            EventCode::CodecRefused,
+            Stage::Demux,
+            refusal,
         );
     }
     // What a picker can offer instead of the bound track. Empty unless the

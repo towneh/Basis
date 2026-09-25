@@ -120,6 +120,7 @@ pub struct Mp4Demuxer {
     audio: Option<AudioTrack>,
     pending: VecDeque<StreamEvent>,
     notes: Vec<String>,
+    refusals: Vec<String>,
     emit_raw_video: bool,
     audio_tracks: Vec<AudioTrackInfo>,
     /// Cover art from `moov/udta/meta/ilst/covr`.
@@ -248,6 +249,7 @@ impl Mp4Demuxer {
             audio: None,
             pending: VecDeque::new(),
             notes,
+            refusals: Vec::new(),
             emit_raw_video: false,
             audio_tracks: Vec::new(),
             artwork: artwork_from_moov(&mp4),
@@ -257,6 +259,9 @@ impl Mp4Demuxer {
         this.extract_tracks(&mp4, options, &configs)?;
 
         if this.video.is_none() && this.audio.is_none() {
+            if !this.refusals.is_empty() {
+                return Err(DemuxError::Refused(this.refusals.join("; ")));
+            }
             return Err(DemuxError::Unsupported(
                 "no decodable track (need H.264 video or AAC audio)",
             ));
@@ -271,6 +276,11 @@ impl Mp4Demuxer {
     /// (skipped tracks, refused layouts). Drained once after open.
     pub fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+
+    /// Tracks left out because nothing here can play them.
+    pub fn take_refusals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.refusals)
     }
 
     pub fn video_track(&self) -> Option<TrackId> {
@@ -350,10 +360,24 @@ impl Mp4Demuxer {
                         continue;
                     }
                 }
+                // An entry the box parser does not know has no kind of its
+                // own, but the handler still says what the track was for.
                 _ => {
-                    push_note(&mut self.notes, || {
-                        format!("track {id}: skipped ({:?})", track.kind)
-                    });
+                    let trak = track.trak(mp4);
+                    let entry = sample_entry(&trak.mdia.minf.stbl.stsd.contents);
+                    let refusal = match (track.kind, &trak.mdia.hdlr.handler_type.value) {
+                        (None, b"vide") if self.video.is_none() => Some(unsupported_video(&entry)),
+                        (None, b"soun") if self.audio.is_none() => Some(format!(
+                            "audio codec '{entry}' is not supported (supported: AAC)"
+                        )),
+                        _ => None,
+                    };
+                    match refusal {
+                        Some(refusal) => push_note(&mut self.refusals, || refusal),
+                        None => push_note(&mut self.notes, || {
+                            format!("track {id}: skipped ({:?})", track.kind)
+                        }),
+                    }
                     continue;
                 }
             }
@@ -434,12 +458,8 @@ impl Mp4Demuxer {
                 )
             }
             _ => {
-                push_note(&mut self.notes, || {
-                    format!(
-                        "track {}: skipped video (unsupported sample entry: {})",
-                        track_id.0,
-                        track.codec_string(mp4).unwrap_or_default()
-                    )
+                push_note(&mut self.refusals, || {
+                    unsupported_video(&sample_entry(&stsd.contents))
                 });
                 return Ok(None);
             }
@@ -486,13 +506,13 @@ impl Mp4Demuxer {
         let trak = track.trak(mp4);
         let stsd = &trak.mdia.minf.stbl.stsd;
         let re_mp4::StsdBoxContent::Mp4a(mp4a) = &stsd.contents else {
-            push_note(&mut self.notes, || {
+            push_note(&mut self.refusals, || {
                 format!("track {}: skipped audio (not AAC/mp4a)", track_id.0)
             });
             return None;
         };
         let Some(esds) = &mp4a.esds else {
-            push_note(&mut self.notes, || {
+            push_note(&mut self.refusals, || {
                 format!("track {}: mp4a without esds", track_id.0)
             });
             return None;
@@ -500,7 +520,7 @@ impl Mp4Demuxer {
         let dec = &esds.es_desc.dec_config;
         // 0x40 = MPEG-4 Audio, 0x67 = MPEG-2 AAC-LC.
         if dec.object_type_indication != 0x40 && dec.object_type_indication != 0x67 {
-            push_note(&mut self.notes, || {
+            push_note(&mut self.refusals, || {
                 format!(
                     "track {}: skipped audio (object type {:#x}, not AAC)",
                     track_id.0, dec.object_type_indication
@@ -532,7 +552,7 @@ impl Mp4Demuxer {
             let parsed = parse_asc(&raw)?;
             Some((raw, parsed))
         }) else {
-            push_note(&mut self.notes, || {
+            push_note(&mut self.refusals, || {
                 format!("track {}: no readable AudioSpecificConfig", track_id.0)
             });
             return None;
@@ -540,7 +560,7 @@ impl Mp4Demuxer {
         // Main, LC, SSR and LTP: the cores an AAC decoder takes. HE-AAC
         // reports its LC core here.
         if !(1..=4).contains(&parsed.object_type) {
-            push_note(&mut self.notes, || {
+            push_note(&mut self.refusals, || {
                 format!(
                     "track {}: skipped audio (object type {}, not AAC)",
                     track_id.0, parsed.object_type
@@ -554,7 +574,7 @@ impl Mp4Demuxer {
         // error. PCE-defined layouts (channel configuration 0) leave the
         // real width unknown and are refused too.
         if parsed.channel_config < 1 || parsed.channel_config > 6 {
-            push_note(&mut self.notes, || {
+            push_note(&mut self.refusals, || {
                 format!(
                     "track {}: refused AAC channel configuration {}",
                     track_id.0, parsed.channel_config
@@ -583,7 +603,7 @@ impl Mp4Demuxer {
         let samples = match self.collect_shifted_samples(&track.samples, priming) {
             Ok(samples) => samples,
             Err(e) => {
-                push_note(&mut self.notes, || {
+                push_note(&mut self.refusals, || {
                     format!("track {}: audio refused: {e}", track_id.0)
                 });
                 return None;
@@ -1252,6 +1272,34 @@ fn stated_duration(mp4: &re_mp4::Mp4, fragments: Option<&Fragments>) -> Option<M
 /// is the same claim made carelessly. Reporting no duration is honest:
 /// a fabricated one reaches the seek bar, and a saturated zero reads as
 /// live to every `duration <= 0` test.
+/// A sample entry's four-character code, as a viewer would quote it.
+fn sample_entry(contents: &re_mp4::StsdBoxContent) -> String {
+    let code = match contents {
+        re_mp4::StsdBoxContent::Av01(_) => *b"av01",
+        re_mp4::StsdBoxContent::Avc1(_) => *b"avc1",
+        re_mp4::StsdBoxContent::Hev1(_) => *b"hev1",
+        re_mp4::StsdBoxContent::Hvc1(_) => *b"hvc1",
+        re_mp4::StsdBoxContent::Vp08(_) => *b"vp08",
+        re_mp4::StsdBoxContent::Vp09(_) => *b"vp09",
+        re_mp4::StsdBoxContent::Mp4a(_) => *b"mp4a",
+        re_mp4::StsdBoxContent::Tx3g(_) => *b"tx3g",
+        re_mp4::StsdBoxContent::Unknown(code) => code.value,
+    };
+    code.iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() {
+                char::from(b)
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
+fn unsupported_video(entry: &str) -> String {
+    format!("video codec '{entry}' is not supported (supported: H.264, H.265, VP9, AV1)")
+}
+
 fn stated_span(value: u64, timescale: u64) -> Option<MediaTime> {
     if timescale == 0 || value == u64::from(u32::MAX) || value == u64::MAX {
         return None;
@@ -1509,6 +1557,10 @@ impl Demuxer for Mp4Demuxer {
 
     fn take_notes(&mut self) -> Vec<String> {
         Mp4Demuxer::take_notes(self)
+    }
+
+    fn take_refusals(&mut self) -> Vec<String> {
+        Mp4Demuxer::take_refusals(self)
     }
 }
 

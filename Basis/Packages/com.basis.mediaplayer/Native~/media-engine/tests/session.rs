@@ -1573,3 +1573,38 @@ fn a_seek_clears_the_offset_and_re_arms_on_the_new_timeline() {
         "the new timeline never re-armed the offset, so the row proved only          that it had been cleared"
     );
 }
+
+/// A track the demuxer leaves out because nothing here plays it is put in
+/// front of the viewer as a refusal, not left in the log as a note.
+#[test]
+fn a_track_the_demuxer_refuses_is_reported_as_a_refusal() {
+    let mut bytes = std::fs::read(fixture_path()).expect("fixture");
+    // The sample entry, not the brand list in `ftyp` ahead of it.
+    let at = bytes
+        .windows(4)
+        .rposition(|w| w == b"avc1")
+        .expect("the fixture's sample entry");
+    bytes[at..at + 4].copy_from_slice(b"xvid");
+    let path = std::env::temp_dir().join(format!("bm-refused-video-{}.mp4", std::process::id()));
+    std::fs::write(&path, bytes).expect("write the patched fixture");
+
+    let mut session = Session::open(OpenRequest::new(path.to_string_lossy().into_owned()));
+    let px = session.pipeline().clone();
+    let mut refusal = None;
+    wait_for(Duration::from_secs(10), || {
+        refusal = px
+            .diag
+            .take_events()
+            .into_iter()
+            .find(|e| e.code == media_diag::EventCode::CodecRefused);
+        refusal.is_some()
+    });
+    session.close();
+    let _ = std::fs::remove_file(&path);
+    let refusal = refusal.expect("the refusal must be reported");
+    assert_eq!(refusal.stage, media_diag::Stage::Demux);
+    assert_eq!(
+        refusal.detail,
+        "video codec 'xvid' is not supported (supported: H.264, H.265, VP9, AV1)"
+    );
+}

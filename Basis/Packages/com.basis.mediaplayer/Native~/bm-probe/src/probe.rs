@@ -50,6 +50,9 @@ pub fn run(url: &str, decode: bool, allow_local: bool) -> ExitCode {
     for note in demux.take_notes() {
         println!("note:          {note}");
     }
+    for refusal in demux.take_refusals() {
+        println!("refused:       {refusal}");
+    }
     if let Some(duration) = demux.duration() {
         println!("duration:      {:.3}s", duration.as_micros() as f64 / 1e6);
     }

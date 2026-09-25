@@ -198,6 +198,7 @@ pub struct MkvDemuxer {
     audio: Option<SelectedAudio>,
     pending: VecDeque<StreamEvent>,
     notes: Vec<String>,
+    refusals: Vec<String>,
     ended: bool,
     frame: Frame,
     audio_tracks: Vec<AudioTrackInfo>,
@@ -285,12 +286,16 @@ impl MkvDemuxer {
             audio: None,
             pending: VecDeque::new(),
             notes: Vec::new(),
+            refusals: Vec::new(),
             ended: false,
             frame: Frame::default(),
             audio_tracks: Vec::new(),
         };
         this.select_tracks(options)?;
         if this.video.is_none() && this.audio.is_none() {
+            if !this.refusals.is_empty() {
+                return Err(DemuxError::Refused(this.refusals.join("; ")));
+            }
             return Err(DemuxError::Unsupported(
                 "no recognised video or audio track in the Matroska file",
             ));
@@ -364,8 +369,11 @@ impl MkvDemuxer {
                 TrackType::Video if self.video.is_none() => {
                     let codec_id = entry.codec_id().to_string();
                     let Some(codec) = map_video_codec(&codec_id) else {
-                        push_note(&mut self.notes, || {
-                            format!("track {number}: skipped video ({codec_id})")
+                        push_note(&mut self.refusals, || {
+                            format!(
+                                "video codec '{codec_id}' is not supported (supported: \
+                                 V_MPEG4/ISO/AVC, V_MPEGH/ISO/HEVC, V_VP8, V_VP9, V_AV1)"
+                            )
                         });
                         continue;
                     };
@@ -381,7 +389,7 @@ impl MkvDemuxer {
                     let avc = match codec {
                         VideoCodec::H264 => {
                             let Some(private) = entry.codec_private() else {
-                                push_note(&mut self.notes, || {
+                                push_note(&mut self.refusals, || {
                                     format!(
                                         "track {number}: H.264 without codec private data; skipped"
                                     )
@@ -392,7 +400,7 @@ impl MkvDemuxer {
                         }
                         VideoCodec::H265 => {
                             let Some(private) = entry.codec_private() else {
-                                push_note(&mut self.notes, || {
+                                push_note(&mut self.refusals, || {
                                     format!(
                                         "track {number}: H.265 without codec private data; skipped"
                                     )
@@ -434,7 +442,7 @@ impl MkvDemuxer {
                 TrackType::Audio if self.audio.is_none() && wanted.is_none_or(|w| id >= w.0) => {
                     let codec_id = entry.codec_id().to_string();
                     let Some(codec) = map_audio_codec(&codec_id) else {
-                        push_note(&mut self.notes, || {
+                        push_note(&mut self.refusals, || {
                             format!("track {number}: skipped audio ({codec_id})")
                         });
                         continue;
@@ -443,7 +451,7 @@ impl MkvDemuxer {
                         Some(audio) => match audio_geometry(audio) {
                             Some(geometry) => geometry,
                             None => {
-                                push_note(&mut self.notes, || {
+                                push_note(&mut self.refusals, || {
                                     format!(
                                         "track {number}: skipped audio (implausible {} Hz / {} channels)",
                                         audio.sampling_frequency(),
@@ -616,5 +624,9 @@ impl Demuxer for MkvDemuxer {
 
     fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+
+    fn take_refusals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.refusals)
     }
 }

@@ -176,6 +176,9 @@ pub enum DemuxError {
     Source(SourceError),
     Parse(String),
     Unsupported(&'static str),
+    /// Every track was left out because nothing here can play it. The
+    /// text is the reasons, worded for the viewer.
+    Refused(String),
     /// A parse-time cap tripped: typed refusal, never exhaustion.
     Cap(&'static str),
 }
@@ -187,6 +190,7 @@ impl fmt::Display for DemuxError {
             Self::Source(e) => write!(f, "source: {e}"),
             Self::Parse(e) => write!(f, "mp4 parse: {e}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::Refused(why) => f.write_str(why),
             Self::Cap(what) => write!(f, "cap exceeded: {what}"),
         }
     }

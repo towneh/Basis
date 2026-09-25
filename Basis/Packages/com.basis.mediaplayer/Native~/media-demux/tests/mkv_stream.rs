@@ -97,10 +97,10 @@ fn empty_cluster() -> Vec<u8> {
 }
 
 /// A Matroska file naming `tracks` audio tracks whose codec id maps to
-/// nothing, so each one offers a note, behind one playable video track.
+/// nothing, so each one is a refusal, behind one playable video track.
 /// Video rather than audio for the playable one: a file the demuxer can
 /// make nothing of is refused outright and a refused open hands back no
-/// notes, but an audio track that binds sends every later audio track to
+/// refusals to drain, but an audio track that binds sends every later audio track to
 /// the catch-all arm instead of the one that names the codec id.
 fn mkv_with_unmapped_audio_tracks(tracks: u64) -> Vec<u8> {
     // VP9 needs no codec private data.
@@ -111,9 +111,9 @@ fn mkv_with_unmapped_audio_tracks(tracks: u64) -> Vec<u8> {
     mkv_file(&doc_type(), &track_list, &empty_cluster())
 }
 
-/// How many notes track selection offers is the container's to choose:
-/// a file states its own track count, and every skipped track is a note.
-/// They go through the same bound as every other note the demuxers keep.
+/// How many refusals track selection records is the container's to
+/// choose: a file states its own track count, and every skipped track is
+/// one. They go through the same bound as every note the demuxers keep.
 #[test]
 fn matroska_track_notes_are_capped() {
     let offered = 4 * MAX_NOTES as u64;
@@ -123,7 +123,7 @@ fn matroska_track_notes_are_capped() {
         Generation(0),
     )
     .expect("open");
-    let notes = demux.take_notes();
+    let notes = demux.take_refusals();
     assert!(
         offered as usize > MAX_NOTES,
         "the row has to overrun the cap"
@@ -462,7 +462,7 @@ fn an_implausible_sampling_frequency_skips_the_audio_track() {
         assert!(saw_video, "video still announces past a hostile {hostile}");
         assert!(
             demuxer
-                .take_notes()
+                .take_refusals()
                 .iter()
                 .any(|n| n.contains("skipped audio")),
             "the skip is reported for {hostile}"
@@ -536,7 +536,7 @@ fn an_implausible_channel_count_skips_the_audio_track() {
     );
     assert!(
         demuxer
-            .take_notes()
+            .take_refusals()
             .iter()
             .any(|n| n.contains("skipped audio")),
         "the skip is reported"
@@ -584,5 +584,50 @@ fn a_near_integer_sampling_frequency_rounds_to_the_intended_rate() {
             _ => None,
         });
         assert_eq!(announced, Some(expect), "declared {declared}");
+    }
+}
+
+#[test]
+fn an_unknown_video_codec_is_refused_and_the_audio_plays() {
+    let mut track_list = track_entry(1, 1, "V_BASIS/UNMAPPED", &[]);
+    track_list.extend(track_entry(2, 2, "A_OPUS", &[]));
+    let mut demux = MkvDemuxer::open(
+        Box::new(MemSource(mkv_file(
+            &doc_type(),
+            &track_list,
+            &empty_cluster(),
+        ))),
+        DemuxLimits::default(),
+        Generation(0),
+    )
+    .expect("opens on its audio");
+    assert!(demux.video_track().is_none());
+    assert_eq!(
+        demux.take_refusals(),
+        [
+            "video codec 'V_BASIS/UNMAPPED' is not supported (supported: \
+          V_MPEG4/ISO/AVC, V_MPEGH/ISO/HEVC, V_VP8, V_VP9, V_AV1)"
+        ]
+    );
+}
+
+#[test]
+fn a_file_with_only_refused_tracks_fails_with_the_reason() {
+    let refused = MkvDemuxer::open(
+        Box::new(MemSource(mkv_file(
+            &doc_type(),
+            &track_entry(1, 1, "V_BASIS/UNMAPPED", &[]),
+            &empty_cluster(),
+        ))),
+        DemuxLimits::default(),
+        Generation(0),
+    );
+    match refused {
+        Err(DemuxError::Refused(why)) => assert!(
+            why.starts_with("video codec 'V_BASIS/UNMAPPED' is not supported"),
+            "{why}"
+        ),
+        Err(e) => panic!("refused for the wrong reason: {e}"),
+        Ok(_) => panic!("a file with nothing playable must not open"),
     }
 }

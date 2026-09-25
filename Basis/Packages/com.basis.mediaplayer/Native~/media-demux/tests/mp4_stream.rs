@@ -217,7 +217,7 @@ fn an_audio_object_type_that_is_not_aac_is_skipped() {
     )
     .expect("opens on its video");
     assert_eq!(demux.audio_track(), None);
-    let notes = demux.take_notes();
+    let notes = demux.take_refusals();
     assert!(
         notes.iter().any(|n| n.contains("object type 23, not AAC")),
         "the refusal is noted: {notes:?}"
@@ -670,4 +670,53 @@ fn a_fragment_is_read_in_one_pass() {
         access_units(&mut open_walked("h264-aac-bigfrag-sidx.mp4"))
     );
     assert_eq!(jumps, READS, "draining the file cost {jumps} jumps");
+}
+
+/// The fixture with its video sample entry renamed to one no decoder here
+/// takes. The brand list in `ftyp` carries the same four bytes first.
+fn with_unknown_video_entry(name: &str) -> Vec<u8> {
+    let mut bytes = fixture(name);
+    let at = bytes
+        .windows(4)
+        .rposition(|w| w == b"avc1")
+        .expect("the fixture's sample entry");
+    bytes[at..at + 4].copy_from_slice(b"xvid");
+    bytes
+}
+
+#[test]
+fn an_unknown_video_sample_entry_is_refused_and_the_audio_plays() {
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(with_unknown_video_entry(
+            "h264-aac-640x360-30fps.mp4",
+        ))),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("opens on its audio");
+    assert_eq!(demux.video_track(), None);
+    assert!(demux.audio_track().is_some());
+    assert_eq!(
+        demux.take_refusals(),
+        ["video codec 'xvid' is not supported (supported: H.264, H.265, VP9, AV1)"]
+    );
+}
+
+#[test]
+fn a_file_with_only_refused_tracks_fails_with_the_reason() {
+    let refused = Mp4Demuxer::open(
+        Box::new(MemSource(with_unknown_video_entry(
+            "h264-640x360-30fps.mp4",
+        ))),
+        DemuxLimits::default(),
+        Generation(1),
+    );
+    match refused {
+        Err(media_demux::DemuxError::Refused(why)) => assert_eq!(
+            why,
+            "video codec 'xvid' is not supported (supported: H.264, H.265, VP9, AV1)"
+        ),
+        Err(e) => panic!("refused for the wrong reason: {e}"),
+        Ok(_) => panic!("a file with nothing playable must not open"),
+    }
 }
