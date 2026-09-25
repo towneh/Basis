@@ -34,13 +34,23 @@ pub struct SwAv1Decoder {
 unsafe impl Send for SwAv1Decoder {}
 
 impl SwAv1Decoder {
-    pub fn new() -> Result<Self, DecodeError> {
+    /// `max_pixels` bounds every frame the bitstream states, which the
+    /// container's dimensions do not: a frame header past it fails the
+    /// decode before rav1d allocates the picture. Zero is refused: rav1d
+    /// reads it as no limit.
+    pub fn new(max_pixels: u32) -> Result<Self, DecodeError> {
+        if max_pixels == 0 {
+            return Err(DecodeError(
+                "rav1d frame size limit must be above zero".into(),
+            ));
+        }
         // SAFETY: out-params are locals; settings is fully initialised by
         // dav1d_default_settings before dav1d_open reads it.
         unsafe {
             let mut settings = std::mem::MaybeUninit::<Dav1dSettings>::uninit();
             dav1d_default_settings(NonNull::new_unchecked(settings.as_mut_ptr()));
             let mut settings = settings.assume_init();
+            settings.frame_size_limit = max_pixels;
             let mut ctx: Option<Dav1dContext> = None;
             let result = dav1d_open(
                 Some(NonNull::from(&mut ctx)),

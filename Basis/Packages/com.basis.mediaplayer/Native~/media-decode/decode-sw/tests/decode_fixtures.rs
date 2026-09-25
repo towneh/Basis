@@ -244,9 +244,8 @@ fn opus_refuses_surround_mapping() {
     assert!(OpusDecoder::new(&head).is_err());
 }
 
-#[test]
-fn av1_fixture_decodes_through_rav1d() {
-    use media_decode::VideoDecoder;
+/// The AV1 fixture's video AUs and the size its container states.
+fn av1_fixture() -> (Vec<(Vec<u8>, i64)>, u32, u32) {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/mkv/av1-opus.webm"
@@ -259,10 +258,21 @@ fn av1_fixture_decodes_through_rav1d() {
     )
     .expect("open");
     let mut video = None;
+    let mut size = (0, 0);
     let mut aus = Vec::new();
     loop {
         match demuxer.next_event().expect("event") {
-            StreamEvent::Format(track, Format::Video { .. }) => video = Some(track),
+            StreamEvent::Format(
+                track,
+                Format::Video {
+                    coded_width,
+                    coded_height,
+                    ..
+                },
+            ) => {
+                video = Some(track);
+                size = (coded_width, coded_height);
+            }
             StreamEvent::Au(au) if Some(au.track) == video => {
                 aus.push((au.data, au.pts.as_micros()))
             }
@@ -270,7 +280,14 @@ fn av1_fixture_decodes_through_rav1d() {
             _ => {}
         }
     }
-    let mut decoder = decode_sw::SwAv1Decoder::new().expect("decoder");
+    (aus, size.0, size.1)
+}
+
+#[test]
+fn av1_fixture_decodes_through_rav1d() {
+    use media_decode::VideoDecoder;
+    let (aus, width, height) = av1_fixture();
+    let mut decoder = decode_sw::SwAv1Decoder::new(width * height).expect("decoder");
     let mut frames = 0usize;
     let mut last_pts = i64::MIN;
     for (au, pts) in &aus {
@@ -303,4 +320,21 @@ fn av1_fixture_decodes_through_rav1d() {
         "decoded {frames} of {} frames",
         aus.len()
     );
+}
+
+/// A frame the bitstream states past the decoder's limit fails the decode,
+/// whatever the container says: one pixel under the fixture's own size is
+/// enough to refuse it. A limit of zero, which rav1d reads as none, is
+/// refused outright.
+#[test]
+fn av1_refuses_a_frame_past_the_size_limit() {
+    use media_decode::VideoDecoder;
+    assert!(decode_sw::SwAv1Decoder::new(0).is_err());
+    let (aus, width, height) = av1_fixture();
+    let mut decoder = decode_sw::SwAv1Decoder::new(width * height - 1).expect("decoder");
+    let refused = aus.iter().any(|(au, pts)| {
+        decoder.submit(au, *pts).is_err()
+            || std::iter::from_fn(|| decoder.try_output().transpose()).any(|r| r.is_err())
+    });
+    assert!(refused, "a frame past the limit decoded");
 }

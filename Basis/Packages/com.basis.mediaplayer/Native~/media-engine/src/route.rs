@@ -225,7 +225,7 @@ fn open_windows_software(
             fallback,
             decode_device: None,
         }),
-        VideoCodec::Av1 => match SwAv1Decoder::new() {
+        VideoCodec::Av1 => match SwAv1Decoder::new(SOFTWARE_CAP_WIDTH * SOFTWARE_CAP_HEIGHT) {
             Ok(d) => Ok(VideoRoute {
                 decoder: Box::new(d),
                 label: "rav1d",
@@ -316,7 +316,7 @@ fn route_video_decoder(
         VideoCodec::Av1 => {
             software_cap_check(coded_width, coded_height)?;
             Ok(VideoRoute {
-                decoder: Box::new(SwAv1Decoder::new()?),
+                decoder: Box::new(SwAv1Decoder::new(SOFTWARE_CAP_WIDTH * SOFTWARE_CAP_HEIGHT)?),
                 label: "rav1d",
                 fallback: None,
                 decode_device: None,

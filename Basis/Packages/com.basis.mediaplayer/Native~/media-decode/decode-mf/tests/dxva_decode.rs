@@ -258,7 +258,7 @@ fn av1_hardware_matches_rav1d() {
             return;
         }
     };
-    let mut sw = decode_sw::SwAv1Decoder::new().expect("rav1d");
+    let mut sw = decode_sw::SwAv1Decoder::new(1920 * 1088).expect("rav1d");
     let hw_frames = decode_all(
         &mut hw,
         &track.aus,
