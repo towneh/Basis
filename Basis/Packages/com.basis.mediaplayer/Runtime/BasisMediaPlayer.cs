@@ -160,6 +160,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
     public BmState State { get; private set; } = BmState.Idle;
     public int ErrorCode { get; private set; }
+
+    /// <summary>Why the session failed, or, while it plays on, why part of
+    /// it was refused (a track no decoder here can play). Null when there is
+    /// nothing to say. <see cref="State"/> tells the two apart.</summary>
+    public string LastErrorMessage { get; private set; }
     public double PositionSeconds { get; private set; }
     public double DurationSeconds { get; private set; }
     public long BankedMilliseconds { get; private set; }
@@ -902,7 +907,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D11
             && SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D12)
         {
-            BasisDebug.LogError($"[BasisMedia] needs Direct3D 11 or 12, running on {SystemInfo.graphicsDeviceType}", BasisDebug.LogTag.Video);
+            LastErrorMessage = $"needs Direct3D 11 or 12, running on {SystemInfo.graphicsDeviceType}";
+            BasisDebug.LogError($"[BasisMedia] {LastErrorMessage}", BasisDebug.LogTag.Video);
             State = BmState.Error;
             return;
         }
@@ -915,6 +921,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         int rc = BasisMediaNative.bm_session_open(descriptor, (UIntPtr)descriptor.Length, out _handle);
         if (rc != 0)
         {
+            LastErrorMessage = $"the media engine refused to open a session ({rc})";
             BasisDebug.LogError($"[BasisMedia] bm_session_open failed: {rc}", BasisDebug.LogTag.Video);
             State = BmState.Error;
             return;
@@ -1083,6 +1090,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             _open = false;
         }
         State = BmState.Idle;
+        LastErrorMessage = null;
         // The per-session engine readings describe a session that no longer
         // exists. The open path clears them only after `bm_session_open`
         // succeeds, so without this a close, or an open that fails before that
@@ -1268,7 +1276,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 
         if (State == BmState.Error)
         {
-            string why = string.IsNullOrEmpty(_lastErrorDetail) ? "no detail reported" : _lastErrorDetail;
+            string why = string.IsNullOrEmpty(LastErrorMessage) ? "no detail reported" : LastErrorMessage;
             BasisDebug.LogError(
                 $"[BasisMedia] session error {snapshot.ErrorCode} " +
                 $"({(BmErrorCategory)snapshot.ErrorCategory}): {why} [{url}]",
@@ -1348,12 +1356,6 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     }
 #endif
 
-    /// Detail of the most recent failure, held so the error the session
-    /// reports can say what went wrong rather than only which code it was.
-    /// The engine's `Error` event carries it; the snapshot carries only a
-    /// number.
-    private string _lastErrorDetail;
-
     /// Refused events already accounted for, so a session's running total
     /// is reported as it grows rather than every frame it stays non-zero.
     uint _eventsDroppedSeen;
@@ -1393,7 +1395,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             for (int i = 0; i < count; i++)
             {
                 string detail = Encoding.UTF8.GetString(events[i].Detail, (int)events[i].DetailLen);
-                if (events[i].Code == (uint)BmEventCode.Error) _lastErrorDetail = detail;
+                // The snapshot carries only a number; the reason travels in
+                // these two events.
+                if (events[i].Code == (uint)BmEventCode.Error || events[i].Code == (uint)BmEventCode.CodecRefused)
+                    LastErrorMessage = detail;
                 // WallUs is the session's own monotonic clock, so a line can be
                 // lined up against either diagnostics CSV without hand-aligning.
                 string at = (events[i].WallUs / 1_000_000.0).ToString("F3", CultureInfo.InvariantCulture);

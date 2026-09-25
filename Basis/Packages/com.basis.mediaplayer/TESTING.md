@@ -73,7 +73,10 @@ One client, in a scene with more than one player.
 | Live stream | Open one | The seek bar hides |
 | Captions | Toggle captions, switch player | The setting applies to every player |
 | Subtitles | A source with subtitle files | The language row shows only with captions on |
-| Status | Watch a load | Connecting, Buffering, Playing, with the resolution; errors show a code |
+| Status | Watch a load, then open a URL that fails (a host that does not exist) | Connecting, Buffering, Playing, with the resolution. A failure shows its reason in red, not only a code |
+| Refused codec, nothing else | A VP8 WebM with no audio | Error within a second or two, the reason naming VP8 as unsupported |
+| Refused video, audio plays | HEVC in an MPEG-TS file with AAC | The sound plays, and an amber **Issue:** line says the video track announced no frame size |
+| Refused track in the file | An MP4 whose video is a codec the player does not take (an MPEG-4 Part 2 `mp4v` track, say), with AAC beside it | The sound plays, and the **Issue:** line names the codec |
 | Admin tab | With and without `*` | Shown only with it, on a networked player |
 | Markup injection | A title containing `</noparse>` and `<b>` | Shown literally |
 

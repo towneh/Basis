@@ -81,6 +81,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     private bool _lastDormant;
     private Vector2Int _lastStatusSize = new Vector2Int(-1, -1);
     private int _lastStatusErr = int.MinValue;
+    private string _lastStatusErrText;
     private readonly System.Text.StringBuilder _debugBuilder = new System.Text.StringBuilder(256);
     private readonly System.Text.StringBuilder _statusBuilder = new System.Text.StringBuilder(192);
 
@@ -1120,6 +1121,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         BmState status = _activePlayer.State;
         bool dormant = BasisMediaSessionGovernor.IsDormant(_activePlayer);
         int err = _activePlayer.ErrorCode;
+        string errText = _activePlayer.LastErrorMessage;
         Vector2Int size = _activePlayer.VideoSize;
         int posSec = (int)_activePlayer.PositionSeconds;
         int durSec = (int)_activePlayer.DurationSeconds;
@@ -1130,12 +1132,13 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         // ticks it once per second while a timeline is showing). Metadata changes
         // clear _lastStatusMarkup instead.
         if (status == _lastStatus && dormant == _lastDormant && size == _lastStatusSize &&
-            err == _lastStatusErr && posSec == _lastPosSec && durSec == _lastDurSec &&
+            err == _lastStatusErr && errText == _lastStatusErrText && posSec == _lastPosSec && durSec == _lastDurSec &&
             _lastStatusMarkup != null) return;
         _lastDormant = dormant;
         _lastStatus = status;
         _lastStatusSize = size;
         _lastStatusErr = err;
+        _lastStatusErrText = errText;
         _lastPosSec = posSec;
         _lastDurSec = durSec;
 
@@ -1161,11 +1164,20 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
 
         if (status == BmState.Error)
         {
-            _statusBuilder.Append("\n<color=#E5534B>Error ").Append(err).Append("</color>");
+            if (string.IsNullOrEmpty(errText))
+                _statusBuilder.Append("\n<color=#E5534B>Error ").Append(err).Append("</color>");
+            else
+                _statusBuilder.Append("\n<color=#E5534B><noparse>").Append(SanitizeForMarkup(errText)).Append("</noparse></color>");
         }
-        else if (size.x > 0 && size.y > 0)
+        else
         {
-            _statusBuilder.Append("\n<color=#9AA0A6>").Append(size.x).Append(" x ").Append(size.y).Append("</color>");
+            if (size.x > 0 && size.y > 0)
+                _statusBuilder.Append("\n<color=#9AA0A6>").Append(size.x).Append(" x ").Append(size.y).Append("</color>");
+
+            // Part of the source was refused and the rest plays on, so the
+            // state word stays accurate and the reason is a separate note.
+            if (!string.IsNullOrEmpty(errText))
+                _statusBuilder.Append("\n<color=#E6C15A>Issue: <noparse>").Append(SanitizeForMarkup(errText)).Append("</noparse></color>");
         }
 
         string markup = _statusBuilder.ToString();

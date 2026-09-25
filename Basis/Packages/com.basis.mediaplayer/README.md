@@ -78,8 +78,11 @@ The format is read from the file's contents; the URL needs no extension.
 Private and loopback addresses (`localhost`, `192.168.…`, `10.…`) are refused
 unless **Allow Local Addresses** is ticked. Audio goes up to 7.1 channels.
 
-Refused with an error: HEVC inside MPEG-TS, VP8 on Windows, VP8 and VP9 where
-the platform has no decoder, and AV1 on Quest Pro.
+A track nothing here can play is refused and the reason shown in the Media
+Players panel: HEVC inside MPEG-TS, VP8 on Windows, VP8 and VP9 where the
+platform has no decoder, and AV1 on Quest Pro. When the refused track has
+audio beside it, the audio plays; with nothing left to play, the player stops
+with an error. `BasisMediaPlayer.LastErrorMessage` carries the reason.
 `BasisMediaPlayer.EngineCapabilities` lists what the current machine can play,
 with each video codec's route and maximum resolution and frame rate.
 
@@ -260,8 +263,9 @@ Advanced.
 ## Troubleshooting
 
 1. **The Console.** A failed player logs
-   `[BasisMedia] session error <code> (<category>): <reason> [<url>]`.
-   Common reasons: an unsupported codec, a private address, a refusing server.
+   `[BasisMedia] session error <code> (<category>): <reason> [<url>]`, and the
+   Media Players panel shows the reason. Common reasons: an unsupported codec,
+   a private address, a refusing server.
 2. **What the machine supports:** `Settings > Developer > Media Player`, or
    `BasisMediaPlayer.EngineCapabilities`.
 3. **`Basis > Debug > Media Player`** shows a player's pipeline stage by stage
