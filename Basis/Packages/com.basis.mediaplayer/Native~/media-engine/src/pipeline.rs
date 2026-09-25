@@ -457,6 +457,10 @@ pub struct PipelineShared {
     /// No generation's audio starts before it. Written once at open, before
     /// any pipeline thread is spawned.
     pub audio_start_us: std::sync::atomic::AtomicI64,
+    /// Where the current generation's timeline starts: zero at open, and
+    /// after a seek where the clock was snapped to. Written with
+    /// `seek_floor_us`.
+    pub generation_start_us: std::sync::atomic::AtomicI64,
     /// Access units the demux thread has sent straight to the video
     /// decoder for the span ahead of the floor, and how many of this
     /// generation's the video thread has taken off its channel. The channel
@@ -1263,6 +1267,8 @@ pub fn run_demux_leg(
                         floor.map_or(NO_FLOOR, MediaTime::as_micros),
                         Ordering::Relaxed,
                     );
+                    px.generation_start_us
+                        .store(start.as_micros(), Ordering::Relaxed);
                     px.seek_fed.store(0, Ordering::Relaxed);
                     px.seek_taken.store(0, Ordering::Relaxed);
                     {
@@ -2468,16 +2474,115 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     }
 }
 
+/// PCM waiting for ring space: (pts of the *next* unwritten frame, data).
+struct Pending {
+    pts_us: i64,
+    data: Vec<f32>,
+    offset: usize,
+    /// Silence standing in for a gap before the sound, which the origin
+    /// drop leaves alone.
+    silence: bool,
+}
+
+impl Pending {
+    fn sound(pts_us: i64, data: Vec<f32>) -> Self {
+        Self {
+            pts_us,
+            data,
+            offset: 0,
+            silence: false,
+        }
+    }
+}
+
+/// The silence still to place ahead of a generation's first sound, a
+/// block at a time so a long gap costs no more memory than a short one,
+/// and the sound that follows it.
+struct Lead {
+    from_us: i64,
+    rate: u32,
+    channels: usize,
+    placed: u64,
+    total: u64,
+    then: Option<Pending>,
+}
+
+/// The longest block of lead-in silence built at once, in seconds.
+const LEAD_BLOCK_SECONDS: u64 = 1;
+
+impl Lead {
+    /// The next block of silence, or the sound once the gap is filled.
+    fn next(&mut self) -> Pending {
+        if self.placed < self.total {
+            let frames = (self.total - self.placed).min(u64::from(self.rate) * LEAD_BLOCK_SECONDS);
+            let pts_us = self.from_us.saturating_add(
+                i64::try_from(self.placed * 1_000_000 / u64::from(self.rate)).unwrap_or(i64::MAX),
+            );
+            self.placed += frames;
+            return Pending {
+                pts_us,
+                data: vec![0.0; frames as usize * self.channels],
+                offset: 0,
+                silence: true,
+            };
+        }
+        self.then
+            .take()
+            .expect("the sound follows its lead-in once")
+    }
+
+    fn placed(&self) -> bool {
+        self.placed >= self.total && self.then.is_none()
+    }
+}
+
+/// Where a generation's lead-in silence starts: the generation's own start,
+/// when the source's sound begins after it. Only a source that states such
+/// a gap has one; for any other the audio clock starts at the first sound.
+fn lead_start(audio_start_us: i64, generation_start_us: i64) -> Option<i64> {
+    (audio_start_us > 0 && generation_start_us < audio_start_us).then_some(generation_start_us)
+}
+
+/// The first chunk of a generation, or silence ahead of it when the
+/// generation has a gap to fill. The gap runs to the chunk, or to the
+/// origin where the chunk opens with priming that will be dropped.
+fn begin_chunk(
+    chunk: Pending,
+    rate: u32,
+    channels: u32,
+    lead_from: Option<(i64, i64)>,
+    lead: &mut Option<Lead>,
+) -> Pending {
+    let Some((from_us, origin_us)) = lead_from else {
+        return chunk;
+    };
+    let until_us = chunk.pts_us.max(origin_us);
+    if until_us <= from_us || rate == 0 || channels == 0 {
+        return chunk;
+    }
+    let gap = u128::from(until_us.abs_diff(from_us));
+    let total = u64::try_from((gap * u128::from(rate) + 500_000) / 1_000_000).unwrap_or(u64::MAX);
+    // A gap shorter than half a frame has no silence to place.
+    if total == 0 {
+        return chunk;
+    }
+    let mut filling = Lead {
+        from_us,
+        rate,
+        channels: channels as usize,
+        placed: 0,
+        total,
+        then: Some(chunk),
+    };
+    let first = filling.next();
+    *lead = Some(filling);
+    first
+}
+
 /// Audio thread: decode, drop priming, feed the ring, drive the clock.
 pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     let mut decoder: Option<Box<dyn AudioDecoder>> = None;
     let mut producer: Option<AudioProducer> = None;
-    /// PCM waiting for ring space: (pts of the *next* unwritten frame, data).
-    struct Pending {
-        pts_us: i64,
-        data: Vec<f32>,
-        offset: usize,
-    }
     let mut pending: Option<Pending> = None;
     // Where this generation's audio starts: where the source's sound
     // begins, which removes encoder priming, or the floor of a seek that
@@ -2485,6 +2590,13 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     // the decoder.
     let audio_start_us = px.audio_start_us.load(Ordering::Relaxed).max(0);
     let mut origin_us = audio_start_us;
+    // Where this generation's timeline starts, while the source's sound
+    // begins after it and nothing has been placed yet. The gap goes into
+    // the ring as silence, so the audio clock starts with the timeline
+    // rather than at the sound, and a picture already showing is not
+    // hurried to catch up with it.
+    let mut lead_from = lead_start(audio_start_us, 0);
+    let mut lead: Option<Lead> = None;
     let mut generation = {
         let bank = px.bank.bank.lock().expect("bank lock");
         bank.generation()
@@ -2521,6 +2633,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         let flush_pending = Generation(px.shared.generation.load(Ordering::Relaxed)) != generation;
         if flush_pending {
             pending = None;
+            lead = None;
             pending_au = None;
         }
 
@@ -2539,9 +2652,13 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 let frames_left = remaining.len() / channels;
                 // Drop what still precedes the origin: encoder priming,
                 // which carries a negative pts, and after a seek the audio
-                // ahead of where the generation starts.
-                let drop_frames =
-                    frames_before_origin(chunk.pts_us.saturating_sub(origin_us), frames_left, rate);
+                // ahead of where the generation starts. Silence standing in
+                // for a gap before the sound is placed as it is.
+                let drop_frames = if chunk.silence {
+                    0
+                } else {
+                    frames_before_origin(chunk.pts_us.saturating_sub(origin_us), frames_left, rate)
+                };
                 if drop_frames > 0 {
                     chunk.offset += drop_frames * channels;
                     chunk.pts_us += drop_frames as i64 * 1_000_000 / i64::from(rate);
@@ -2563,6 +2680,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                                 .drops
                                 .fetch_add(1, Ordering::Relaxed);
                             pending = None;
+                            lead = None;
                         }
                     } else {
                         park_since = None;
@@ -2570,7 +2688,10 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 }
             }
             if pending.as_ref().is_some_and(|c| c.offset >= c.data.len()) {
-                pending = None;
+                pending = lead.as_mut().map(Lead::next);
+                if lead.as_ref().is_some_and(Lead::placed) {
+                    lead = None;
+                }
             }
         }
 
@@ -2591,11 +2712,13 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     px.shared
                         .audio_channels
                         .store(chunk.channels, Ordering::Relaxed);
-                    pending = Some(Pending {
-                        pts_us: chunk.pts_us,
-                        data: chunk.data,
-                        offset: 0,
-                    });
+                    pending = Some(begin_chunk(
+                        Pending::sound(chunk.pts_us, chunk.data),
+                        chunk.sample_rate,
+                        chunk.channels,
+                        lead_from.take().map(|from| (from, origin_us)),
+                        &mut lead,
+                    ));
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -2914,6 +3037,11 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             Ok(MediaMsg::Flush { generation: new }) => {
                 generation = new;
                 origin_us = px.seek_floor_us.load(Ordering::Relaxed).max(audio_start_us);
+                lead_from = lead_start(
+                    audio_start_us,
+                    px.generation_start_us.load(Ordering::Relaxed),
+                );
+                lead = None;
                 pending = None;
                 pending_au = None;
                 park_since = None;
@@ -2981,11 +3109,13 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         {
             match active.try_output() {
                 Ok(Some(chunk)) => {
-                    pending = Some(Pending {
-                        pts_us: chunk.pts_us,
-                        data: chunk.data,
-                        offset: 0,
-                    });
+                    pending = Some(begin_chunk(
+                        Pending::sound(chunk.pts_us, chunk.data),
+                        chunk.sample_rate,
+                        chunk.channels,
+                        lead_from.take().map(|from| (from, origin_us)),
+                        &mut lead,
+                    ));
                 }
                 Ok(None) => {
                     // Async adapters bound their own drain wait; keep
@@ -3110,6 +3240,35 @@ mod user_data_ring_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lead-in places the gap as silence a block at a time, then the
+    /// sound, and is spent once the sound has gone out. A gap that rounds
+    /// to no frames places nothing and leaves no lead-in behind, since one
+    /// with no sound left to hand over cannot be asked for its next chunk.
+    #[test]
+    fn a_lead_in_places_the_gap_then_the_sound() {
+        let sound = || Pending::sound(1_500_000, vec![1.0; 4]);
+        let mut lead = None;
+        // 1.5 s at 48 kHz stereo: a second of silence, half a second, the
+        // sound.
+        let first = begin_chunk(sound(), 48_000, 2, Some((0, 1_500_000)), &mut lead);
+        assert!(first.silence);
+        assert_eq!((first.pts_us, first.data.len()), (0, 96_000));
+        let filling = lead.as_mut().expect("a gap to fill");
+        let second = filling.next();
+        assert!(second.silence);
+        assert_eq!((second.pts_us, second.data.len()), (1_000_000, 48_000));
+        let third = filling.next();
+        assert!(!third.silence);
+        assert_eq!(third.pts_us, 1_500_000);
+        assert!(filling.placed());
+
+        // 10 us is under half a frame at 48 kHz.
+        let mut lead = None;
+        let chunk = begin_chunk(sound(), 48_000, 2, Some((1_499_990, 1_500_000)), &mut lead);
+        assert!(!chunk.silence);
+        assert!(lead.is_none(), "a lead-in with nothing to place was kept");
+    }
 
     /// Every frame the decoder hands back meets the same gate, whichever
     /// site took it.

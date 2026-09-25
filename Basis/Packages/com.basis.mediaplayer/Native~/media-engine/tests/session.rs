@@ -291,37 +291,116 @@ fn multichannel_interleave_is_wav_order() {
     }
 }
 
-/// An MP4 whose sound starts 500 ms in and is primed by 1,024 samples puts
-/// the priming at 478.7 ms, after zero. The audio stage drops it against
-/// where the sound begins, so the first frame into the ring is the sound's
-/// own and none of the sound is dropped with it.
-#[test]
-fn priming_ahead_of_a_late_audio_start_is_not_played() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/h264-aac-late-audio.mp4")
-        .to_string_lossy()
-        .into_owned();
-    let mut session = Session::open(OpenRequest::new(path));
+/// Pull a session's audio at the hardware cadence until `frames` have been
+/// served or it ends, keeping the first channel.
+fn pull_mono(session: &Session, frames: usize) -> Vec<f32> {
     let shared = session.shared().clone();
     let px = session.pipeline().clone();
-
-    let pushed = wait_for(Duration::from_secs(10), || {
+    let mut out = Vec::new();
+    let mut buf = vec![0f32; 2048];
+    let mut served = 0u64;
+    let mut epoch: Option<Instant> = None;
+    let start = Instant::now();
+    while out.len() < frames && start.elapsed() < Duration::from_secs(15) {
+        let state = shared.state.load(Ordering::Relaxed);
         assert_ne!(
-            shared.state.load(Ordering::Relaxed),
+            state,
             State::Error as u32,
             "error {}",
             shared.last_error.load(Ordering::Relaxed)
         );
-        px.audio_shared.pushed_frames.load(Ordering::Relaxed) > 0
-    });
-    let first = px.audio_shared.base_pts_us.load(Ordering::Relaxed);
+        if state == State::Ended as u32 {
+            break;
+        }
+        let rate = shared.audio_rate.load(Ordering::Relaxed);
+        let channels = shared.audio_channels.load(Ordering::Relaxed).max(1) as usize;
+        if rate > 0 && state == State::Playing as u32 {
+            let at = *epoch.get_or_insert_with(Instant::now);
+            let budget = (at.elapsed().as_micros() as u64 * u64::from(rate) / 1_000_000)
+                .saturating_sub(served);
+            if budget as usize >= buf.len() / channels {
+                let got = Session::read_audio(&px, &mut buf);
+                served += got as u64;
+                out.extend(buf[..got * channels].iter().step_by(channels));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    out
+}
+
+fn late_start_fixture(name: &str) -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// An MP4 whose sound starts 500 ms after its picture, primed by 1,024
+/// samples. The gap plays as silence from zero, so the audio clock starts
+/// with the picture, and the priming, which decodes to 478.7 ms, is not
+/// played in it. The sound itself starts at 500 ms, whole.
+#[test]
+fn a_late_audio_start_plays_its_gap_as_silence() {
+    let mut session = Session::open(OpenRequest::new(late_start_fixture(
+        "h264-aac-late-audio.mp4",
+    )));
+    let heard = pull_mono(&session, 36_000);
+    let first = session
+        .pipeline()
+        .audio_shared
+        .base_pts_us
+        .load(Ordering::Relaxed);
     session.close();
-    assert!(pushed, "no audio reached the ring");
-    // Within two frames of 500 ms either side; the priming starts at
-    // 478,666 us.
+    assert_eq!(
+        first, 0,
+        "the ring starts at {first} us, not with the picture"
+    );
+    assert!(heard.len() >= 36_000, "only {} frames served", heard.len());
+    // 24,000 frames is 500 ms at 48 kHz; a frame either side for rounding.
+    let gap = &heard[..23_999];
+    let loudest = gap.iter().fold(0f32, |m, v| m.max(v.abs()));
+    assert_eq!(loudest, 0.0, "the gap carries sound (peak {loudest})");
+    let sound = &heard[24_001..36_000];
     assert!(
-        (499_958..=500_042).contains(&first),
-        "the first frame in the ring is at {first} us"
+        sound.iter().any(|v| v.abs() > 0.01),
+        "no sound after the gap"
+    );
+}
+
+/// The same sound on its own. The clock starts at zero rather than at the
+/// sound, so the position covers the gap; and a seek into the gap starts
+/// the ring where the seek did.
+#[test]
+fn an_audio_only_late_start_keeps_the_clock_at_zero() {
+    let mut session = Session::open(OpenRequest::new(late_start_fixture("aac-late-start.m4a")));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    let first = px.audio_shared.base_pts_us.load(Ordering::Relaxed);
+    let position = shared.position_us.load(Ordering::Relaxed);
+    assert_eq!(first, 0, "the ring starts at {first} us");
+    assert!(position < 250_000, "playback opened at {position} us");
+
+    session.seek(MediaTime::from_millis(200));
+    let settled = wait_for(Duration::from_secs(5), || {
+        shared.state.load(Ordering::Relaxed) == State::Playing as u32
+            && px.audio_shared.base_pts_us.load(Ordering::Relaxed) != 0
+    });
+    let landed = px.audio_shared.base_pts_us.load(Ordering::Relaxed);
+    session.close();
+    assert!(settled, "the seek did not settle");
+    assert_eq!(
+        landed, 200_000,
+        "the ring starts at {landed} us after the seek"
     );
 }
 

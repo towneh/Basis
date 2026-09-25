@@ -3,6 +3,7 @@
 
     fixtures/h264-aac-late-video.mp4   picture 0.5 s after the sound
     fixtures/h264-aac-late-audio.mp4   sound 0.5 s after the picture, primed
+    fixtures/aac-late-start.m4a        the same sound alone, 0.5 s in
 
 Both are three seconds of H.264 (320x180, 24 fps, two B-frames) and
 stereo AAC. A late track opens its edit list with an empty edit
@@ -20,7 +21,8 @@ media time 1024, the AAC encoder's priming. ffmpeg's MP4 muxer folds the
 priming into the empty edit instead, so the file is muxed with the audio
 offset and its audio edit list is then rewritten in place (same entry
 count, same size). The priming then decodes to 478.7 ms, ahead of the
-sound at 500 ms, and must not be played.
+sound at 500 ms, and must not be played. The third is the second's audio
+track on its own, its edit list rewritten the same way.
 
 Needs ffmpeg + ffprobe on PATH. Run from Native~ (the fixture paths are
 relative to it):
@@ -35,6 +37,7 @@ import tempfile
 
 LATE_VIDEO = os.path.join("fixtures", "h264-aac-late-video.mp4")
 LATE_AUDIO = os.path.join("fixtures", "h264-aac-late-audio.mp4")
+LATE_START = os.path.join("fixtures", "aac-late-start.m4a")
 SECONDS = 3
 OFFSET = "0.5"
 PRIMING = 1024
@@ -134,22 +137,31 @@ def late_audio(scratch):
         ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source,
          "-itsoffset", OFFSET, "-i", source, "-map", "0:v", "-map", "1:a",
          "-c", "copy", *BITEXACT, LATE_AUDIO], check=True)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y",
+         "-itsoffset", OFFSET, "-i", source, "-map", "0:a",
+         "-c", "copy", *BITEXACT, LATE_START], check=True)
+    for path in (LATE_AUDIO, LATE_START):
+        state_gap_and_priming(path)
 
-    data = bytearray(open(LATE_AUDIO, "rb").read())
+
+def state_gap_and_priming(path):
+    """Rewrite the audio edit list as the gap, then the priming."""
+    data = bytearray(open(path, "rb").read())
     at, version, edits = edit_lists(data)[b"soun"]
     assert version == 0 and len(edits) == 2 and edits[0][1] == -1 \
-        and edits[1][1] == 0, f"unexpected audio edits {edits}"
+        and edits[1][1] == 0, f"{path}: unexpected audio edits {edits}"
     gap = round(float(OFFSET) * movie_timescale(data))
     total = edits[0][0] + edits[1][0]
     struct.pack_into(">Ii", data, at, gap, -1)
     struct.pack_into(">Ii", data, at + 12, total - gap, PRIMING)
-    open(LATE_AUDIO, "wb").write(data)
+    open(path, "wb").write(data)
 
     edits = edit_lists(bytes(data))[b"soun"][2]
-    audio = first_pts(LATE_AUDIO, "a")
+    audio = first_pts(path, "a")
     assert abs(audio - (float(OFFSET) - PRIMING / 48000)) < 1e-4, \
-        f"first audio pts {audio} s"
-    print(f"wrote {LATE_AUDIO}: audio edits {edits}, first audio pts {audio} s")
+        f"{path}: first audio pts {audio} s"
+    print(f"wrote {path}: audio edits {edits}, first audio pts {audio} s")
 
 
 def main():

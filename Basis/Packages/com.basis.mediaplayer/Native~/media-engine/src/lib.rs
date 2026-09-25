@@ -422,6 +422,7 @@ impl Session {
             seeks_pending: AtomicU32::new(0),
             seek_floor_us: AtomicI64::new(pipeline::NO_FLOOR),
             audio_start_us: AtomicI64::new(0),
+            generation_start_us: AtomicI64::new(0),
             seek_fed: AtomicU64::new(0),
             seek_taken: AtomicU64::new(0),
             captions: Mutex::new(std::collections::VecDeque::new()),
