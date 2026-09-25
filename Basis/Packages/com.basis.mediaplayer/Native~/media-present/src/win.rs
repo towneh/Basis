@@ -492,7 +492,8 @@ impl SharedTextureConsumer {
     ///
     /// # Safety
     /// `destination_texture` must be a live `ID3D11Texture2D*` whose device
-    /// can open `shared_handle`.
+    /// can open `shared_handle`, and `shared_handle` must stay open for the
+    /// call.
     pub unsafe fn open(
         destination_texture: *mut c_void,
         shared_handle: u64,

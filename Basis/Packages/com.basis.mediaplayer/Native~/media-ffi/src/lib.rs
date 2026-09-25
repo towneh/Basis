@@ -35,6 +35,8 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 // `stable_texture` compiles under test on every host, so the import it
 // needs cannot be Android-only.
+#[cfg(windows)]
+use std::sync::atomic::AtomicI64;
 #[cfg(any(target_os = "android", test))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -321,42 +323,48 @@ enum Opened {
 impl Consumer {
     /// # Safety
     /// `texture` is the texture the managed side registered, live for the
-    /// render events it is registered for; `shared_handle` is the engine's
-    /// live shared-texture handle for the session `px` belongs to.
+    /// render events it is registered for, and on Unity's renderer.
+    /// `presenter` and `lookahead_events` are the session's.
     unsafe fn open(
         texture: *mut c_void,
         shared_handle: u64,
-        px: &PipelineShared,
+        presenter: &Mutex<Option<media_present::SharedTexturePresenter>>,
+        lookahead_events: &AtomicI64,
     ) -> Result<Opened, PresentError> {
-        let Some(host) = media_present::win_unity::unity_d3d12_host() else {
-            if media_present::win_unity::renderer_is_d3d12() {
-                return Err(PresentError(
-                    "Unity is on Direct3D 12 without IUnityGraphicsD3D12v8".into(),
-                ));
-            }
-            // SAFETY: forwarded from this function's contract.
+        let host = media_present::win_unity::unity_d3d12_host();
+        if host.is_none() && media_present::win_unity::renderer_is_d3d12() {
+            return Err(PresentError(
+                "Unity is on Direct3D 12 without IUnityGraphicsD3D12v8".into(),
+            ));
+        }
+        // A busy lock, no presenter yet, or one that does not own the
+        // handle this event read all settle on a later event. A rebuild
+        // publishes the new handle before it installs its presenter, and
+        // installing it drops the old one, closing the old handle.
+        let Ok(mut presenter) = presenter.try_lock() else {
+            return Ok(Opened::NotReady);
+        };
+        let Some(p) = presenter
+            .as_mut()
+            .filter(|p| p.shared_handle() == shared_handle)
+        else {
+            return Ok(Opened::NotReady);
+        };
+        let Some(host) = host else {
+            // SAFETY: the texture is as this function's contract says, and
+            // the presenter held locked keeps `shared_handle` open across
+            // the call. The open checks the texture's size and format.
             return unsafe { SharedTextureConsumer::open(texture, shared_handle) }
                 .map(|c| Opened::Open(Self::D3d11(c)));
         };
-        // A busy lock, no presenter yet, or one that does not own the
-        // handle this event read (a rebuild publishes the handle before it
-        // installs the presenter) all settle on a later event.
-        let handoff = match px.presenter.try_lock() {
-            Ok(mut presenter) => match presenter.as_mut() {
-                Some(p) if p.shared_handle() == shared_handle => {
-                    // Built while Unity's device was between a shutdown and
-                    // the next initialize: give it the handoff now.
-                    if p.d3d12_handoff().is_none() {
-                        p.enable_d3d12_handoff()?;
-                        px.present.lookahead_events.store(2, Ordering::Relaxed);
-                    }
-                    p.d3d12_handoff()
-                }
-                _ => return Ok(Opened::NotReady),
-            },
-            Err(_) => return Ok(Opened::NotReady),
-        };
-        let handoff = handoff
+        // Built while Unity's device was between a shutdown and the next
+        // initialize: give it the handoff now.
+        if p.d3d12_handoff().is_none() {
+            p.enable_d3d12_handoff()?;
+            lookahead_events.store(2, Ordering::Relaxed);
+        }
+        let handoff = p
+            .d3d12_handoff()
             .ok_or_else(|| PresentError("the presenter has no Direct3D 12 handoff".into()))?;
         // SAFETY: on Direct3D 12 the registered texture is Unity's
         // `ID3D12Resource*`, per this function's contract.
@@ -1242,20 +1250,28 @@ unsafe extern "system" fn on_render_event(_event_id: i32, data: *mut c_void) {
         // takes the newest frame already finished, which is an earlier
         // event's, and the engine selects a refresh further ahead to match.
         media_engine::render_present(&entry.pipeline);
+        let Ok(mut slot) = entry.consumer.lock() else {
+            return;
+        };
+        // Read under the slot's lock: a registration stores the texture
+        // and then resets the slot under it, so a pointer read here is the
+        // one the slot's state belongs to.
         let texture = entry.unity_texture.load(Ordering::Acquire);
         let shared_handle = entry.shared.shared_texture_handle.load(Ordering::Acquire);
         if texture == 0 || shared_handle == 0 {
             return;
         }
-        let Ok(mut slot) = entry.consumer.lock() else {
-            return;
-        };
         if let Some(attempt) = slot.attempt_for(shared_handle) {
             // SAFETY: texture is the one the managed side registered and
-            // contracts to keep alive; shared_handle is the engine's live
-            // shared-texture handle for this session.
-            let outcome =
-                unsafe { Consumer::open(texture as *mut c_void, shared_handle, &entry.pipeline) };
+            // contracts to keep alive, on Unity's renderer.
+            let outcome = unsafe {
+                Consumer::open(
+                    texture as *mut c_void,
+                    shared_handle,
+                    &entry.pipeline.presenter,
+                    &entry.pipeline.present.lookahead_events,
+                )
+            };
             // Log only the first failure and the last attempt; the ones
             // between would be a line per render event.
             if let Some(e) = slot.settle(shared_handle, attempt, outcome)
@@ -1533,6 +1549,57 @@ mod tests {
             Some(2),
             "a failed open spends its attempt"
         );
+    }
+
+    /// The render event reads the shared handle apart from the presenter
+    /// that owns it, and a presenter rebuild publishes the new handle,
+    /// then drops the old presenter, closing the old one. The consumer
+    /// opens only while the presenter owning the handle is held; anything
+    /// else waits for a later event, spending no attempt.
+    #[cfg(windows)]
+    #[test]
+    fn a_consumer_opens_only_while_the_owning_presenter_is_held() {
+        use media_present::{SharedTexturePresenter, TestConsumerTarget};
+
+        let (w, h) = (64, 32);
+        let installed = SharedTexturePresenter::new(w, h).expect("presenter");
+        let replaced = SharedTexturePresenter::new(w, h).expect("presenter");
+        let (installed_handle, replaced_handle) =
+            (installed.shared_handle(), replaced.shared_handle());
+        let target = TestConsumerTarget::new(w, h).expect("target");
+        let lookahead = AtomicI64::new(1);
+        // SAFETY: the target texture is live for the whole test.
+        let open = |slot: &Mutex<Option<SharedTexturePresenter>>, handle| unsafe {
+            Consumer::open(target.texture_ptr(), handle, slot, &lookahead)
+        };
+
+        let empty = Mutex::new(None);
+        assert!(matches!(
+            open(&empty, installed_handle),
+            Ok(Opened::NotReady)
+        ));
+
+        let slot = Mutex::new(Some(installed));
+        // `replaced` is still open, so an unchecked open would succeed.
+        assert!(
+            matches!(open(&slot, replaced_handle), Ok(Opened::NotReady)),
+            "opened a handle the installed presenter does not own"
+        );
+        {
+            let _held = slot.lock().expect("presenter lock");
+            assert!(matches!(
+                open(&slot, installed_handle),
+                Ok(Opened::NotReady)
+            ));
+        }
+        assert!(
+            matches!(
+                open(&slot, installed_handle),
+                Ok(Opened::Open(Consumer::D3d11(_)))
+            ),
+            "the installed presenter's handle did not open"
+        );
+        drop(replaced);
     }
 
     /// The pair the render event acts on has to come from one registration.
