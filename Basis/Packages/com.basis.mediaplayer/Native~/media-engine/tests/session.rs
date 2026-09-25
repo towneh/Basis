@@ -369,6 +369,48 @@ fn pause_is_ignored_on_a_live_source() {
     session.close();
 }
 
+/// A failed session keeps its Error. Its pipeline threads have stopped, so
+/// a seek, play or pause arriving after the failure has nothing to act on,
+/// and reporting anything else would hide the reason.
+#[test]
+fn a_failed_session_keeps_its_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/no-such-clip.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Error as u32
+        }),
+        "a missing file never failed (state {})",
+        shared.state.load(Ordering::Relaxed),
+    );
+
+    session.seek(MediaTime::from_millis(1000));
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Error as u32,
+        "a seek revived the failed session"
+    );
+    session.play();
+    session.pause();
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Error as u32,
+        "a play or pause revived the failed session"
+    );
+    px.set_state(State::Playing);
+    assert_eq!(
+        shared.state.load(Ordering::Relaxed),
+        State::Error as u32,
+        "a pipeline thread's store replaced the Error"
+    );
+    session.close();
+}
+
 #[test]
 fn pause_seek_and_natural_end() {
     let mut session = Session::open(OpenRequest::new(fixture_path()));

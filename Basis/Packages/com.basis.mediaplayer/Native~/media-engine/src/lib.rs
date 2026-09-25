@@ -479,7 +479,9 @@ impl Session {
                 self.px.clock_playing.store(true, Ordering::Relaxed);
                 self.px.present.mirror_clock(wall, clock.now(wall), true);
             }
-            self.px.set_state(State::Playing);
+            // Only a failure can leave Paused without `transport`, and a
+            // failed session keeps its Error.
+            self.px.claim_state(&[State::Paused], State::Playing);
             self.px.bank.changed.notify_all();
         }
     }
@@ -653,9 +655,13 @@ impl Drop for Session {
 /// session resumes into buffering at the new position; the demux thread
 /// parks the clock and the video thread restarts it at the first
 /// post-seek frame. A paused session resumes only to land the seek, and
-/// pauses again once the new position is showing.
+/// pauses again once the new position is showing. A failed or closing
+/// session has no demux thread left to take the seek, and stays as it is.
 pub(crate) fn seek_px(px: &PipelineShared, to: MediaTime) {
     let _transport = px.transport.lock().expect("transport lock");
+    if px.stopping() {
+        return;
+    }
     px.seeks_pending.fetch_add(1, Ordering::Relaxed);
     px.wall.resume();
     px.set_state(State::Buffering);

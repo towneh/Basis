@@ -284,6 +284,23 @@ fn buffering_ends(presented: u64, current: u64, pause_wanted: bool) -> bool {
     presented == current && !pause_wanted
 }
 
+/// Whether a thread that reached the end of the `ended` timeline may end
+/// the session: not while a seek is in flight, and not once the timeline
+/// has moved on. Split out as above.
+fn end_is_current(seeks_pending: u32, current: u64, ended: u64) -> bool {
+    seeks_pending == 0 && current == ended
+}
+
+/// The one read-modify-write behind [`PipelineShared::claim_state`], split
+/// out so a row can publish the competing state first.
+fn claim(state: &std::sync::atomic::AtomicU32, from: &[State], to: State) -> bool {
+    state
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |s| {
+            from.iter().any(|f| *f as u32 == s).then_some(to as u32)
+        })
+        .is_ok()
+}
+
 /// Whether the audio consumer is still pulling, as of `wall`.
 ///
 /// `i64::MIN` is `last_pull_wall_us`'s never-pulled sentinel and would
@@ -840,17 +857,54 @@ impl Default for SplitLegs {
 
 impl PipelineShared {
     /// Release: everything published before a state change is visible to
-    /// a caller that acquires the new state through [`Self::state`].
+    /// a caller that acquires the new state through [`Self::state`]. Error
+    /// is final: the pipeline threads have stopped, and nothing but a fresh
+    /// open may report the session as anything else.
     pub fn set_state(&self, state: State) {
-        let previous = self.shared.state.swap(state as u32, Ordering::AcqRel);
-        if previous != state as u32 {
-            self.diag.event(
-                self.wall.now(),
-                EventCode::StateChange,
-                Stage::Clock,
-                format!("{state:?}"),
-            );
+        let stored = self
+            .shared
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |s| {
+                (s != State::Error as u32).then_some(state as u32)
+            });
+        if stored.is_ok_and(|previous| previous != state as u32) {
+            self.state_event(state);
         }
+    }
+
+    /// Move to `to` only from one of `from`, for a thread that decided on the
+    /// transition from a state it read earlier: whatever another thread has
+    /// published since then stays.
+    pub(crate) fn claim_state(&self, from: &[State], to: State) -> bool {
+        let claimed = claim(&self.shared.state, from, to);
+        if claimed {
+            self.state_event(to);
+        }
+        claimed
+    }
+
+    /// End the session for a decode thread that reached the end of
+    /// `generation`'s timeline. An end of stream queued ahead of a seek's
+    /// Flush belongs to the timeline the seek left, so the end is refused
+    /// while a seek is in flight or once the generation has moved on; the
+    /// caller asks again until it succeeds or a Flush retires the end.
+    /// `transport` keeps a seek from starting in between.
+    pub(crate) fn end_timeline(&self, generation: Generation, from: &[State]) -> bool {
+        let _transport = self.transport.lock().expect("transport lock");
+        end_is_current(
+            self.seeks_pending.load(Ordering::Acquire),
+            self.shared.generation.load(Ordering::Relaxed),
+            generation.0,
+        ) && self.claim_state(from, State::Ended)
+    }
+
+    fn state_event(&self, state: State) {
+        self.diag.event(
+            self.wall.now(),
+            EventCode::StateChange,
+            Stage::Clock,
+            format!("{state:?}"),
+        );
     }
 
     pub fn state(&self) -> u32 {
@@ -879,25 +933,16 @@ impl PipelineShared {
         }
         // Claimed rather than stored: a Paused or Ended that landed since
         // the caller presented stays.
-        let claimed = self.shared.state.compare_exchange(
-            State::Buffering as u32,
-            State::Playing as u32,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        if claimed.is_ok() {
-            self.diag.event(
-                self.wall.now(),
-                EventCode::StateChange,
-                Stage::Clock,
-                format!("{:?}", State::Playing),
-            );
-        }
+        self.claim_state(&[State::Buffering], State::Playing);
     }
 
-    /// Park the clock, freeze the wall and publish Paused. The caller
-    /// holds `transport`.
+    /// Publish Paused, then park the clock and freeze the wall. The caller
+    /// holds `transport` and has seen Playing or Buffering; an end or a
+    /// failure published since then stays, and the clock is left running.
     pub(crate) fn park_paused(&self) {
+        if !self.claim_state(&[State::Playing, State::Buffering], State::Paused) {
+            return;
+        }
         let wall = self.wall.now();
         self.clock
             .lock()
@@ -906,7 +951,6 @@ impl PipelineShared {
         self.clock_playing.store(false, Ordering::Relaxed);
         self.present.mirror_clock(wall, MediaTime::ZERO, false);
         self.wall.pause();
-        self.set_state(State::Paused);
     }
 
     /// Complete a wanted pause from a decode thread. A buffering session
@@ -1884,6 +1928,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     let mut unseen = UnseenSpan::default();
     let mut pending_au: Option<Au> = None;
     let mut eos_after_drain = false;
+    let mut eos_undecoded = false;
     let mut current_coded: Option<(media_demux::VideoCodec, u32, u32)> = None;
     let mut current_private: Vec<u8> = Vec::new();
     // Discarding late video up to the next keyframe.
@@ -2233,6 +2278,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 falling_behind.clear();
                 draining = false;
                 eos_after_drain = false;
+                eos_undecoded = false;
                 pending_au = None;
                 pending_frame = None;
                 unseen.arm(px.seek_floor_us.load(Ordering::Relaxed));
@@ -2253,9 +2299,9 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     draining = true;
                 } else if !px.audio_active.load(Ordering::Relaxed) {
                     // No track reached either decode thread, so nothing will
-                    // ever present: end here. An audio-only session ends on
+                    // ever present: end below. An audio-only session ends on
                     // the audio thread once its ring drains.
-                    px.set_state(State::Ended);
+                    eos_undecoded = true;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -2308,6 +2354,8 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 }
             }
         }
+        // A pause or seek published after this pass read Playing keeps the
+        // session; a pause is asked again after the next play.
         if eos_after_drain
             && pending_frame.is_none()
             && px.pool.ready_count() == 0
@@ -2315,9 +2363,12 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             && (!px.audio_active.load(Ordering::Relaxed)
                 || px.audio_tail_out.load(Ordering::Relaxed)
                     == px.shared.generation.load(Ordering::Relaxed))
+            && px.end_timeline(generation, &[State::Playing])
         {
             eos_after_drain = false;
-            px.set_state(State::Ended);
+        }
+        if eos_undecoded && px.end_timeline(generation, &[State::Buffering, State::Playing]) {
+            eos_undecoded = false;
         }
     }
 }
@@ -2359,6 +2410,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
     let mut last_trim_event = MediaTime::from_secs(-3600);
     let mut draining = false;
     let mut decoder_dry = false;
+    let mut eos_undecoded = false;
 
     loop {
         if px.stopping() {
@@ -2770,6 +2822,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                 park_since = None;
                 draining = false;
                 decoder_dry = false;
+                eos_undecoded = false;
                 if let Some(active) = decoder.as_mut()
                     && let Err(e) = active.reset()
                 {
@@ -2811,9 +2864,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     // audio track holding a video session open for ever.
                     None => {
                         px.audio_tail_out.store(generation.0, Ordering::Relaxed);
-                        if !px.video_active.load(Ordering::Relaxed) {
-                            px.set_state(State::Ended);
-                        }
+                        eos_undecoded = !px.video_active.load(Ordering::Relaxed);
                     }
                 }
             }
@@ -2861,14 +2912,20 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             );
             let ring_drained = producer.as_ref().is_none_or(|p| p.is_drained());
             if ring_drained || !consumer_live {
-                decoder_dry = false;
                 // Published before ending, so the video thread's own end
                 // condition and this one agree on what "played out" means.
                 px.audio_tail_out.store(generation.0, Ordering::Relaxed);
-                if !px.video_active.load(Ordering::Relaxed) {
-                    px.set_state(State::Ended);
+                // As on the video thread: a pause or seek since the check
+                // above keeps the session, and the end is asked again.
+                if px.video_active.load(Ordering::Relaxed)
+                    || px.end_timeline(generation, &[State::Playing])
+                {
+                    decoder_dry = false;
                 }
             }
+        }
+        if eos_undecoded && px.end_timeline(generation, &[State::Buffering, State::Playing]) {
+            eos_undecoded = false;
         }
     }
 }
@@ -3112,6 +3169,94 @@ mod tests {
         assert!(
             !buffering_ends(7, 7, true),
             "a pause waiting on the landing keeps Buffering for settle_pause"
+        );
+    }
+
+    /// A thread that decided on a transition from an earlier read loses to
+    /// whatever another thread has published since. Each case stores the
+    /// competing state first, standing in for the thread that got there
+    /// between the read and the claim.
+    #[test]
+    fn a_state_published_since_the_read_wins_over_the_claim() {
+        use std::sync::atomic::AtomicU32;
+        let cases = [
+            (
+                State::Paused,
+                &[State::Playing][..],
+                State::Ended,
+                "a pause lost to the end",
+            ),
+            (
+                State::Buffering,
+                &[State::Playing],
+                State::Ended,
+                "a seek lost to the end",
+            ),
+            (
+                State::Error,
+                &[State::Playing],
+                State::Ended,
+                "a failure lost to the end",
+            ),
+            (
+                State::Error,
+                &[State::Buffering, State::Playing],
+                State::Ended,
+                "a failure lost to an end with no track",
+            ),
+            (
+                State::Error,
+                &[State::Paused],
+                State::Playing,
+                "a failure lost to a play",
+            ),
+            (
+                State::Ended,
+                &[State::Playing, State::Buffering],
+                State::Paused,
+                "an end lost to a pause",
+            ),
+            (
+                State::Error,
+                &[State::Playing, State::Buffering],
+                State::Paused,
+                "a failure lost to a pause",
+            ),
+        ];
+        for (published, from, to, what) in cases {
+            let state = AtomicU32::new(published as u32);
+            assert!(!claim(&state, from, to), "{what}");
+            assert_eq!(state.load(Ordering::Relaxed), published as u32, "{what}");
+        }
+
+        let state = AtomicU32::new(State::Playing as u32);
+        assert!(claim(&state, &[State::Playing], State::Ended));
+        assert_eq!(state.load(Ordering::Relaxed), State::Ended as u32);
+        let state = AtomicU32::new(State::Buffering as u32);
+        assert!(claim(
+            &state,
+            &[State::Playing, State::Buffering],
+            State::Paused
+        ));
+        assert_eq!(state.load(Ordering::Relaxed), State::Paused as u32);
+    }
+
+    /// An end of stream queued ahead of a seek's Flush reaches its decode
+    /// thread after the seek has published Buffering. It belongs to the
+    /// timeline the seek left, and must not end the new one.
+    #[test]
+    fn an_end_of_stream_from_the_timeline_a_seek_left_does_not_end_the_session() {
+        assert!(
+            !end_is_current(1, 4, 4),
+            "a seek not yet taken by the demux thread was ended"
+        );
+        assert!(
+            !end_is_current(0, 5, 4),
+            "a seek whose Flush had not arrived was ended"
+        );
+        assert!(
+            end_is_current(0, 4, 4),
+            "the timeline in force reached its end"
         );
     }
 
