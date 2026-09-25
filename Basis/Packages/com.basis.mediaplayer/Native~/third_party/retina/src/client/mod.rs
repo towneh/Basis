@@ -2509,9 +2509,7 @@ impl Session<Playing> {
         // TODO: a ring buffer would be better: see
         // <https://github.com/scottlamb/retina/issues/6>.
 
-        // SAFETY: this exactly matches an example in the documentation:
-        // <https://doc.rust-lang.org/nightly/core/mem/union.MaybeUninit.html#initializing-an-array-element-by-element>.
-        let mut buf: [MaybeUninit<u8>; 65_536] = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut buf = [MaybeUninit::<u8>::uninit(); 65_536];
         let mut buf = tokio::io::ReadBuf::uninit(&mut buf);
 
         // Assume 0 <= inner.udp_next_poll_i < inner.presentation.streams.len().

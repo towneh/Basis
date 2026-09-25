@@ -142,6 +142,74 @@ impl UnitType {
     }
 }
 
+/// Every `UnitType`, indexed by its value.
+const UNIT_TYPES: [UnitType; 64] = [
+    UnitType::TrailN,
+    UnitType::TrailR,
+    UnitType::TsaN,
+    UnitType::TsaR,
+    UnitType::StsaN,
+    UnitType::StsaR,
+    UnitType::RadlN,
+    UnitType::RadlR,
+    UnitType::RaslN,
+    UnitType::RaslR,
+    UnitType::RsvVclN10,
+    UnitType::RsvVclR11,
+    UnitType::RsvVclN12,
+    UnitType::RsvVclR13,
+    UnitType::RsvVclN14,
+    UnitType::RsvVclR15,
+    UnitType::BlaWLp,
+    UnitType::BlaWRadl,
+    UnitType::BlaNLp,
+    UnitType::IdrWRadl,
+    UnitType::IdrNLp,
+    UnitType::CraNut,
+    UnitType::RsvIrapVcl22,
+    UnitType::RsvIrapVcl23,
+    UnitType::RsvVcl24,
+    UnitType::RsvVcl25,
+    UnitType::RsvVcl26,
+    UnitType::RsvVcl27,
+    UnitType::RsvVcl28,
+    UnitType::RsvVcl29,
+    UnitType::RsvVcl30,
+    UnitType::RsvVcl31,
+    UnitType::VpsNut,
+    UnitType::SpsNut,
+    UnitType::PpsNut,
+    UnitType::AudNut,
+    UnitType::EosNut,
+    UnitType::EobNut,
+    UnitType::FdNut,
+    UnitType::PrefixSeiNut,
+    UnitType::SuffixSeiNut,
+    UnitType::RsvNvcl41,
+    UnitType::RsvNvcl42,
+    UnitType::RsvNvcl43,
+    UnitType::RsvNvcl44,
+    UnitType::RsvNvcl45,
+    UnitType::RsvNvcl46,
+    UnitType::RsvNvcl47,
+    UnitType::Unspec48,
+    UnitType::Unspec49,
+    UnitType::Unspec50,
+    UnitType::Unspec51,
+    UnitType::Unspec52,
+    UnitType::Unspec53,
+    UnitType::Unspec54,
+    UnitType::Unspec55,
+    UnitType::Unspec56,
+    UnitType::Unspec57,
+    UnitType::Unspec58,
+    UnitType::Unspec59,
+    UnitType::Unspec60,
+    UnitType::Unspec61,
+    UnitType::Unspec62,
+    UnitType::Unspec63,
+];
+
 impl TryFrom<u8> for UnitType {
     type Error = Error;
 
@@ -150,15 +218,13 @@ impl TryFrom<u8> for UnitType {
             return Err(Error(format!("NAL 0x{:02X} is out of range", value)));
         }
 
-        // SAFETY: `UnitType` is `repr(u8)` and C-like; `value` is in range.
-        Ok(unsafe { std::mem::transmute::<u8, UnitType>(value) })
+        Ok(UNIT_TYPES[usize::from(value)])
     }
 }
 
 impl From<UnitType> for u8 {
     fn from(t: UnitType) -> u8 {
-        // SAFETY: `UnitType` is `repr(u8)` and C-like.
-        unsafe { std::mem::transmute(t) }
+        t as u8
     }
 }
 

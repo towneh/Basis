@@ -7,6 +7,9 @@
 //! servers and proxies.
 
 #![forbid(clippy::print_stderr, clippy::print_stdout)]
+// Compiled with the engine but outside its workspace, so the workspace lint
+// table does not reach it: each `unsafe` here carries its own allow.
+#![deny(unsafe_code, unsafe_op_in_unsafe_fn)]
 // I prefer to use from_str_radix(..., 10) to explicitly note the base.
 #![allow(clippy::from_str_radix_10)]
 

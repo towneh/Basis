@@ -22,6 +22,7 @@ use crate::mostly_ascii::MostlyAscii;
 pub struct CaseInsensitive<T: ?Sized>(T);
 
 impl CaseInsensitive<str> {
+    #[allow(unsafe_code)]
     fn new(s: &str) -> &Self {
         // SAFETY: `CaseInsensitive` is `repr(transparent)` over `T`.
         unsafe { &*(s as *const str as *const Self) }

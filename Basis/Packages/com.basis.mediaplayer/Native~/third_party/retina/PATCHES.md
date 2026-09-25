@@ -62,6 +62,15 @@ dropped. The source matches the crates.io release apart from these changes:
   their errors. Upstream dropped them, so an SPS with an unreadable code in
   either place parsed on from the wrong bit position and was accepted.
   Covered by `media-rtsp/tests/h265_sps_refusal.rs`.
+- `src/lib.rs`: `#![deny(unsafe_code, unsafe_op_in_unsafe_fn)]`. The crate
+  is outside the workspace, so the workspace lint table and the gate's
+  clippy run never reach it; this makes rustc refuse any `unsafe` that does
+  not carry its own `#[allow(unsafe_code)]`. Three of upstream's four
+  `unsafe` sites are replaced with safe code (`client/mod.rs`, `poll_udp`:
+  the receive buffer is an array of `MaybeUninit`; `codec/h265/nal.rs`:
+  `UnitType` converts through a table and a cast rather than
+  `transmute`). The one left, `CaseInsensitive::new` in `src/rtsp/msg.rs`,
+  carries the allow.
 
 Each is a candidate for an upstream report or pull request to
 scottlamb/retina. The copy can go once a release carries them.
