@@ -413,11 +413,19 @@ impl Bank {
 
     /// Seek/reconnect: adopt the new generation, drop everything banked from
     /// the old one, restart the startup hold. Auto's delay history survives,
-    /// because a seek does not change the link.
+    /// because a seek does not change the link. A track's Format is kept:
+    /// it describes the track, not a place on the timeline, and a demuxer
+    /// announces each track once, so one not yet released when the seek
+    /// lands would leave that track with no decoder for good.
     pub fn advance_generation(&mut self, generation: Generation) {
         self.generation = generation;
-        self.queue.clear();
-        self.queued_bytes = 0;
+        self.queue
+            .retain(|entry| matches!(entry.event, StreamEvent::Format(..)));
+        self.queued_bytes = self
+            .queue
+            .iter()
+            .map(|entry| entry.event.payload_bytes())
+            .sum();
         self.base_dts = None;
         self.newest_dts = None;
         self.release_dts = None;

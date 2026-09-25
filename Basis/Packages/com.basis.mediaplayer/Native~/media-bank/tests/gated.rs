@@ -45,6 +45,37 @@ fn audio_blocked(event: &StreamEvent) -> bool {
     }
 }
 
+/// A seek that lands before a track's Format has been released keeps the
+/// Format and drops only the old timeline's media: the demuxer does not
+/// announce the track again.
+#[test]
+fn a_seek_keeps_a_format_not_yet_released() {
+    let mut bank = bank();
+    let wall = MediaTime::ZERO;
+    let format = Format::Audio {
+        codec: AudioCodec::Aac,
+        sample_rate: 48_000,
+        channels: 2,
+        codec_private: vec![0x11, 0x90],
+    };
+    let _ = bank.push(wall, StreamEvent::Format(AUDIO, format.clone()));
+    for i in 0..10 {
+        let _ = bank.push(wall, au(AUDIO, i * INTERVAL_US));
+    }
+
+    bank.advance_generation(Generation(1));
+
+    match bank.pop_due(wall) {
+        Some(StreamEvent::Format(AUDIO, kept)) => assert_eq!(kept, format),
+        other => panic!("the Format did not survive the seek: {other:?}"),
+    }
+    assert!(
+        bank.pop_due(wall).is_none(),
+        "the old timeline's media survived"
+    );
+    assert_eq!(bank.metrics().banked_bytes, 0);
+}
+
 #[test]
 fn gated_pop_releases_the_open_track_past_a_blocked_head() {
     let mut bank = bank();
