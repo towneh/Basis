@@ -722,10 +722,15 @@ impl Mp4Demuxer {
         let audio_id = self.audio.as_ref().map(|a| a.id.0);
         let priming = self.audio.as_ref().map_or(0, |a| a.priming);
         let mut loaded = Loaded::default();
+        let mut budget = MAX_FRAGMENT_SAMPLES;
         for moof in &moofs {
-            let built =
-                crate::mp4_fragment::build(moof, &fragments.defaults, &mut fragments.cursors)
-                    .map_err(|why| DemuxError::Parse(why.into()))?;
+            let built = crate::mp4_fragment::build(
+                moof,
+                &fragments.defaults,
+                &mut fragments.cursors,
+                &mut budget,
+            )
+            .map_err(|why| DemuxError::Parse(why.into()))?;
             for (track_id, samples) in built {
                 let (out, shift) = if Some(track_id) == video_id {
                     (&mut loaded.video, 0)
@@ -927,6 +932,9 @@ const MAX_FRAGMENT_BYTES: u64 = 16 * 1024 * 1024;
 /// Sample references a fragmented file holds before it stops reading
 /// ahead. Only a file whose fragments carry one track each comes near it.
 const MAX_HELD_SAMPLES: usize = 65536;
+/// Samples one subsegment may state, across all its fragments and
+/// tracks: hours of 30 fps video with AAC beside it.
+const MAX_FRAGMENT_SAMPLES: usize = 1 << 20;
 /// Fragments a seek steps over looking for the one holding its target,
 /// in either direction.
 const MAX_SEEK_STEPS: usize = 64;
@@ -1115,8 +1123,9 @@ impl MfraSearch<'_> {
         // The media ends where the last of any track's samples does, in the
         // index's timescale: a file's last fragment can hold audio alone.
         let mut end = None::<u64>;
+        let mut budget = MAX_FRAGMENT_SAMPLES;
         for moof in read_subsegment(src, last, limits).map_err(|e| format!("{e:?}"))? {
-            let built = crate::mp4_fragment::build(&moof, &defaults, &mut cursors)?;
+            let built = crate::mp4_fragment::build(&moof, &defaults, &mut cursors, &mut budget)?;
             for (track_id, samples) in built {
                 let Some(track) = defaults.get(&track_id) else {
                     continue;

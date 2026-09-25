@@ -66,10 +66,16 @@ pub(crate) fn track_defaults(moov: &MoovBox) -> BTreeMap<u32, TrackDefaults> {
 /// Every sample one movie fragment holds, per track, in the order the
 /// fragment lists them. `cursors` is read for a track fragment that
 /// states no `tfdt` and advanced past the samples either way.
+///
+/// `budget` is how many samples the caller will still take, and is spent
+/// by each run's count before the run is read: a run carrying no
+/// per-sample fields states its count in four bytes, so the box's size
+/// bounds nothing.
 pub(crate) fn build(
     moof: &MoofBox,
     defaults: &BTreeMap<u32, TrackDefaults>,
     cursors: &mut Cursors,
+    budget: &mut usize,
 ) -> Result<Vec<(u32, Vec<FragmentSample>)>, &'static str> {
     let mut out: Vec<(u32, Vec<FragmentSample>)> = Vec::with_capacity(moof.trafs.len());
     // Where the data of the track fragment before this one ended: what a
@@ -105,7 +111,11 @@ pub(crate) fn build(
                     .checked_add_signed(i64::from(trun.data_offset.unwrap_or(0)))
                     .ok_or("a run's data offset falls outside the file")?;
             }
-            for i in 0..trun.sample_count as usize {
+            let count = trun.sample_count as usize;
+            *budget = budget
+                .checked_sub(count)
+                .ok_or("a fragment states more samples than the demuxer holds")?;
+            for i in 0..count {
                 let size = pick(
                     &trun.sample_sizes,
                     i,
@@ -201,6 +211,15 @@ mod tests {
 
     use super::*;
 
+    fn build_unbounded(
+        moof: &MoofBox,
+        defaults: &BTreeMap<u32, TrackDefaults>,
+        cursors: &mut Cursors,
+    ) -> Result<Vec<(u32, Vec<FragmentSample>)>, &'static str> {
+        let mut budget = usize::MAX;
+        build(moof, defaults, cursors, &mut budget)
+    }
+
     fn fixture(name: &str) -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../fixtures")
@@ -227,8 +246,8 @@ mod tests {
             let mut cursors = Cursors::new();
             let mut built: BTreeMap<u32, Vec<FragmentSample>> = BTreeMap::new();
             for moof in &mp4.moofs {
-                for (track_id, samples) in
-                    build(moof, &defaults, &mut cursors).expect("a fixture's fragment builds")
+                for (track_id, samples) in build_unbounded(moof, &defaults, &mut cursors)
+                    .expect("a fixture's fragment builds")
                 {
                     built.entry(track_id).or_default().extend(samples);
                 }
@@ -318,7 +337,7 @@ mod tests {
         });
 
         let mut cursors = Cursors::new();
-        let built = build(&moof, &BTreeMap::new(), &mut cursors).expect("builds");
+        let built = build_unbounded(&moof, &BTreeMap::new(), &mut cursors).expect("builds");
         let sample = |offset, size, dts, pts, duration, sync| FragmentSample {
             offset,
             size,
@@ -372,7 +391,7 @@ mod tests {
         // The third fragment built on its own, its base time believed.
         let moof = &mp4.moofs[2];
         let mut cursors = Cursors::new();
-        let seeked = build(moof, &defaults, &mut cursors).expect("builds");
+        let seeked = build_unbounded(moof, &defaults, &mut cursors).expect("builds");
         let from_index = seeked
             .iter()
             .find(|(id, _)| *id == video)
@@ -385,7 +404,7 @@ mod tests {
         // one the next fragment would start from.
         let mut in_order = Cursors::new();
         for moof in &mp4.moofs[..3] {
-            build(moof, &defaults, &mut in_order).expect("builds");
+            build_unbounded(moof, &defaults, &mut in_order).expect("builds");
         }
         assert_eq!(cursors[&video], in_order[&video]);
 
@@ -400,5 +419,40 @@ mod tests {
             .base_media_decode_time;
         assert_eq!(from_index[0].dts, base.cast_signed());
         assert!(base > 0, "the third fragment is not at the start");
+    }
+
+    /// A run with no per-sample fields takes every value from the
+    /// defaults, so its count is all it states. The count is refused
+    /// against the caller's budget before a sample is made, and the
+    /// budget is spent across runs and track fragments alike.
+    #[test]
+    fn a_run_stating_more_samples_than_the_budget_is_refused() {
+        let run = |sample_count| TrunBox {
+            sample_count,
+            ..TrunBox::default()
+        };
+        let traf = |track_id, truns| TrafBox {
+            tfhd: TfhdBox {
+                track_id,
+                ..TfhdBox::default()
+            },
+            tfdt: None,
+            truns,
+        };
+
+        let mut moof = MoofBox::default();
+        moof.trafs.push(traf(1, vec![run(400), run(400)]));
+        moof.trafs.push(traf(2, vec![run(200)]));
+        let mut budget = 1000;
+        let built = build(&moof, &BTreeMap::new(), &mut Cursors::new(), &mut budget)
+            .expect("exactly the budget builds");
+        assert_eq!((built[0].1.len(), built[1].1.len(), budget), (800, 200, 0));
+        let mut budget = 999;
+        assert!(build(&moof, &BTreeMap::new(), &mut Cursors::new(), &mut budget).is_err());
+
+        let mut moof = MoofBox::default();
+        moof.trafs.push(traf(1, vec![run(u32::MAX)]));
+        let mut budget = 1000;
+        assert!(build(&moof, &BTreeMap::new(), &mut Cursors::new(), &mut budget).is_err());
     }
 }
