@@ -79,8 +79,8 @@ impl VideoSink {
     }
 
     /// Fallback present: convert and publish one due frame. `Ok(false)` =
-    /// the consumer still owned the texture (frame dropped, never blocks
-    /// the pipeline).
+    /// the frame was dropped, never blocking the pipeline: the consumer
+    /// still owned the texture, or a replaced decoder's device holds it.
     pub fn present(
         &mut self,
         px: &PipelineShared,
@@ -111,6 +111,8 @@ pub fn present_lease_frame(
             match frame.image.d3d11_slice() {
                 // SAFETY: the payload guarantees texture+index valid for
                 // its own lifetime, which spans this call via the lease.
+                // A slice from a decoder since replaced sits on another
+                // device, which `present_slice` checks and drops.
                 Some((texture, subresource)) => unsafe {
                     presenter.present_slice(texture, subresource, frame.color)
                 },

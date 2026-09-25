@@ -372,6 +372,85 @@ fn present_slice_honours_the_subresource_index() {
     }
 }
 
+/// A decoder rebuilt mid-stream brings a new device while frames the old
+/// one decoded still wait to present. A copy between devices is undefined
+/// in the driver, so the presenter drops such a slice; its own device's
+/// slice still presents.
+#[test]
+fn present_slice_drops_a_slice_from_another_device() {
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11Texture2D,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+    use windows::core::Interface;
+
+    let (w, h) = (64u32, 32u32);
+    // SAFETY: D3D11 object creation through owned wrappers; every
+    // interface out-param is checked.
+    let slice_on_new_device = || unsafe {
+        let mut device: Option<ID3D11Device> = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            Default::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+        .expect("device");
+        let device = device.expect("device");
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: 0,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        device
+            .CreateTexture2D(&desc, None, Some(&mut texture))
+            .expect("slice texture");
+        (device, texture.expect("slice texture"))
+    };
+    let color = ColorInfo {
+        matrix: YuvMatrix::Bt709,
+        range: YuvRange::Limited,
+    };
+
+    let (_old_device, old_slice) = slice_on_new_device();
+    let (new_device, new_slice) = slice_on_new_device();
+    // SAFETY: both devices and both textures are live for the whole test.
+    unsafe {
+        let mut presenter =
+            SharedTexturePresenter::new_on_device(new_device.as_raw(), w, h).expect("presenter");
+        assert!(
+            !presenter
+                .present_slice(old_slice.as_raw(), 0, color)
+                .expect("present_slice (old device)"),
+            "a slice from another device was presented"
+        );
+        assert!(
+            presenter
+                .present_slice(new_slice.as_raw(), 0, color)
+                .expect("present_slice (own device)"),
+            "the presenter's own device's slice was not presented"
+        );
+    }
+}
+
 /// The presenter owns the NT handle `CreateSharedHandle` hands back, so
 /// dropping it must close the handle. Otherwise every rebuild strands a
 /// kernel handle and pins the texture's video memory for the process's life.

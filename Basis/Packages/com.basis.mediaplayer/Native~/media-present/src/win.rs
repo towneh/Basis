@@ -267,21 +267,27 @@ impl SharedTexturePresenter {
     /// same conversion draw. The caller must keep the slice's owning
     /// sample alive until this returns: the copy is then submitted on this
     /// device's immediate context before the sample is released, which
-    /// orders it ahead of any decoder reuse of the surface.
+    /// orders it ahead of any decoder reuse of the surface. A slice on
+    /// another device is dropped (`Ok(false)`): only this presenter's
+    /// device can copy it.
     ///
     /// # Safety
-    /// `texture_ptr` must be a live `ID3D11Texture2D*` on this
-    /// presenter's device with a valid `subresource` index.
+    /// `texture_ptr` must be a live `ID3D11Texture2D*` with a valid
+    /// `subresource` index.
     pub unsafe fn present_slice(
         &mut self,
         texture_ptr: *mut c_void,
         subresource: u32,
         color: ColorInfo,
     ) -> Result<bool, PresentError> {
-        // SAFETY: caller guarantees a live texture on this device.
-        unsafe {
+        // SAFETY: caller guarantees a live texture; the upload checks its
+        // device.
+        let uploaded = unsafe {
             self.pass
-                .upload_slice(&self.device, &self.context, texture_ptr, subresource)?;
+                .upload_slice(&self.device, &self.context, texture_ptr, subresource)?
+        };
+        if !uploaded {
+            return Ok(false);
         }
         self.convert(color)
     }

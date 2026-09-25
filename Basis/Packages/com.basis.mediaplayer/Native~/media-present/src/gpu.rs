@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_NV12, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_SAMPLE_DESC,
 };
-use windows::core::{Interface, PCSTR};
+use windows::core::{IUnknown, Interface, PCSTR};
 
 use crate::PresentError;
 use crate::reference::coefficients;
@@ -366,26 +366,40 @@ impl ConvertPass {
     /// Fill the sampled texture from a decoder-owned NV12 texture-array
     /// slice with one GPU subresource copy (the DXVA input path). The
     /// subresource index comes from `IMFDXGIBuffer::GetSubresourceIndex`
-    /// and is honoured as given (never assume slice 0).
+    /// and is honoured as given (never assume slice 0). Returns `false`,
+    /// copying nothing, for a slice on a device other than `device`: a
+    /// decoder rebuilt mid-stream brings a new device, and frames the old
+    /// one decoded can still be waiting to present.
     ///
     /// # Safety
-    /// `texture_ptr` must be a live `ID3D11Texture2D*` on `device` and
-    /// `subresource` a valid subresource index of it.
+    /// `texture_ptr` must be a live `ID3D11Texture2D*` and `subresource` a
+    /// valid subresource index of it.
     pub(crate) unsafe fn upload_slice(
         &mut self,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         texture_ptr: *mut c_void,
         subresource: u32,
-    ) -> Result<(), PresentError> {
+    ) -> Result<bool, PresentError> {
         // SAFETY: caller guarantees a live texture; from_raw_borrowed does
-        // not consume the caller's reference. GetDesc writes a plain
-        // struct; the whole-subresource copy requires only matching
-        // formats and a destination at least the source's mip size, both
-        // ensured below.
+        // not consume the caller's reference. GetDevice and GetDesc only
+        // read it. The whole-subresource copy requires both resources on
+        // the context's device, matching formats and a destination at
+        // least the source's mip size, all ensured below.
         unsafe {
             let source = ID3D11Texture2D::from_raw_borrowed(&texture_ptr)
                 .ok_or_else(|| PresentError("null decoder texture".into()))?;
+            // COM identity is defined on IUnknown only.
+            let identity = |d: &ID3D11Device| d.cast::<IUnknown>().map(|u| u.as_raw());
+            let source_device = source
+                .GetDevice()
+                .map_err(|e| PresentError(format!("GetDevice (decoder slice): {e}")))?;
+            let same_device = identity(&source_device)
+                .and_then(|s| identity(device).map(|d| s == d))
+                .map_err(|e| PresentError(format!("cast IUnknown: {e}")))?;
+            if !same_device {
+                return Ok(false);
+            }
             let mut desc = Default::default();
             source.GetDesc(&mut desc);
             if desc.Format != DXGI_FORMAT_NV12 {
@@ -405,7 +419,7 @@ impl ConvertPass {
             // A whole-subresource NV12 copy moves both planes.
             context.CopySubresourceRegion(&textures.sampled, 0, 0, 0, 0, source, subresource, None);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Record the conversion draw into the shared texture. The caller holds
