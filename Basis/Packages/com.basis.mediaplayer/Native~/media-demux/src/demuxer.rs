@@ -92,6 +92,14 @@ pub trait Demuxer: Send {
         None
     }
 
+    /// Where the bound audio track's sound begins on the timeline. Audio
+    /// decoded ahead of it is encoder priming and is not played. Zero
+    /// unless the container starts the track late while also priming it,
+    /// which puts the priming at positive times. Read once after open.
+    fn audio_start(&self) -> MediaTime {
+        MediaTime::ZERO
+    }
+
     /// Drain per-track findings (tracks left aside, fallbacks taken) for
     /// the engine to surface as diagnostics.
     fn take_notes(&mut self) -> Vec<String> {

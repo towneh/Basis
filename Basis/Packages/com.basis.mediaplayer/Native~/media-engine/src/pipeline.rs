@@ -453,6 +453,10 @@ pub struct PipelineShared {
     /// before the Flush goes out, so a decode thread only reads it for the
     /// generation it has adopted.
     pub seek_floor_us: std::sync::atomic::AtomicI64,
+    /// Where the audio source's sound begins ([`Demuxer::audio_start`]).
+    /// No generation's audio starts before it. Written once at open, before
+    /// any pipeline thread is spawned.
+    pub audio_start_us: std::sync::atomic::AtomicI64,
     /// Access units the demux thread has sent straight to the video
     /// decoder for the span ahead of the floor, and how many of this
     /// generation's the video thread has taken off its channel. The channel
@@ -2475,10 +2479,12 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
         offset: usize,
     }
     let mut pending: Option<Pending> = None;
-    // Where this generation's audio starts: zero, which removes encoder
-    // priming, or the floor of a seek that landed ahead of its target,
-    // which removes the lead-in kept to warm the decoder.
-    let mut origin_us = 0i64;
+    // Where this generation's audio starts: where the source's sound
+    // begins, which removes encoder priming, or the floor of a seek that
+    // landed ahead of its target, which removes the lead-in kept to warm
+    // the decoder.
+    let audio_start_us = px.audio_start_us.load(Ordering::Relaxed).max(0);
+    let mut origin_us = audio_start_us;
     let mut generation = {
         let bank = px.bank.bank.lock().expect("bank lock");
         bank.generation()
@@ -2907,7 +2913,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             }
             Ok(MediaMsg::Flush { generation: new }) => {
                 generation = new;
-                origin_us = px.seek_floor_us.load(Ordering::Relaxed).max(0);
+                origin_us = px.seek_floor_us.load(Ordering::Relaxed).max(audio_start_us);
                 pending = None;
                 pending_au = None;
                 park_since = None;

@@ -97,6 +97,9 @@ struct AudioTrack {
     /// priming, which puts the samples before the origin at negative
     /// times, less any gap before the track starts.
     shift: i64,
+    /// Where the track starts: the gap, so the priming it shifts past zero
+    /// is still dropped.
+    start: MediaTime,
 }
 
 /// The state a file read a fragment at a time carries between fragments.
@@ -601,6 +604,7 @@ impl Mp4Demuxer {
         // stage can drop everything before the origin.
         let edits = edit_start(trak, u64::from(mp4.moov.mvhd.timescale), track.timescale);
         let shift = edits.media_time.saturating_sub(edits.empty);
+        let start = MediaTime::from_micros(scale_to_us(edits.empty, track.timescale.max(1)));
 
         let samples = match self.collect_shifted_samples(&track.samples, shift) {
             Ok(samples) => samples,
@@ -625,6 +629,7 @@ impl Mp4Demuxer {
             id: track_id,
             samples: self.new_samples(samples),
             shift,
+            start,
         });
         Some(())
     }
@@ -1585,6 +1590,10 @@ impl Demuxer for Mp4Demuxer {
 
     fn artwork(&self) -> Option<&crate::Artwork> {
         self.artwork.as_ref()
+    }
+
+    fn audio_start(&self) -> MediaTime {
+        self.audio.as_ref().map_or(MediaTime::ZERO, |a| a.start)
     }
 
     fn take_notes(&mut self) -> Vec<String> {

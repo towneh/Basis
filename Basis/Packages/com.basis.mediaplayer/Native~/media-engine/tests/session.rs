@@ -291,6 +291,40 @@ fn multichannel_interleave_is_wav_order() {
     }
 }
 
+/// An MP4 whose sound starts 500 ms in and is primed by 1,024 samples puts
+/// the priming at 478.7 ms, after zero. The audio stage drops it against
+/// where the sound begins, so the first frame into the ring is the sound's
+/// own and none of the sound is dropped with it.
+#[test]
+fn priming_ahead_of_a_late_audio_start_is_not_played() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-aac-late-audio.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+
+    let pushed = wait_for(Duration::from_secs(10), || {
+        assert_ne!(
+            shared.state.load(Ordering::Relaxed),
+            State::Error as u32,
+            "error {}",
+            shared.last_error.load(Ordering::Relaxed)
+        );
+        px.audio_shared.pushed_frames.load(Ordering::Relaxed) > 0
+    });
+    let first = px.audio_shared.base_pts_us.load(Ordering::Relaxed);
+    session.close();
+    assert!(pushed, "no audio reached the ring");
+    // Within two frames of 500 ms either side; the priming starts at
+    // 478,666 us.
+    assert!(
+        (499_958..=500_042).contains(&first),
+        "the first frame in the ring is at {first} us"
+    );
+}
+
 /// The ABI-facing latency setter clamps to 0..=500 ms before the playhead
 /// subtracts it.
 #[test]

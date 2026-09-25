@@ -421,6 +421,7 @@ impl Session {
             pause_wanted: AtomicBool::new(false),
             seeks_pending: AtomicU32::new(0),
             seek_floor_us: AtomicI64::new(pipeline::NO_FLOOR),
+            audio_start_us: AtomicI64::new(0),
             seek_fed: AtomicU64::new(0),
             seek_taken: AtomicU64::new(0),
             captions: Mutex::new(std::collections::VecDeque::new()),
@@ -1606,6 +1607,11 @@ fn finish_open_split(
     // container carries more than one audio track.
     *px.audio_tracks.lock().expect("audio tracks lock") = demuxer.audio_tracks();
     *px.artwork.lock().expect("artwork lock") = demuxer.artwork().cloned();
+    let audio_start = audio_leg
+        .as_ref()
+        .map_or_else(|| demuxer.audio_start(), |leg| leg.audio_start());
+    px.audio_start_us
+        .store(audio_start.as_micros(), Ordering::Relaxed);
     if let Some(duration) = demuxer.duration() {
         px.shared
             .duration_us

@@ -296,6 +296,29 @@ fn an_empty_edit_starts_the_video_late() {
         .seek(MediaTime::from_micros(1_400_000), Generation(2))
         .expect("seek");
     assert_eq!(landed.as_micros(), 1_021_000);
+    assert_eq!(
+        demux.audio_start(),
+        MediaTime::ZERO,
+        "the sound is not late"
+    );
+}
+
+/// The fixture's sound starts 500 ms after its picture and is primed by
+/// 1,024 samples: an empty edit of 500 ms, then an edit from media time
+/// 1024. The priming lands at 478.7 ms, after zero, so the demuxer names
+/// where the sound itself begins for the audio stage to drop it against.
+#[test]
+fn an_empty_edit_keeps_the_audio_priming_ahead_of_the_start() {
+    let mut demux = open("h264-aac-late-audio.mp4");
+    assert_eq!(demux.audio_start().as_micros(), 500_000);
+    let first_audio = access_units(&mut demux)
+        .iter()
+        .filter(|au| !au.4.starts_with(&[0, 0, 0, 1]))
+        .map(|au| au.1.as_micros())
+        .min()
+        .expect("the track has access units");
+    // 500 ms less 1,024 samples at 48 kHz.
+    assert_eq!(first_audio, 478_666);
 }
 
 #[test]
