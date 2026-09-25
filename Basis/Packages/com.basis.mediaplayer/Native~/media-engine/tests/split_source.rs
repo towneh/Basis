@@ -161,6 +161,60 @@ fn seeking_takes_both_legs_to_the_same_place() {
     session.close();
 }
 
+/// The video leg's keyframes are at 0, 2 and 4 s, so a seek to 3.2 s lands
+/// its demuxer on 2 s and the span up to the target goes straight to the
+/// video decoder. The video leg's track id is not the one the Bank sees,
+/// and the span must still be recognised as video: dropped as audio, the
+/// decoder never gets the picture the target's frame is built from.
+#[test]
+fn a_paused_seek_between_keyframes_shows_the_target_on_a_split_pair() {
+    const TARGET_US: i64 = 3_200_000;
+    // One frame of the 30 fps fixture, and a little for rounding.
+    const FRAME_US: i64 = 34_000;
+    let mut request = OpenRequest::new(video_leg());
+    request.audio_url = Some(audio_leg());
+    let mut session = Session::open(request);
+    let shared = session.shared().clone();
+    let diag = session.diag().clone();
+    let px = session.pipeline().clone();
+    let presented = || {
+        diag.stage(media_diag::Stage::Present)
+            .out_count
+            .load(Ordering::Relaxed)
+    };
+
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+        }),
+        "split session never reached Playing"
+    );
+    session.pause();
+    let presented_before = presented();
+    let fed_before = px.seek_fed.load(Ordering::Relaxed);
+    session.seek(media_clock::MediaTime::from_micros(TARGET_US));
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            shared.state.load(Ordering::Relaxed) == State::Paused as u32
+                && presented() > presented_before
+        }),
+        "the seek did not settle paused on a new frame (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+
+    assert!(
+        px.seek_fed.load(Ordering::Relaxed) > fed_before,
+        "no access unit ahead of the target reached the video decoder"
+    );
+    let shown = px.presented_pts_us.load(Ordering::Relaxed);
+    assert!(
+        (TARGET_US..=TARGET_US + FRAME_US).contains(&shown),
+        "paused on {shown}, not on the frame at {TARGET_US}"
+    );
+    session.close();
+}
+
 /// Each leg contributes only its own kind of track. Handing the same muxed
 /// file to both legs tests this hardest: without the filter the session
 /// would announce two video and two audio tracks, whose ids would also

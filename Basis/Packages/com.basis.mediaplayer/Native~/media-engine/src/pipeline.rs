@@ -612,10 +612,44 @@ impl Leg {
     }
 }
 
-/// Keeps the audio leg's track ids from colliding with the video leg's:
-/// each demuxer numbers its own tracks from zero, and the Bank and the
-/// release thread route on nothing but the id.
+/// Where the audio leg's track ids start. Each leg numbers its tracks from
+/// its own base, so the two cannot meet in the Bank whatever the containers
+/// number them.
 const AUDIO_LEG_TRACK_BIT: u32 = 0x8000_0000;
+
+/// A split leg's view of its demuxer's track ids.
+#[derive(Default)]
+struct LegTracks {
+    /// Tracks of the kind this leg does not carry, learned from its own
+    /// Format events, so their AUs can be dropped before the Bank sees
+    /// them.
+    foreign: std::collections::HashSet<media_demux::TrackId>,
+    /// The id each carried track reaches the Bank under, numbered in the
+    /// order first seen. A container may number a track anywhere in the
+    /// u32 range, so no arithmetic on its own id keeps two apart.
+    ids: std::collections::HashMap<media_demux::TrackId, media_demux::TrackId>,
+}
+
+impl LegTracks {
+    /// The id `track` reaches the Bank under, or `None` once this leg has
+    /// used up its half of the id range.
+    fn remap(&mut self, leg: Leg, track: media_demux::TrackId) -> Option<media_demux::TrackId> {
+        if let Some(id) = self.ids.get(&track) {
+            return Some(*id);
+        }
+        let next = u32::try_from(self.ids.len())
+            .ok()
+            .filter(|n| *n < AUDIO_LEG_TRACK_BIT)?;
+        let base = if leg == Leg::Audio {
+            AUDIO_LEG_TRACK_BIT
+        } else {
+            0
+        };
+        let id = media_demux::TrackId(base | next);
+        self.ids.insert(track, id);
+        Some(id)
+    }
+}
 
 /// What the two demux threads of a split session share.
 pub struct SplitLegs {
@@ -802,45 +836,37 @@ impl SplitLegs {
     }
 }
 
-/// Namespaces the audio leg's track ids and drops the tracks a leg does not
-/// carry, so two demuxers can feed one Bank (both number their tracks from
-/// zero, and the Bank and release thread route on the id alone). Returns
-/// `None` for an event this leg should not contribute.
-fn adapt_leg_event(
-    leg: Leg,
-    foreign: &mut std::collections::HashSet<media_demux::TrackId>,
-    event: StreamEvent,
-) -> Option<StreamEvent> {
+/// Namespaces each leg's track ids and drops the tracks a leg does not
+/// carry, so two demuxers can feed one Bank (each numbers its own tracks,
+/// and the Bank and release thread route on the id alone). Returns `None`
+/// for an event this leg should not contribute.
+fn adapt_leg_event(leg: Leg, tracks: &mut LegTracks, event: StreamEvent) -> Option<StreamEvent> {
     if leg == Leg::Single {
         return Some(event);
     }
-    let remap = |track: media_demux::TrackId| {
-        if leg == Leg::Audio {
-            media_demux::TrackId(track.0 | AUDIO_LEG_TRACK_BIT)
-        } else {
-            track
-        }
-    };
     match event {
         StreamEvent::Format(track, format) => {
             if !leg.wants(&format) {
-                foreign.insert(track);
+                tracks.foreign.insert(track);
                 return None;
             }
-            Some(StreamEvent::Format(remap(track), format))
+            Some(StreamEvent::Format(tracks.remap(leg, track)?, format))
         }
         StreamEvent::Au(mut au) => {
-            if foreign.contains(&au.track) {
+            if tracks.foreign.contains(&au.track) {
                 return None;
             }
-            au.track = remap(au.track);
+            au.track = tracks.remap(leg, au.track)?;
             Some(StreamEvent::Au(au))
         }
         StreamEvent::Discontinuity(track, reason) => {
-            if foreign.contains(&track) {
+            if tracks.foreign.contains(&track) {
                 return None;
             }
-            Some(StreamEvent::Discontinuity(remap(track), reason))
+            Some(StreamEvent::Discontinuity(
+                tracks.remap(leg, track)?,
+                reason,
+            ))
         }
         // Captions ride the video bitstream, so an audio leg has none to
         // contribute. Metadata and Eos carry no track.
@@ -1075,11 +1101,8 @@ pub fn run_demux_leg(
 ) {
     let mut eos_reached = false;
     let mut pending: Option<StreamEvent> = None;
-    // Tracks of the kind this leg does not carry, learned from its own
-    // Format events, so their AUs can be dropped before the Bank sees
-    // them. Empty on a single-source session, which keeps everything.
-    let mut foreign_tracks: std::collections::HashSet<media_demux::TrackId> =
-        std::collections::HashSet::new();
+    // Empty on a single-source session, which keeps everything.
+    let mut leg_tracks = LegTracks::default();
     // The seek the audio leg has already followed.
     let mut followed_seek: Option<Generation> = None;
     // Whether this leg has been picked to carry the pair's Eos. Held across
@@ -1316,7 +1339,6 @@ pub fn run_demux_leg(
                     match &event {
                         _ if leg == Leg::Audio => {}
                         StreamEvent::Format(track, Format::Video { codec, .. }) => {
-                            video_track = Some(*track);
                             caption_track =
                                 (*codec == media_demux::VideoCodec::H264).then_some(*track);
                             user_data_track = match codec {
@@ -1395,8 +1417,15 @@ pub fn run_demux_leg(
                         }
                         _ => {}
                     }
-                    match adapt_leg_event(leg, &mut foreign_tracks, event) {
-                        Some(event) => event,
+                    match adapt_leg_event(leg, &mut leg_tracks, event) {
+                        Some(event) => {
+                            // The seek floor tests adapted access units,
+                            // so it learns the id a split leg gives them.
+                            if let StreamEvent::Format(track, Format::Video { .. }) = &event {
+                                video_track = Some(*track);
+                            }
+                            event
+                        }
                         // A track this leg does not contribute.
                         None => continue,
                     }
@@ -3426,5 +3455,54 @@ mod tests {
         // The cap applies again, measured from the landing.
         assert!(!split.must_wait_for_other(Leg::Video, LANDED + SPLIT_LEAD_CAP_US));
         assert!(split.must_wait_for_other(Leg::Video, LANDED + SPLIT_LEAD_CAP_US + 1));
+    }
+
+    /// A container may number a track anywhere in the u32 range, and an
+    /// HLS leg can announce a new track when a later segment's container
+    /// numbers it differently. Every track of the pair must still reach
+    /// the Bank under its own id, or the release thread routes one track's
+    /// AUs to another's decoder.
+    #[test]
+    fn split_legs_give_every_track_its_own_id_whatever_the_container_numbers() {
+        let video = Format::Video {
+            codec: media_demux::VideoCodec::H264,
+            coded_width: 64,
+            coded_height: 64,
+            display_width: 64,
+            display_height: 64,
+            codec_private: Vec::new(),
+        };
+        let audio = Format::Audio {
+            codec: media_demux::AudioCodec::Aac,
+            sample_rate: 48_000,
+            channels: 2,
+            codec_private: Vec::new(),
+        };
+        let banked_id = |leg, tracks: &mut LegTracks, track, format: &Format| {
+            let event = StreamEvent::Format(media_demux::TrackId(track), format.clone());
+            match adapt_leg_event(leg, tracks, event) {
+                Some(StreamEvent::Format(id, _)) => id,
+                other => panic!("{leg:?} dropped its own track: {other:?}"),
+            }
+        };
+
+        let mut video_leg = LegTracks::default();
+        let mut audio_leg = LegTracks::default();
+        let ids = [
+            banked_id(Leg::Video, &mut video_leg, 1, &video),
+            banked_id(Leg::Video, &mut video_leg, 0x8000_0001, &video),
+            banked_id(Leg::Audio, &mut audio_leg, 1, &audio),
+            banked_id(Leg::Audio, &mut audio_leg, 0x8000_0001, &audio),
+        ];
+        for (i, a) in ids.iter().enumerate() {
+            for b in &ids[i + 1..] {
+                assert_ne!(a, b, "two tracks of the pair share an id: {ids:?}");
+            }
+        }
+        assert_eq!(
+            banked_id(Leg::Video, &mut video_leg, 0x8000_0001, &video),
+            ids[1],
+            "a re-announced track keeps the id it was given"
+        );
     }
 }
