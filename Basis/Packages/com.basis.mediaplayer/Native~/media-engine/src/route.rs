@@ -190,6 +190,18 @@ fn route_video_decoder(
         }
     }
 
+    // Without a software route the hardware's refusal is the reason worth
+    // reporting, and it goes out before the cap can stand in for it.
+    match codec {
+        VideoCodec::H265 => {
+            return Err(media_decode::DecodeError(
+                hw_failure.unwrap_or_else(|| NO_SOFTWARE_HEVC.into()),
+            ));
+        }
+        VideoCodec::Vp8 => return Err(media_decode::DecodeError(NO_VP8.into())),
+        VideoCodec::H264 | VideoCodec::Vp9 | VideoCodec::Av1 => {}
+    }
+
     // Software: the direct route under software-only, a reported fallback
     // otherwise. The cap is checked before any decoder is built.
     software_cap_check(coded_width, coded_height)?;
@@ -247,14 +259,17 @@ fn open_windows_software(
                 ))),
             },
         },
-        VideoCodec::H265 => Err(media_decode::DecodeError(
-            "no software H.265 route (hardware DXVA is the only Windows HEVC path)".into(),
-        )),
-        VideoCodec::Vp8 => Err(media_decode::DecodeError(
-            "no VP8 decode path (platform ceiling)".into(),
-        )),
+        VideoCodec::H265 => Err(media_decode::DecodeError(NO_SOFTWARE_HEVC.into())),
+        VideoCodec::Vp8 => Err(media_decode::DecodeError(NO_VP8.into())),
     }
 }
+
+#[cfg(windows)]
+const NO_SOFTWARE_HEVC: &str =
+    "no software H.265 route (hardware DXVA is the only Windows HEVC path)";
+
+#[cfg(windows)]
+const NO_VP8: &str = "video codec 'VP8' is not supported (supported: H.264, H.265, VP9, AV1)";
 
 /// Android: every route is the platform MediaCodec stack. Quest has no
 /// software fallback for avc/hevc/vp9 and rav1d has no Vulkan upload path,
@@ -441,6 +456,46 @@ mod tests {
             err.0.contains("software decode routes accept up to"),
             "{}",
             err.0
+        );
+    }
+
+    /// HEVC has no Windows software route, so a refusal carries the
+    /// hardware's reason: here, a track that announced no frame size.
+    #[cfg(windows)]
+    #[test]
+    fn sizeless_hevc_is_refused_for_its_missing_size() {
+        let err = super::open_video_decoder(
+            media_demux::VideoCodec::H265,
+            0,
+            0,
+            false,
+            crate::DecodePreference::HardwareWithFallback,
+            &[],
+        )
+        .err()
+        .expect("a sizeless HEVC track must refuse");
+        assert_eq!(
+            err.0,
+            "video track (H.265) announced no frame size, so the decoder cannot be configured"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vp8_is_refused_as_unsupported() {
+        let err = super::open_video_decoder(
+            media_demux::VideoCodec::Vp8,
+            640,
+            360,
+            false,
+            crate::DecodePreference::HardwareWithFallback,
+            &[],
+        )
+        .err()
+        .expect("VP8 has no Windows route");
+        assert_eq!(
+            err.0,
+            "video codec 'VP8' is not supported (supported: H.264, H.265, VP9, AV1)"
         );
     }
 

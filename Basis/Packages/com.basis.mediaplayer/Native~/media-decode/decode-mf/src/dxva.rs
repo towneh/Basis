@@ -119,6 +119,15 @@ impl HwCodec {
             HwCodec::Av1 => "dxva-av1",
         }
     }
+
+    fn name(self) -> &'static str {
+        match self {
+            HwCodec::H264 => "H.264",
+            HwCodec::H265 => "H.265",
+            HwCodec::Vp9 => "VP9",
+            HwCodec::Av1 => "AV1",
+        }
+    }
 }
 
 /// The decode device: hardware D3D11 with video support, multithread
@@ -427,10 +436,10 @@ impl HwVideoDecoder {
             )));
         }
         if width == 0 || height == 0 {
-            return Err(DecodeError(
-                "video track announced no frame size, so the hardware decoder cannot be configured"
-                    .into(),
-            ));
+            return Err(DecodeError(format!(
+                "video track ({}) announced no frame size, so the decoder cannot be configured",
+                codec.name()
+            )));
         }
         mf_startup()?;
         let dxva = DxvaDevice::new()?;
