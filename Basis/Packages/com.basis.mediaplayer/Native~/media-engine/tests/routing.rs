@@ -106,12 +106,12 @@ fn an_uppercase_scheme_routes_where_its_lowercase_twin_does() {
     }
 }
 
-/// A UNC path is a host, not a place on this machine, and opening one is
-/// a network connection the address gate never sees. Refused unless the
+/// A network share is a host, not a place on this machine, and opening one
+/// is a network connection the address gate never sees. Refused unless the
 /// session has explicitly opted out of that gate, which world content
-/// never does. Every spelling Windows accepts is covered: it takes either
-/// separator in either of the two leading positions, and all four pairings
-/// open the same share.
+/// never does. Windows reaches a share by many spellings: either separator
+/// in either of the two leading positions, the UNC device, the NT prefix,
+/// the object namespace, and a device path that climbs out of its drive.
 #[test]
 fn a_network_share_path_is_refused_without_the_local_opt_out() {
     for url in [
@@ -120,10 +120,14 @@ fn a_network_share_path_is_refused_without_the_local_opt_out() {
         r"\\?\UNC\attacker.example\share\clip.ts",
         r"\/attacker.example/share/clip.ts",
         r"/\attacker.example\share\clip.ts",
+        r"\\.\UNC/attacker.example/share/clip.ts",
+        r"\??\UNC\attacker.example\share\clip.ts",
+        r"\\?\GLOBALROOT\Device\Mup\attacker.example\share\clip.ts",
+        r"\\.\C:\..\UNC\attacker.example\share\clip.ts",
     ] {
         assert!(
             url.starts_with('\\') || url.starts_with('/'),
-            "the row's own input lost its leading separators: {url:?}"
+            "the row's own input lost its leading separator: {url:?}"
         );
         let (state, category) = settle(url, false);
         assert_eq!(

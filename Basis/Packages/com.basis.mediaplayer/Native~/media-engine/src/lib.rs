@@ -1154,36 +1154,38 @@ impl SourceKind {
     }
 }
 
-/// A path that names a host rather than a place on this machine. Windows
-/// resolves both spellings through the SMB redirector, so opening one
-/// makes a network connection that never passes the address gate.
+/// A path that can only name a place on this machine: relative, rooted,
+/// drive-absolute, or the extended-length spelling of a drive path. Any
+/// other shape may reach a host. Windows resolves `\\host`, `\??\UNC\host`,
+/// `\\.\UNC\host` and the object-namespace routes to the UNC provider
+/// through the SMB redirector, so opening one makes a network connection
+/// that never passes the address gate. Judged by the shapes allowed, since
+/// the spellings that reach a host are many.
 ///
 /// Matched as text on every host: `Path` recognises only the syntax of the
 /// platform it was compiled for, and the answer should not depend on that.
-fn names_a_network_share(url: &str) -> bool {
-    // Two leading separators are not always a host. `\\?\` and `\\.\`
-    // open the device namespace, where `\\?\C:\clips\x.mp4` is the long
-    // spelling of a local file (used past MAX_PATH), and only the UNC
-    // device names a host. Backslashes only: an extended-length path
-    // reaches the object manager unnormalised, so the forward-slash
-    // pairings are not this prefix.
-    if let Some(rest) = url
-        .strip_prefix(r"\\?\")
-        .or_else(|| url.strip_prefix(r"\\.\"))
-    {
-        // `get` rather than a slice: the device name is a str and its
-        // fourth byte need not be a character boundary.
-        return rest
-            .get(..4)
-            .is_some_and(|device| device.eq_ignore_ascii_case(r"UNC\"));
+fn is_a_local_path(url: &str) -> bool {
+    let separator = |b: u8| b == b'\\' || b == b'/';
+    match url.as_bytes() {
+        // The long spelling of a drive path, used past MAX_PATH. Backslashes
+        // only: `\\?\` reaches the object manager as written, while every
+        // other device prefix is normalised first with the device namespace
+        // as its root, so `..` climbs out of the drive (`\\.\C:\..\UNC\host`).
+        [b'\\', b'\\', b'?', b'\\', drive, b':', rest @ ..] => {
+            drive.is_ascii_alphabetic() && rest.first().is_none_or(|&b| b == b'\\')
+        }
+        // Windows takes either separator in either position, so all four
+        // pairings open the same namespace.
+        [a, b, ..] if separator(*a) && separator(*b) => false,
+        // `\??\` is handed to the object manager unnormalised, where
+        // `\??\UNC\host` is a share.
+        [a, b'?', b'?', rest @ ..]
+            if separator(*a) && rest.first().is_none_or(|&b| separator(b)) =>
+        {
+            false
+        }
+        _ => true,
     }
-    // Windows takes either separator in either position, so all four
-    // pairings name the same share.
-    let mut bytes = url.bytes();
-    matches!(
-        (bytes.next(), bytes.next()),
-        (Some(b'\\' | b'/'), Some(b'\\' | b'/'))
-    )
 }
 
 /// The URL with its scheme in the parser's normalised form and every other
@@ -1380,9 +1382,9 @@ fn open_and_run(
             }
         }
     } else {
-        if names_a_network_share(&url) && !request.allow_local_addresses {
+        if !is_a_local_path(&url) && !request.allow_local_addresses {
             px.fail(EngineError::config(format!(
-                "network share paths are not opened unless local addresses are permitted: {url}"
+                "only relative, rooted and drive paths are opened unless local addresses are permitted: {url}"
             )));
             return;
         }
@@ -1507,9 +1509,9 @@ fn open_audio_leg(
             }
         }
     } else {
-        if names_a_network_share(url) && !allow_local {
+        if !is_a_local_path(url) && !allow_local {
             px.fail(EngineError::config(format!(
-                "network share paths are not opened unless local addresses are permitted: {url}"
+                "only relative, rooted and drive paths are opened unless local addresses are permitted: {url}"
             )));
             return None;
         }
@@ -1682,7 +1684,7 @@ fn finish_open_split(
 
 #[cfg(test)]
 mod classify_tests {
-    use super::{SourceKind, classify, names_a_network_share};
+    use super::{SourceKind, classify, is_a_local_path};
 
     fn kind(url: &str) -> SourceKind {
         classify(url)
@@ -1780,52 +1782,72 @@ mod classify_tests {
         }
     }
 
+    /// Paths that name this machine whatever the current directory. The
+    /// long spelling is what a caller uses past MAX_PATH, so refusing it
+    /// would refuse ordinary local content.
     #[test]
-    fn network_share_paths_are_recognised_by_shape() {
+    fn plain_paths_are_local() {
         for url in [
-            r"\\host\share\x.ts",
-            "//host/share/x.ts",
-            r"\\?\UNC\host\share\x.ts",
-            // Windows takes either separator in either position.
-            r"\/host/share/x.ts",
-            r"/\host\share\x.ts",
+            r"C:\clips\x.ts",
+            "c:/clips/x.ts",
+            "C:x.ts",
+            "/srv/clips/x.ts",
+            r"\clips\x.ts",
+            "clips/x.ts",
+            "x.ts",
+            r"\\?\C:\clips\x.ts",
+            r"\\?\c:\clips\x.ts",
+            r"\\?\C:",
+            // `??` as a name further in is only a folder.
+            r"\clips\??\UNC\x.ts",
+            r"\???\x.ts",
         ] {
-            assert!(
-                url.starts_with('\\') || url.starts_with('/'),
-                "the row's own input lost its leading separators: {url:?}"
-            );
-            assert!(names_a_network_share(url), "{url:?}");
-        }
-        for url in [r"C:\clips\x.ts", "/srv/clips/x.ts", "clips/x.ts"] {
-            assert!(!names_a_network_share(url), "{url:?}");
+            assert!(is_a_local_path(url), "{url:?}");
         }
     }
 
-    /// Two leading separators can also open the device namespace, where
-    /// the path names this machine after all. The long spelling is what a
-    /// caller uses past MAX_PATH, so refusing it as a share would refuse
-    /// ordinary local content.
+    /// Every spelling here reaches another host, or a device, on Windows.
     #[test]
-    fn the_device_namespace_is_local_unless_it_names_the_unc_device() {
+    fn a_path_that_can_reach_a_host_is_not_local() {
         for url in [
-            r"\\?\C:\clips\x.ts",
+            r"\\host\share\x.ts",
+            "//host/share/x.ts",
+            // Windows takes either separator in either position.
+            r"\/host/share/x.ts",
+            r"/\host\share\x.ts",
+            r"\\?\UNC\host\share\x.ts",
+            r"\\?\unc\host\share\x.ts",
+            r"\\.\UNC\host\share\x.ts",
+            // `\\.\` is normalised, so a forward slash is a separator.
+            r"\\.\UNC/host/share/x.ts",
+            // The NT spelling, handed through unnormalised.
+            r"\??\UNC\host\share\x.ts",
+            r"\??\unc\host\share\x.ts",
+            "/??/UNC/host/share/x.ts",
+            // The object namespace, straight to the UNC provider.
+            r"\\?\GLOBALROOT\Device\Mup\host\share\x.ts",
+            r"\\.\GLOBALROOT\Device\Mup\host\share\x.ts",
+            r"\\?\GLOBALROOT\??\UNC\host\share\x.ts",
+            // Normalised against the device root, `..` leaves the drive.
+            r"\\.\C:\..\UNC\host\share\x.ts",
+            r"//?/C:/../UNC/host/share/x.ts",
+            // A verbatim drive path has a backslash after its colon, and a
+            // drive is one letter.
+            r"\\?\C:/x.ts",
+            r"\\?\CC:\x.ts",
+            // Other devices are not files to play.
+            r"\\.\pipe\x",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x.ts",
             r"\\.\C:\clips\x.ts",
-            // A device name whose fourth byte falls inside a character:
-            // slicing a str to a fixed byte length would panic here.
+            // Non-ASCII after the prefix is judged by byte, never sliced.
             "\\\\?\\A𐀀\\x.ts",
-            // A device whose name merely begins with those three letters
-            // is not the UNC device.
-            r"\\?\UNCLE\x.ts",
+            "\\\\?\\𐀀:\\x.ts",
         ] {
             assert!(
-                url.starts_with(r"\\"),
-                "the row's own input lost its leading separators: {url:?}"
+                url.starts_with('\\') || url.starts_with('/'),
+                "the row's own input lost its leading separator: {url:?}"
             );
-            assert!(!names_a_network_share(url), "{url:?}");
-        }
-        // The UNC device is a share however it is spelled.
-        for url in [r"\\?\UNC\host\share\x.ts", r"\\?\unc\host\share\x.ts"] {
-            assert!(names_a_network_share(url), "{url:?}");
+            assert!(!is_a_local_path(url), "{url:?}");
         }
     }
 }
