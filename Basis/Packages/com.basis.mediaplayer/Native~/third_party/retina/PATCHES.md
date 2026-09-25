@@ -46,6 +46,17 @@ dropped. The source matches the crates.io release apart from these changes:
   up front, so one reply header could ask for any amount of memory; a head of
   endless header lines, or one line that never ends, grew without limit too.
   `media-rtsp/tests/rtsp_message_bounds.rs` covers all three.
+- `src/codec/h264.rs`, `push_inner`: one access unit may gather at most
+  16 MiB of RTP payload (`MAX_AU_PAYLOAD_BYTES`), 65,536 NAL units and
+  65,536 payload pieces (`MAX_AU_NALS`, `MAX_AU_PIECES`); past any of them
+  the push is refused and the access unit dropped. Upstream closes an
+  access unit only on the marker bit or a new timestamp, so a sender that
+  sent neither grew it without limit, and one-byte NAL units or fragments
+  built millions of entries inside the payload ceiling. The counts clear
+  one slice per macroblock at level 5.2 (36,864) with every SPS and PPS
+  beside them. The H.265 depacketizer has the same shape and is left
+  alone: the engine sets up no H.265 stream. Covered by
+  `media-rtsp/tests/h264_access_unit_bound.rs`.
 
 Each is a candidate for an upstream report or pull request to
 scottlamb/retina. The copy can go once a release carries them.

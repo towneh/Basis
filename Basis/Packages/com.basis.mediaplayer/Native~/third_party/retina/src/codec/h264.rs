@@ -136,7 +136,25 @@ struct AccessUnit {
     loss: u16,
 
     same_ts_as_prev: bool,
+
+    /// RTP payload bytes taken in for this access unit so far.
+    payload_bytes: usize,
 }
+
+/// Ceiling on the RTP payload one access unit may gather. Nothing else
+/// bounds it: a sender that holds the timestamp and never sets the marker
+/// grows the access unit for as long as it keeps sending. Far above any
+/// real frame.
+const MAX_AU_PAYLOAD_BYTES: usize = 16 << 20;
+
+/// Ceilings on the NAL units and payload pieces one access unit may hold. The
+/// payload ceiling alone lets a sender of one-byte NAL units or fragments
+/// build millions of entries. Every slice holds at least one macroblock, so
+/// a picture at level 5.2 has at most 36,864 slices, beside at most 32 SPS
+/// and 256 PPS; a 16 MiB access unit in fragments of 256 bytes or more
+/// reaches the payload ceiling first.
+const MAX_AU_NALS: usize = 1 << 16;
+const MAX_AU_PIECES: usize = 1 << 16;
 
 #[derive(Debug)]
 struct FuA {
@@ -418,6 +436,12 @@ impl Depacketizer {
         let loss = pkt.loss();
         let timestamp = pkt.timestamp();
         let mut data = pkt.into_payload_bytes();
+        access_unit.payload_bytes += data.len();
+        if access_unit.payload_bytes > MAX_AU_PAYLOAD_BYTES {
+            return Err(format!(
+                "access unit exceeds {MAX_AU_PAYLOAD_BYTES} bytes of RTP payload"
+            ));
+        }
         // https://tools.ietf.org/html/rfc6184#section-5.2
         let Some(&nal_header) = data.first() else {
             return Err("Empty NAL".into());
@@ -555,6 +579,11 @@ impl Depacketizer {
                 }
             }
             _ => return Err(format!("bad nal header {nal_header:02x}")),
+        }
+        if self.nals.len() > MAX_AU_NALS || self.pieces.len() > MAX_AU_PIECES {
+            return Err(format!(
+                "access unit exceeds {MAX_AU_NALS} NAL units or {MAX_AU_PIECES} pieces"
+            ));
         }
         self.input_state = if mark {
             match self.nals.last() {
@@ -909,6 +938,7 @@ impl AccessUnit {
             // TODO: overflow?
             loss: pkt.loss() + additional_loss,
             same_ts_as_prev,
+            payload_bytes: 0,
         }
     }
 }
