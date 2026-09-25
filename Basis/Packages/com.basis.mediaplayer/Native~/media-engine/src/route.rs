@@ -1,7 +1,8 @@
 //! Platform decoder routing: one factory pair per platform behind the same
 //! signatures, so the pipeline threads stay platform-free. A refusal is
 //! typed: the caller turns it into a CodecRefused diagnostic, mutes the
-//! track and plays on. A software fallback engaging is reported.
+//! track and plays on, or fails the session if nothing else can play. A
+//! software fallback engaging is reported.
 //!
 //! Routing honours the user's decode preference: hardware with fallback
 //! (the default), hardware only, or software only. A route the platform

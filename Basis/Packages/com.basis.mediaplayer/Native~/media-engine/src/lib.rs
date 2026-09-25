@@ -6,6 +6,7 @@
 mod audio;
 mod capabilities;
 mod pipeline;
+mod playable;
 mod pool;
 mod present;
 mod route;
@@ -126,6 +127,17 @@ impl EngineError {
             category: ErrorCategory::Decode,
             stage: Stage::Decode,
             detail: e.to_string(),
+        }
+    }
+
+    /// Every track the source carries was refused, so nothing can play.
+    /// The detail is the refusals' reasons.
+    pub fn refused(detail: impl Into<String>) -> Self {
+        Self {
+            code: 302,
+            category: ErrorCategory::Decode,
+            stage: Stage::Decode,
+            detail: detail.into(),
         }
     }
 
@@ -396,6 +408,7 @@ impl Session {
             io_cancel: media_io::CancelToken::new(),
             video_active: AtomicBool::new(false),
             audio_active: AtomicBool::new(false),
+            playable: playable::Playable::default(),
             audio_tail_out: AtomicU64::new(u64::MAX),
             clock_playing: AtomicBool::new(false),
             decode_preference: request.decode_preference,

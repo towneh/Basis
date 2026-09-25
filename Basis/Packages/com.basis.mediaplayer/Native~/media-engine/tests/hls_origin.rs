@@ -207,11 +207,11 @@ fn a_network_playlist_cannot_play_a_local_file() {
 /// `ResourceFetcher::local` is platform-independent, so it is tested here
 /// without needing decoded output.
 ///
-/// A host without a decoder still reaches the Bank: media arrives there
-/// demuxed, so anything in it proves the fetcher was asked for the
-/// playlist's own segment and delivered it. Asserted positively because a
-/// session that never settles, as this one does off Windows, would satisfy
-/// any assertion on the error category without the fetcher being reached.
+/// Media in the Bank proves the fetcher was asked for the playlist's own
+/// segment and delivered it. So does a decoder refusing its tracks, which
+/// is how a host without decoders ends this session: the tracks it refuses
+/// were announced from the segment's bytes. A fetch the fetcher refused
+/// fails as I/O or configuration instead.
 #[test]
 fn a_disk_playlist_reaches_its_own_segments_without_a_decoder() {
     let playlist =
@@ -224,17 +224,18 @@ fn a_disk_playlist_reaches_its_own_segments_without_a_decoder() {
 
     let start = Instant::now();
     let mut banked = 0;
+    let mut category = ErrorCategory::None as u32;
     while start.elapsed() < Duration::from_secs(20) {
         banked = shared.banked_us.load(Ordering::Relaxed);
-        if banked > 0 {
+        category = shared.last_error_category.load(Ordering::Relaxed);
+        if banked > 0 || category != ErrorCategory::None as u32 {
             break;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    let category = shared.last_error_category.load(Ordering::Relaxed);
     session.close();
     assert!(
-        banked > 0,
+        banked > 0 || category == ErrorCategory::Decode as u32,
         "nothing from the playlist's own segment reached the Bank \
          (error category {category})"
     );

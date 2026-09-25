@@ -25,6 +25,7 @@ use media_diag::{BankReadings, EventCode, SessionDiag, Stage, diag_err, diag_log
 use crate::audio::{
     AudioConsumer, AudioFormatInfo, AudioProducer, frames_before_origin, install_audio_generation,
 };
+use crate::playable::{Playable, TrackKind};
 use crate::pool::FramePool;
 use crate::present::PresentShared;
 use crate::route::{open_audio_decoder, open_video_decoder};
@@ -387,6 +388,8 @@ pub struct PipelineShared {
     /// which decode thread declares Ended.
     pub video_active: std::sync::atomic::AtomicBool,
     pub audio_active: std::sync::atomic::AtomicBool,
+    /// Whether anything is left to play once tracks are refused.
+    pub playable: Playable,
     /// The generation the audio thread has nothing further to play out for:
     /// its post-EOS drain finished and the ring is empty, or the consumer
     /// stopped pulling, or no decoder was ever built for the track. The video
@@ -1029,6 +1032,27 @@ impl PipelineShared {
         self.bank.changed.notify_all();
     }
 
+    /// A decoder refused its track. The reason goes out as a diagnostic,
+    /// and the session fails with it if nothing else is left to play.
+    pub fn refuse(&self, kind: TrackKind, reason: String) {
+        self.diag.event(
+            self.wall.now(),
+            EventCode::CodecRefused,
+            Stage::Decode,
+            reason.clone(),
+        );
+        if let Some(detail) = self.playable.refused(kind, &reason) {
+            self.fail(EngineError::refused(detail));
+        }
+    }
+
+    /// A demux thread knows every track it will announce.
+    fn settle(&self, leg: Leg) {
+        if let Some(detail) = self.playable.settled(leg) {
+            self.fail(EngineError::refused(detail));
+        }
+    }
+
     pub fn stopping(&self) -> bool {
         self.shared.stop.load(Ordering::Relaxed)
     }
@@ -1126,6 +1150,13 @@ pub fn run_demux_leg(
     // to get there.
     let mut floor: Option<MediaTime> = None;
     let mut video_track: Option<media_demux::TrackId> = None;
+    // The kinds this leg has announced, and whether it has announced all it
+    // will: a track the demuxer names is announced before its first access
+    // unit, except where a transport stream holds its format back until the
+    // stream has said enough.
+    let mut announced_video = false;
+    let mut announced_audio = false;
+    let mut settled = false;
     // What the caption display holds once the span ahead of the floor has
     // been decoded: the text of the last cue in it, empty for a clear.
     let mut caption_at_floor: Option<String> = None;
@@ -1419,10 +1450,36 @@ pub fn run_demux_leg(
                     }
                     match adapt_leg_event(leg, &mut leg_tracks, event) {
                         Some(event) => {
-                            // The seek floor tests adapted access units,
-                            // so it learns the id a split leg gives them.
-                            if let StreamEvent::Format(track, Format::Video { .. }) = &event {
-                                video_track = Some(*track);
+                            match &event {
+                                // The seek floor tests adapted access units,
+                                // so it learns the id a split leg gives them.
+                                StreamEvent::Format(track, Format::Video { .. }) => {
+                                    video_track = Some(*track);
+                                    announced_video = true;
+                                    px.playable.announced(TrackKind::Video);
+                                }
+                                StreamEvent::Format(_, Format::Audio { .. }) => {
+                                    announced_audio = true;
+                                    px.playable.announced(TrackKind::Audio);
+                                }
+                                StreamEvent::Au(_) if !settled => {
+                                    let wants_video = leg != Leg::Audio;
+                                    let wants_audio = leg != Leg::Video;
+                                    settled = (!wants_video
+                                        || announced_video
+                                        || demuxer.video_track().is_none())
+                                        && (!wants_audio
+                                            || announced_audio
+                                            || demuxer.audio_track().is_none());
+                                    if settled {
+                                        px.settle(leg);
+                                    }
+                                }
+                                StreamEvent::Eos(_) if !settled => {
+                                    settled = true;
+                                    px.settle(leg);
+                                }
+                                _ => {}
                             }
                             event
                         }
@@ -1924,13 +1981,11 @@ fn reroute_hw_fallback(
             Some(route.decoder)
         }
         Err(refused) => {
-            px.diag.event(
-                px.wall.now(),
-                EventCode::CodecRefused,
-                Stage::Decode,
+            px.video_active.store(false, Ordering::Relaxed);
+            px.refuse(
+                TrackKind::Video,
                 format!("{error}; software route refused {codec:?}: {refused}"),
             );
-            px.video_active.store(false, Ordering::Relaxed);
             None
         }
     }
@@ -2235,19 +2290,15 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         }
                         decode_device = route.decode_device;
                         decoder = Some(route.decoder);
+                        px.playable.decoding(TrackKind::Video);
                     }
                     Err(e) => {
-                        // Refused video mutes the picture with a diagnostic,
-                        // audio plays on, and Ended becomes the audio
-                        // thread's call.
-                        px.diag.event(
-                            px.wall.now(),
-                            EventCode::CodecRefused,
-                            Stage::Decode,
-                            format!("no video decoder for {codec:?}: {e}"),
-                        );
+                        // Refused video mutes the picture, audio plays on,
+                        // and Ended becomes the audio thread's call. With
+                        // no audio either, the session fails.
                         px.video_active.store(false, Ordering::Relaxed);
                         decoder = None;
+                        px.refuse(TrackKind::Video, e.0);
                         continue;
                     }
                 }
@@ -2791,6 +2842,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     Ok(d) => {
                         let (out_rate, out_channels) = d.output_format();
                         decoder = Some(d);
+                        px.playable.decoding(TrackKind::Audio);
                         producer = Some(install_audio_generation(
                             &px.audio_consumer,
                             AudioFormatInfo {
@@ -2805,12 +2857,11 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                             .store(out_channels, Ordering::Relaxed);
                     }
                     Err(e) => {
-                        // Refused audio mutes; video is unaffected.
-                        px.diag.event(
-                            px.wall.now(),
-                            EventCode::CodecRefused,
-                            Stage::Decode,
-                            format!("{codec:?} decoder: {e}"),
+                        // Refused audio mutes and video is unaffected. With
+                        // no video either, the session fails.
+                        px.refuse(
+                            TrackKind::Audio,
+                            format!("{codec:?} audio refused: {}", e.0),
                         );
                         decoder = None;
                         // The flush arm installs a fresh ring only where
