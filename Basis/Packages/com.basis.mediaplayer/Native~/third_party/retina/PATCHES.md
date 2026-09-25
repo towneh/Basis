@@ -39,6 +39,13 @@ dropped. The source matches the crates.io release apart from these changes:
   excluded ranges (`netsh interface ipv4 show excludedportrange`) as
   `WSAEACCES`, so without the retry a few percent of UDP set-ups fail on a
   stock Windows machine.
+- `src/tokio.rs`, `Connection::from_stream` and `Codec::decode`, and
+  `src/rtsp/parse.rs`, `Parser::feed_inner`: an RTSP message is capped at
+  1 MiB, head and body together (`MAX_MESSAGE_BYTES`). Upstream builds the
+  connection's parser with no limit and reserves the peer's `Content-Length`
+  up front, so one reply header could ask for any amount of memory; a head of
+  endless header lines, or one line that never ends, grew without limit too.
+  `media-rtsp/tests/rtsp_message_bounds.rs` covers all three.
 
 Each is a candidate for an upstream report or pull request to
 scottlamb/retina. The copy can go once a release carries them.

@@ -174,6 +174,15 @@ impl Parser {
         self.stream_pos
     }
 
+    /// Bytes of completed head lines consumed so far, while a head is being
+    /// read; 0 otherwise.
+    pub fn head_bytes(&self) -> usize {
+        match self.state {
+            ParserState::Head { head_bytes, .. } => head_bytes,
+            _ => 0,
+        }
+    }
+
     /// Parses the next message from `input`.
     ///
     /// Returns `Ok(Some(...))` when a complete message has been parsed.
@@ -238,6 +247,9 @@ impl Parser {
                     match parse_header_line(input) {
                         Ok(Some((name, value))) => {
                             head_bytes += before - input.len();
+                            if head_bytes > self.max_message_size {
+                                return Err(invalid("message-too-large").context(context));
+                            }
                             match &mut msg {
                                 Message::Request(req) => req.headers.append(name, value),
                                 Message::Response(resp) => resp.headers.append(name, value),

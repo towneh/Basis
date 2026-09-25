@@ -17,6 +17,13 @@ use crate::{Error, ErrorInt, RtspMessageContext};
 
 use super::{ConnectionContext, ReceivedMessage, WallTime};
 
+/// Ceiling on one RTSP message, head and body together. Its `Content-Length`
+/// comes from the peer, and the codec reserves the body up front, so without
+/// a ceiling one header line can ask for any amount of memory. A DESCRIBE's
+/// SDP is a few KiB; interleaved data is framed separately, with a 16-bit
+/// length.
+const MAX_MESSAGE_BYTES: usize = 1 << 20;
+
 /// A RTSP connection which implements `Stream`, `Sink`, and `Unpin`.
 pub(crate) struct Connection(Framed<TcpStream, Codec>);
 
@@ -42,7 +49,9 @@ impl Connection {
                     peer_addr,
                     established_wall,
                 },
-                parser: crate::rtsp::parse::Parser::default(),
+                parser: crate::rtsp::parse::Parser::builder()
+                    .max_message_size(MAX_MESSAGE_BYTES)
+                    .build(),
             },
         )))
     }
@@ -234,6 +243,17 @@ impl tokio_util::codec::Decoder for Codec {
                 // Advance past any bytes the parser stably consumed (e.g. headers).
                 if consumed > 0 {
                     src.advance(consumed);
+                }
+                // A line that never ends grows the buffer as fast as the peer
+                // sends; the parser's own ceiling only sees completed lines, so
+                // the unfinished one is charged against what the head has used.
+                if needed.is_none() && self.parser.head_bytes() + src.len() > MAX_MESSAGE_BYTES {
+                    return Err(CodecError::ParseError {
+                        description: format!(
+                            "Invalid RTSP message: unterminated line past {MAX_MESSAGE_BYTES} bytes"
+                        ),
+                        pos: pos + crate::to_u64(consumed),
+                    });
                 }
                 // Reserve space for the body if the parser knows how much is needed.
                 src.reserve(needed.map(|n| n.get()).unwrap_or(1024));
