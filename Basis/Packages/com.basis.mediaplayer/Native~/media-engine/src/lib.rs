@@ -332,7 +332,10 @@ impl Session {
     }
 
     fn open_internal(mut request: OpenRequest, source: Option<Box<dyn ByteSource>>) -> Self {
-        let shared = Arc::new(SessionShared::default());
+        let shared = Arc::new(SessionShared {
+            av_offset_us: AtomicI32::new(i32::MIN),
+            ..SessionShared::default()
+        });
         let diag = Arc::new(SessionDiag::default());
         let wall = Arc::new(pipeline::EngineWall::new());
 
