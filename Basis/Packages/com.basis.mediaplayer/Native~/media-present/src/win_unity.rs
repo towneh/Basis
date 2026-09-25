@@ -7,6 +7,7 @@
 #![allow(non_snake_case)]
 
 use std::ffi::{c_int, c_void};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
@@ -83,6 +84,11 @@ static D3D12: AtomicPtr<IUnityGraphicsD3D12v8> = AtomicPtr::new(std::ptr::null_m
 static RENDERER: AtomicI32 = AtomicI32::new(-1);
 
 unsafe extern "system" fn on_device_event(event: c_int) {
+    // This frame returns into Unity's C++, which cannot unwind.
+    let _ = catch_unwind(AssertUnwindSafe(|| device_event(event)));
+}
+
+fn device_event(event: c_int) {
     match event {
         DEVICE_EVENT_INITIALIZE => {
             capture();
@@ -92,12 +98,14 @@ unsafe extern "system" fn on_device_event(event: c_int) {
             );
         }
         DEVICE_EVENT_SHUTDOWN => {
+            // Released before the log line, so a panicking sink cannot
+            // leave the host's table in reach after its device is gone.
+            D3D12.store(std::ptr::null_mut(), Ordering::Release);
+            release_retired();
             media_diag::diag_log!(
                 "unity device event: shutdown, renderer {}",
                 RENDERER.load(Ordering::Acquire)
             );
-            D3D12.store(std::ptr::null_mut(), Ordering::Release);
-            release_retired();
         }
         _ => {}
     }
@@ -249,5 +257,40 @@ impl D3d12Host for UnityD3d12 {
             .and_then(|t| t.get_next_frame_fence_value)
             // SAFETY: plain value query on Unity's live table.
             .map(|f| unsafe { f() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn panics_on_device_events(line: &str) {
+        assert!(
+            !line.starts_with("unity device event"),
+            "sink refused: {line}"
+        );
+        media_diag::stderr_sink(line);
+    }
+
+    /// Unity calls this from C++, so a panic in its body would abort the
+    /// process rather than unwind. A shutdown whose log line panics still
+    /// lets go of the host.
+    #[test]
+    fn a_panic_under_a_device_event_stays_inside_the_callback() {
+        media_diag::set_log_sink(panics_on_device_events);
+        // SAFETY: the callback takes no pointers; outside Unity both
+        // events touch only the plugin's own statics.
+        unsafe { on_device_event(DEVICE_EVENT_INITIALIZE) };
+
+        // SAFETY: every slot is a raw pointer or an `Option` of a fn
+        // pointer, for which all zeroes is null and `None`.
+        let table: &'static mut IUnityGraphicsD3D12v8 =
+            Box::leak(Box::new(unsafe { std::mem::zeroed() }));
+        D3D12.store(table, Ordering::Release);
+        assert!(host_is_d3d12());
+
+        // SAFETY: as above.
+        unsafe { on_device_event(DEVICE_EVENT_SHUTDOWN) };
+        assert!(!host_is_d3d12());
     }
 }
