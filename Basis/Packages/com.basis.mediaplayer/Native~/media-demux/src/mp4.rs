@@ -79,6 +79,9 @@ struct VideoTrack {
     /// `sps`); `None` for codecs whose samples pass through as stored
     /// (VP9 raw frames, AV1 temporal units).
     avc: Option<AvcParams>,
+    /// The edit list's shift, in the track's timescale: negative by the
+    /// gap when the picture starts after the movie does.
+    shift: i64,
 }
 
 struct AvcParams {
@@ -90,9 +93,10 @@ struct AvcParams {
 struct AudioTrack {
     id: TrackId,
     samples: Samples,
-    /// Encoder priming from the edit list, in the track's timescale: the
-    /// shift that puts the samples before the origin at negative times.
-    priming: i64,
+    /// The edit list's shift, in the track's timescale: the encoder
+    /// priming, which puts the samples before the origin at negative
+    /// times, less any gap before the track starts.
+    shift: i64,
 }
 
 /// The state a file read a fragment at a time carries between fragments.
@@ -465,7 +469,14 @@ impl Mp4Demuxer {
             }
         };
 
-        let samples = self.new_samples(self.collect_samples(&track.samples)?);
+        // re_mp4 already takes the reorder delay out of the sample table,
+        // which is what the video track's first real edit states; only a
+        // gap before the track starts is left to apply.
+        let movie_timescale = u64::from(mp4.moov.mvhd.timescale);
+        let shift = edit_start(track.trak(mp4), movie_timescale, track.timescale)
+            .empty
+            .saturating_neg();
+        let samples = self.new_samples(self.collect_shifted_samples(&track.samples, shift)?);
         let width = if box_width != 0 {
             box_width
         } else {
@@ -492,6 +503,7 @@ impl Mp4Demuxer {
             id: track_id,
             samples,
             avc,
+            shift,
         });
         Ok(Some(()))
     }
@@ -584,23 +596,13 @@ impl Mp4Demuxer {
         }
 
         // re_mp4 parses the edit list but does not apply it. For audio the
-        // initial media_time offset is the encoder priming (video's reorder
-        // shift is already normalised away in the sample table): shift the
+        // first real edit's media time is the encoder priming: shift the
         // track so priming samples carry negative timestamps and the PCM
         // stage can drop everything before the origin.
-        let priming = trak
-            .edts
-            .as_ref()
-            .and_then(|e| e.elst.as_ref())
-            .and_then(|elst| {
-                elst.entries
-                    .iter()
-                    .find(|e| e.media_time != u64::MAX && e.media_time != u64::from(u32::MAX))
-            })
-            .map(|e| e.media_time as i64)
-            .unwrap_or(0);
+        let edits = edit_start(trak, u64::from(mp4.moov.mvhd.timescale), track.timescale);
+        let shift = edits.media_time.saturating_sub(edits.empty);
 
-        let samples = match self.collect_shifted_samples(&track.samples, priming) {
+        let samples = match self.collect_shifted_samples(&track.samples, shift) {
             Ok(samples) => samples,
             Err(e) => {
                 push_note(&mut self.refusals, || {
@@ -622,7 +624,7 @@ impl Mp4Demuxer {
         self.audio = Some(AudioTrack {
             id: track_id,
             samples: self.new_samples(samples),
-            priming,
+            shift,
         });
         Some(())
     }
@@ -635,10 +637,6 @@ impl Mp4Demuxer {
         } else {
             Samples::Whole { all, next: 0 }
         }
-    }
-
-    fn collect_samples(&self, samples: &[re_mp4::Sample]) -> Result<Vec<SampleRef>, DemuxError> {
-        self.collect_shifted_samples(samples, 0)
     }
 
     fn collect_shifted_samples(
@@ -740,7 +738,8 @@ impl Mp4Demuxer {
         let moofs = read_subsegment(&mut self.src, entry, &self.limits)?;
         let video_id = self.video.as_ref().map(|v| v.id.0);
         let audio_id = self.audio.as_ref().map(|a| a.id.0);
-        let priming = self.audio.as_ref().map_or(0, |a| a.priming);
+        let video_shift = self.video.as_ref().map_or(0, |v| v.shift);
+        let audio_shift = self.audio.as_ref().map_or(0, |a| a.shift);
         let mut loaded = Loaded::default();
         let mut budget = MAX_FRAGMENT_SAMPLES;
         for moof in &moofs {
@@ -753,9 +752,9 @@ impl Mp4Demuxer {
             .map_err(|why| DemuxError::Parse(why.into()))?;
             for (track_id, samples) in built {
                 let (out, shift) = if Some(track_id) == video_id {
-                    (&mut loaded.video, 0)
+                    (&mut loaded.video, video_shift)
                 } else if Some(track_id) == audio_id {
-                    (&mut loaded.audio, priming)
+                    (&mut loaded.audio, audio_shift)
                 } else {
                     continue;
                 };
@@ -908,7 +907,7 @@ fn last_dts(loaded: &Loaded) -> Option<MediaTime> {
 }
 
 /// One fragment sample as the demuxer's own reference, on the shared
-/// microsecond timeline and with the track's priming shift applied.
+/// microsecond timeline and with the track's edit-list shift applied.
 fn to_ref(
     sample: FragmentSample,
     timescale: u64,
@@ -929,10 +928,10 @@ fn to_ref(
 }
 
 /// A sample's stored times on the shared microsecond timeline, with the
-/// track's priming shift applied. The shift comes from the edit list, so
-/// it is whatever the file says: the subtraction saturates rather than
-/// wrapping, and the scaling clamps, so hostile numbers cost a wrong
-/// timestamp rather than a panic or a time running backwards.
+/// track's edit-list shift applied. The shift is whatever the file says,
+/// so the subtraction saturates rather than wrapping, and the scaling
+/// clamps: hostile numbers cost a wrong timestamp rather than a panic or
+/// a time running backwards.
 fn shifted(pts: i64, dts: i64, shift: i64, timescale: u64) -> (MediaTime, MediaTime) {
     (
         MediaTime::from_micros(scale_to_us(pts.saturating_sub(shift), timescale)),
@@ -1298,6 +1297,39 @@ fn sample_entry(contents: &re_mp4::StsdBoxContent) -> String {
 
 fn unsupported_video(entry: &str) -> String {
     format!("video codec '{entry}' is not supported (supported: H.264, H.265, VP9, AV1)")
+}
+
+/// Where a track's edit list puts its media, in the track's timescale:
+/// the leading empty edits, a track starting after the movie does, and
+/// the media time the first real edit starts from. An empty edit is
+/// stated in the movie's timescale.
+struct EditStart {
+    empty: i64,
+    media_time: i64,
+}
+
+fn edit_start(trak: &re_mp4::TrakBox, movie_timescale: u64, timescale: u64) -> EditStart {
+    let mut start = EditStart {
+        empty: 0,
+        media_time: 0,
+    };
+    let Some(elst) = trak.edts.as_ref().and_then(|e| e.elst.as_ref()) else {
+        return start;
+    };
+    for entry in &elst.entries {
+        if entry.media_time != u64::MAX && entry.media_time != u64::from(u32::MAX) {
+            start.media_time = i64::try_from(entry.media_time).unwrap_or(i64::MAX);
+            break;
+        }
+        if movie_timescale != 0 {
+            let gap = u128::from(entry.segment_duration) * u128::from(timescale)
+                / u128::from(movie_timescale);
+            start.empty = start
+                .empty
+                .saturating_add(i64::try_from(gap).unwrap_or(i64::MAX));
+        }
+    }
+    start
 }
 
 fn stated_span(value: u64, timescale: u64) -> Option<MediaTime> {
@@ -1728,6 +1760,31 @@ mod tests {
         );
         assert_eq!(choose_index(two(), None).expect("chosen").reference_id, 1);
         assert!(choose_index(Vec::new(), Some(1)).is_none());
+    }
+
+    /// An edit list's start is whatever the file says. An empty edit
+    /// converts from the movie's timescale to the track's, and a media
+    /// time past `i64::MAX` clamps there rather than wrapping to a
+    /// negative shift that would move every sample later.
+    #[test]
+    fn an_edit_lists_start_is_read_without_wrapping() {
+        let mut elst = re_mp4::ElstBox {
+            version: 1,
+            ..Default::default()
+        };
+        for (segment_duration, media_time) in [(500, u64::MAX), (1000, 1 << 63)] {
+            elst.entries.push(Default::default());
+            let entry = elst.entries.last_mut().expect("just pushed");
+            entry.segment_duration = segment_duration;
+            entry.media_time = media_time;
+        }
+        let trak = re_mp4::TrakBox {
+            edts: Some(re_mp4::EdtsBox { elst: Some(elst) }),
+            ..Default::default()
+        };
+        let start = edit_start(&trak, 1000, 48_000);
+        assert_eq!(start.empty, 24_000);
+        assert_eq!(start.media_time, i64::MAX);
     }
 
     /// Encoder priming is stated once in the edit list and applied to

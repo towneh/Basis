@@ -271,6 +271,33 @@ fn seek_lands_on_a_keyframe_in(layout: &str) {
     }
 }
 
+/// The fixture's picture starts 521 ms after its sound, which the video
+/// track's edit list states as an empty edit ahead of the ordinary one
+/// that skips the reorder delay. The picture's times carry the gap, as
+/// ffprobe's do, and a seek lands on them.
+#[test]
+fn an_empty_edit_starts_the_video_late() {
+    let mut demux = open("h264-aac-late-video.mp4");
+    let aus = access_units(&mut demux);
+    let first = |video: bool| {
+        aus.iter()
+            .filter(|au| au.4.starts_with(&[0, 0, 0, 1]) == video)
+            .map(|au| au.1.as_micros())
+            .min()
+            .expect("the track has access units")
+    };
+    assert_eq!(first(true), 521_000, "video starts after the gap");
+    assert_eq!(first(false), 0, "audio starts at the origin");
+
+    // Keyframes every half second from 521 ms; the one at 1.521 s is
+    // decoded at 1.438 s, after the target.
+    let mut demux = open("h264-aac-late-video.mp4");
+    let landed = demux
+        .seek(MediaTime::from_micros(1_400_000), Generation(2))
+        .expect("seek");
+    assert_eq!(landed.as_micros(), 1_021_000);
+}
+
 #[test]
 fn truncated_metadata_is_a_typed_error() {
     let mut bytes = fixture("h264-aac-640x360-30fps.mp4");
