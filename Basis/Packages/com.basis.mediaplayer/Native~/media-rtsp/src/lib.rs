@@ -608,8 +608,9 @@ async fn emit_aligned(
     tx: &mpsc::Sender<Result<StreamEvent, String>>,
 ) -> Result<(), String> {
     let offset = align.get(frame.stream_id).map(|a| a.offset_us).unwrap_or(0);
-    // RTP carries presentation time only and arrival order is decode
-    // order, so dts is set to pts.
+    // RTP carries presentation time only, so dts is pts and runs out of
+    // order under B-frames. Arrival order is decode order, and nothing
+    // downstream needs dts to be monotonic.
     let pts = MediaTime::from_micros(frame.elapsed_us.saturating_add(offset));
     let au = Au {
         track: TrackId(frame.stream_id as u32),

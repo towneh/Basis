@@ -227,7 +227,9 @@ pub struct Bank {
     base_dts: Option<MediaTime>,
     /// Newest banked AU, internal timeline.
     newest_dts: Option<MediaTime>,
-    /// Last released AU, internal timeline.
+    /// Furthest released AU, internal timeline. Never moves back: a source
+    /// with no decode timestamps (RTP) reports dts = pts, which runs out of
+    /// order under B-frames.
     release_dts: Option<MediaTime>,
     /// Offset applied to incoming dts to splice across discontinuities.
     splice_offset: MediaTime,
@@ -732,7 +734,7 @@ impl Bank {
         if let StreamEvent::Au(au) = &entry.event {
             self.queued_bytes -= au.data.len();
             if index == 0 {
-                self.release_dts = Some(internal);
+                self.release_dts = Some(self.release_dts.map_or(internal, |r| r.max(internal)));
             }
             self.released_aus += 1;
         }
