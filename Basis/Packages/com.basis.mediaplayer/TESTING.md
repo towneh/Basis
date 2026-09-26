@@ -72,6 +72,7 @@ One client, in a scene with more than one player.
 | Slow decoder | Start the player with `BASIS_MEDIA_SLOW_VIDEO_DECODE_MS=80` in its environment and play an on-demand source with sound, and one with captions or SEI data | Sound unbroken at real time. The picture moves, holds and rejoins, in step whenever it moves. Captions and user data stay on time. `LateVideoSkip` in the Console. Unset the variable afterwards |
 | Long pause | Pause a minute, then play, on a video and an audio-only file | Resumes with no error |
 | Live stream | Open one | The seek bar hides |
+| MPEG-TS file | Open an on-demand `.ts` or `.m2ts` over HTTPS, not through HLS | Plays from the start. The duration reads 0 and the seek bar hides |
 | Captions | Toggle captions, switch player | The setting applies to every player |
 | Subtitles | A source with subtitle files | The language row shows only with captions on |
 | Status | Watch a load, then open a URL that fails (a host that does not exist) | Connecting, Buffering, Playing, with the resolution. A failure shows its reason in red, not only a code |

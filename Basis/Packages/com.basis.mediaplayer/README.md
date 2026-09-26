@@ -72,7 +72,7 @@ four players, or two clients sharing playback, recording diagnostics.
 | `https://….m3u8` | HLS, on-demand or live | `https://stream.example/live/index.m3u8` |
 | `https://….webm`, `.mkv` | WebM or Matroska: VP9 or AV1 video, Opus audio | `https://stream.example/vod/clip.webm` |
 | `https://….flac` `.mp3` `.aac` `.opus` `.wav` | Audio only | `https://stream.example/audio/track.flac` |
-| `file://` or an absolute path | Local file | `C:\media\clip.mp4` |
+| An absolute path | Local file (not a network share; `file://` URLs are refused) | `C:\media\clip.mp4` |
 
 The format is read from the file's contents; the URL needs no extension.
 Private and loopback addresses (`localhost`, `192.168.…`, `10.…`) are refused
@@ -347,6 +347,8 @@ SEI survives repackaging but not re-encoding.
 - No RTMP.
 - WebM/Matroska without a Cues index seeks, but the picture holds until the
   next keyframe.
+- An MPEG-TS file opened directly plays from the start with no duration and
+  no seeking. The same content served as HLS seeks.
 - HLS plays the highest-quality variant with no switching. Encrypted,
   byte-range and keyframe-only playlists are refused.
 - WHEP never requests a keyframe; unrecovered loss lasts until the next one.
