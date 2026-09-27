@@ -799,6 +799,50 @@ fn a_seek_between_keyframes_plays_on_from_the_target() {
     session.close();
 }
 
+/// A seek 15 s past the only keyframe of a 4 fps file decodes 60 frames
+/// forward and plays on from the target, rather than from the keyframe.
+#[test]
+fn a_seek_far_past_a_low_rate_keyframe_plays_on_from_the_target() {
+    const TARGET_US: i64 = 15_000_000;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-aac-4fps-longgop.mp4")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            shared.state.load(Ordering::Relaxed) == State::Playing as u32
+                && shared.position_us.load(Ordering::Relaxed) > 600_000
+        }),
+        "never reached Playing (state {}, error {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.last_error.load(Ordering::Relaxed),
+    );
+    session.seek(MediaTime::from_micros(TARGET_US));
+    // The picture, not only the audio-led position, reaches the target.
+    let px = session.pipeline().clone();
+    let shown = wait_for(Duration::from_secs(5), || {
+        px.presented_pts_us.load(Ordering::Relaxed) >= TARGET_US
+    });
+    assert!(
+        shown,
+        "the picture never reached the target (presented {})",
+        px.presented_pts_us.load(Ordering::Relaxed),
+    );
+    let resumed = wait_for(Duration::from_secs(5), || {
+        shared.state.load(Ordering::Relaxed) == State::Playing as u32
+            && shared.position_us.load(Ordering::Relaxed) > TARGET_US + 200_000
+    });
+    assert!(
+        resumed,
+        "playback did not carry on past the target (state {}, position {})",
+        shared.state.load(Ordering::Relaxed),
+        shared.position_us.load(Ordering::Relaxed),
+    );
+    session.close();
+}
+
 /// The same on an audio-only session, where nothing presents: the ring
 /// standing ready at the landed position is what completes the pause.
 #[test]

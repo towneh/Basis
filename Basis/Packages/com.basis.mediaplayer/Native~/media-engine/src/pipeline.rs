@@ -116,11 +116,16 @@ fn report_late_video(
 
 /// `seek_floor_us` when the generation presents from wherever it starts.
 pub(crate) const NO_FLOOR: i64 = i64::MIN;
-/// The most a seek will decode forward from its keyframe to reach the
-/// target exactly. Everything in that span is decoded before anything
-/// shows, so this bounds how long a seek can sit in Buffering. Past it the
-/// seek presents from the keyframe and logs that.
-const ACCURATE_SEEK_MAX: MediaTime = MediaTime::from_secs(12);
+/// The most frames a seek will decode forward from its keyframe to reach
+/// the target exactly. Everything in that span is decoded before anything
+/// shows, so this bounds how long a seek can sit in Buffering, and decode
+/// time goes by frames, not media time: twelve seconds at 60 fps, minutes
+/// of a still picture at 1 fps. Past it the seek presents from the
+/// keyframe and logs that.
+const ACCURATE_SEEK_FRAMES: i64 = 720;
+/// The span a seek always decodes forward, and all it has before the video
+/// track's frame rate is known.
+const ACCURATE_SEEK_MIN: MediaTime = MediaTime::from_secs(12);
 /// Audio kept ahead of the floor so the decoder's overlap state is warm by
 /// the first sample that is heard. The ring trims it off again.
 const SEEK_AUDIO_LEAD_IN: MediaTime = MediaTime::from_millis(100);
@@ -130,9 +135,66 @@ const SEEK_FEED_WAIT: Duration = Duration::from_millis(2);
 
 /// Where a generation starts presenting when that is not where its seek
 /// landed: the target, if the demuxer stopped short of it by no more than
-/// [`ACCURATE_SEEK_MAX`].
-fn presentation_floor(target: MediaTime, landed: MediaTime) -> Option<MediaTime> {
-    (landed < target && target - landed <= ACCURATE_SEEK_MAX).then_some(target)
+/// [`ACCURATE_SEEK_FRAMES`] of `frame_step` (the video track's typical
+/// step between frames), and never less than [`ACCURATE_SEEK_MIN`].
+fn presentation_floor(
+    target: MediaTime,
+    landed: MediaTime,
+    frame_step: Option<MediaTime>,
+) -> Option<MediaTime> {
+    let bound = frame_step.map_or(ACCURATE_SEEK_MIN, |step| {
+        MediaTime::from_micros(step.as_micros().saturating_mul(ACCURATE_SEEK_FRAMES))
+            .max(ACCURATE_SEEK_MIN)
+    });
+    (landed < target && target - landed <= bound).then_some(target)
+}
+
+/// How many of the latest steps between video frames [`FrameStep`] keeps.
+const FRAME_STEPS_KEPT: usize = 15;
+
+/// The video track's typical step between consecutive decode timestamps,
+/// which sizes how far a seek decodes forward: the median of the latest
+/// steps, so an odd pair of frames close together does not set it. A new
+/// video Format starts it again, since a replacement track or rendition can
+/// run at another rate.
+#[derive(Default)]
+struct FrameStep {
+    steps: [i64; FRAME_STEPS_KEPT],
+    count: usize,
+    next: usize,
+    last_dts: Option<MediaTime>,
+}
+
+impl FrameStep {
+    fn step(&self) -> Option<MediaTime> {
+        if self.count == 0 {
+            return None;
+        }
+        let mut kept = self.steps;
+        let kept = &mut kept[..self.count];
+        kept.sort_unstable();
+        Some(MediaTime::from_micros(kept[self.count / 2]))
+    }
+
+    fn observe(&mut self, dts: MediaTime) {
+        if let Some(last) = self.last_dts
+            && dts > last
+        {
+            self.steps[self.next] = dts.saturating_sub(last).as_micros();
+            self.next = (self.next + 1) % FRAME_STEPS_KEPT;
+            self.count = (self.count + 1).min(FRAME_STEPS_KEPT);
+        }
+        self.last_dts = Some(dts);
+    }
+
+    /// A seek's jump is not a step between frames.
+    fn seeked(&mut self) {
+        self.last_dts = None;
+    }
+
+    fn new_format(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// The frames a seek decodes to build its target's picture. None of them
@@ -1164,6 +1226,7 @@ pub fn run_demux_leg(
     // to get there.
     let mut floor: Option<MediaTime> = None;
     let mut video_track: Option<media_demux::TrackId> = None;
+    let mut frame_step = FrameStep::default();
     // The kinds this leg has announced, and whether it has announced all it
     // will: a track the demuxer names is announced before its first access
     // unit, except where a transport stream holds its format back until the
@@ -1249,7 +1312,8 @@ pub fn run_demux_leg(
                     // target and the span before it is decoded unseen.
                     // Otherwise, or if the demuxer landed at or after the
                     // target, it starts where the demuxer stopped.
-                    floor = presentation_floor(target, landed);
+                    floor = presentation_floor(target, landed, frame_step.step());
+                    frame_step.seeked();
                     caption_at_floor = None;
                     captions_live = floor.is_none();
                     let start = floor.unwrap_or(landed);
@@ -1336,7 +1400,7 @@ pub fn run_demux_leg(
                         px.wall.now(),
                         EventCode::Seek,
                         Stage::Demux,
-                        format!("seek refused: {what}"),
+                        format!("to {target}, refused: {what}"),
                     );
                 }
                 Err(e) => px.fail(EngineError::demux(e)),
@@ -1476,6 +1540,7 @@ pub fn run_demux_leg(
                                 // so it learns the id a split leg gives them.
                                 StreamEvent::Format(track, Format::Video { .. }) => {
                                     video_track = Some(*track);
+                                    frame_step.new_format();
                                     announced_video = true;
                                     px.playable.announced(TrackKind::Video);
                                 }
@@ -1553,6 +1618,12 @@ pub fn run_demux_leg(
             }
         }
         let is_eos = matches!(event, StreamEvent::Eos(_));
+
+        if let StreamEvent::Au(au) = &event
+            && Some(au.track) == video_track
+        {
+            frame_step.observe(au.dts);
+        }
 
         // Media ahead of the floor never enters the Bank, which would pace
         // it at 1x. Video goes straight to the decoder, on the channel and
@@ -3343,22 +3414,107 @@ mod tests {
     #[test]
     fn the_floor_is_the_target_only_within_the_bound() {
         let at = MediaTime::from_millis;
-        assert_eq!(presentation_floor(at(3_200), at(2_000)), Some(at(3_200)));
         assert_eq!(
-            presentation_floor(at(14_000), at(2_000)),
+            presentation_floor(at(3_200), at(2_000), None),
+            Some(at(3_200))
+        );
+        assert_eq!(
+            presentation_floor(at(14_000), at(2_000), None),
             Some(at(14_000)),
             "the bound itself is inside it"
         );
         assert_eq!(
-            presentation_floor(at(14_001), at(2_000)),
+            presentation_floor(at(14_001), at(2_000), None),
             None,
             "past the bound the seek presents from its keyframe"
         );
-        assert_eq!(presentation_floor(at(4_000), at(4_000)), None);
+        assert_eq!(presentation_floor(at(4_000), at(4_000), None), None);
         assert_eq!(
-            presentation_floor(at(4_000), at(4_500)),
+            presentation_floor(at(4_000), at(4_500), None),
             None,
             "a demuxer that lands late has nothing ahead of the target to skip"
+        );
+    }
+
+    /// The step is the typical one between consecutive frames, not across a
+    /// seek's jump, and a new video Format forgets the old track's rate.
+    #[test]
+    fn the_frame_step_follows_the_current_track() {
+        let at = MediaTime::from_millis;
+        let mut steps = FrameStep::default();
+        assert_eq!(steps.step(), None);
+        for n in 0..3 {
+            steps.observe(at(n * 1_000));
+        }
+        assert_eq!(steps.step(), Some(at(1_000)), "a 1 fps track");
+        steps.seeked();
+        steps.observe(at(200));
+        assert_eq!(steps.step(), Some(at(1_000)), "a jump back is no step");
+        steps.seeked();
+        steps.observe(at(90_000));
+        assert_eq!(steps.step(), Some(at(1_000)), "nor is a jump forward");
+        steps.new_format();
+        assert_eq!(
+            steps.step(),
+            None,
+            "a replacement track does not inherit the old rate"
+        );
+        steps.observe(at(90_000));
+        steps.observe(MediaTime::from_micros(90_033_333));
+        assert_eq!(steps.step(), Some(MediaTime::from_micros(33_333)));
+    }
+
+    /// One pair of frames close together in a 4 fps track does not set the
+    /// step, and the step follows the track's latest cadence.
+    #[test]
+    fn an_odd_short_step_does_not_set_the_frame_step() {
+        let at = MediaTime::from_millis;
+        let mut steps = FrameStep::default();
+        for n in 0..8 {
+            steps.observe(at(n * 250));
+        }
+        steps.observe(at(7 * 250 + 1));
+        for n in 9..16 {
+            steps.observe(at(n * 250));
+        }
+        assert_eq!(steps.step(), Some(at(250)));
+        for n in 0..=FRAME_STEPS_KEPT as i64 {
+            steps.observe(at(4_000 + n * 40));
+        }
+        assert_eq!(steps.step(), Some(at(40)), "the track changed pace");
+    }
+
+    /// The bound is 720 frames of the track's own rate, so a low-rate file
+    /// decodes forward much further than a 60 fps one, which keeps the
+    /// twelve seconds it always had.
+    #[test]
+    fn the_bound_counts_frames() {
+        let at = MediaTime::from_millis;
+        let eight_fps = Some(at(125));
+        assert_eq!(
+            presentation_floor(at(90_000), at(0), eight_fps),
+            Some(at(90_000)),
+            "720 frames at 8 fps is 90 s"
+        );
+        assert_eq!(presentation_floor(at(90_001), at(0), eight_fps), None);
+        let sixty_fps = Some(MediaTime::from_micros(16_667));
+        assert_eq!(
+            presentation_floor(at(12_000), at(0), sixty_fps),
+            Some(at(12_000))
+        );
+        assert_eq!(
+            presentation_floor(MediaTime::from_micros(12_000_241), at(0), sixty_fps),
+            None,
+            "720 frames at 60 fps is 12.000240 s"
+        );
+        assert_eq!(
+            presentation_floor(at(12_000), at(0), Some(MediaTime::from_micros(1))),
+            Some(at(12_000)),
+            "a tiny step never shrinks the bound below 12 s"
+        );
+        assert_eq!(
+            presentation_floor(at(12_001), at(0), Some(MediaTime::from_micros(1))),
+            None
         );
     }
 
