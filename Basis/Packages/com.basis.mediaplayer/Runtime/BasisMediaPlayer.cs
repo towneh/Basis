@@ -170,6 +170,27 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// moves past the count read when seeking, the position can be from that
     /// seek's timeline rather than the one it left.</summary>
     internal int SeeksActedOn { get; private set; }
+    /// <summary>The targets of the latest seeks the engine acted on, in
+    /// microseconds, indexed by <see cref="SeeksActedOn"/>; -1 where an event
+    /// could not be read.</summary>
+    private readonly long[] _seekAnswersUs = new long[16];
+
+    /// <summary>Whether the engine has acted on a seek to
+    /// <paramref name="targetUs"/>, landed or refused, since
+    /// <see cref="SeeksActedOn"/> read <paramref name="actedOnBefore"/>.
+    /// Only the latest answers are kept; an older one reads as not
+    /// answered.</summary>
+    internal bool SeekAnsweredSince(int actedOnBefore, long targetUs, long withinUs)
+    {
+        int from = System.Math.Max(actedOnBefore, SeeksActedOn - _seekAnswersUs.Length);
+        for (int n = from; n < SeeksActedOn; n++)
+        {
+            long answered = _seekAnswersUs[n % _seekAnswersUs.Length];
+            if (answered >= 0 && System.Math.Abs(answered - targetUs) <= withinUs)
+                return true;
+        }
+        return false;
+    }
     public double PositionSeconds { get; private set; }
     public double DurationSeconds { get; private set; }
     public long BankedMilliseconds { get; private set; }
@@ -1405,7 +1426,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
                 if (events[i].Code == (uint)BmEventCode.Error || events[i].Code == (uint)BmEventCode.CodecRefused)
                     LastErrorMessage = detail;
                 if (events[i].Code == (uint)BmEventCode.Seek && events[i].Stage == (uint)BmStage.Demux)
+                {
+                    _seekAnswersUs[SeeksActedOn % _seekAnswersUs.Length] = ParseSeekTargetUs(detail);
                     SeeksActedOn++;
+                }
                 // WallUs is the session's own monotonic clock, so a line can be
                 // lined up against either diagnostics CSV without hand-aligning.
                 string at = (events[i].WallUs / 1_000_000.0).ToString("F3", CultureInfo.InvariantCulture);
@@ -1417,6 +1441,20 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             // A short batch is the queue's end. A negative is an error code,
             // which ends the loop the same way.
         } while (count == EventDrainBatch && drained < EventDrainPerTick);
+    }
+
+    /// <summary>The target in the engine's seek event ("to 15000000us,
+    /// landed …" or "to 15000000us, refused: …"), or -1.</summary>
+    static long ParseSeekTargetUs(string detail)
+    {
+        const string prefix = "to ";
+        if (!detail.StartsWith(prefix, StringComparison.Ordinal))
+            return -1;
+        int end = detail.IndexOf("us", prefix.Length, StringComparison.Ordinal);
+        return end > prefix.Length
+            && long.TryParse(detail.AsSpan(prefix.Length, end - prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out long us)
+            ? us
+            : -1;
     }
 
     /// <summary>Fetch the container's cover art once the session has opened.

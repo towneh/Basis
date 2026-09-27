@@ -53,10 +53,13 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
     private float _seekPendingPct;
     private bool _drivingSeekSlider;      /* our write, not the user's drag */
     private double _seekAwaitPosS;        /* issued seek target, held until position lands */
+    private long _seekAwaitUs;            /* the same target as the engine is given it */
     private int _seekAwaitActedOn;        /* player's SeeksActedOn when the seek was issued */
+    private bool _seekAwaitAnswered;      /* the engine's answer to it was seen on an earlier refresh */
     private float _seekAwaitUntil = -1f;
     private const float SeekDebounceSeconds = 0.35f;
     private const double SeekLandedWithinSeconds = 0.5;
+    private const long SeekAnswerWithinUs = 1000;
     private const float SeekHoldSeconds = 12f;
     private int _lastPosSec = -1;
     private int _lastDurSec = -1;
@@ -1052,11 +1055,12 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             else _activePlayer.Seek(targetS);
             // Hold the handle at the target until the reported position lands,
             // instead of tweening back to the old playhead and forward again.
-            // The time limit only covers a seek that never lands near its
-            // target (a keyframe further back than the engine decodes forward
-            // from, or a seek event the engine's log dropped).
+            // The time limit only covers a seek event the engine's log
+            // dropped.
             _seekAwaitPosS = targetS;
+            _seekAwaitUs = (long)(targetS * 1_000_000.0);
             _seekAwaitActedOn = _activePlayer.SeeksActedOn;
+            _seekAwaitAnswered = false;
             _seekAwaitUntil = Time.unscaledTime + SeekHoldSeconds;
             return;
         }
@@ -1064,13 +1068,20 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         double posS = _activePlayer.PositionSeconds;
         if (_seekAwaitUntil > 0f)
         {
-            // Landed once the engine has acted on a seek since this one was
-            // issued and the position is at the target, where a seek lands
-            // and holds until its first frame. Before that the position is
-            // the old playhead, or an earlier seek's, and may pass near the
-            // target without the seek having landed.
-            bool landed = _activePlayer.SeeksActedOn != _seekAwaitActedOn
-                && System.Math.Abs(posS - _seekAwaitPosS) <= SeekLandedWithinSeconds;
+            // The engine's seek event names the target it answered, landed or
+            // refused, so neither an earlier seek of a chain nor the old
+            // playhead passing near the target is taken for this seek's
+            // landing. Once answered, the seek has landed when the position
+            // is at the target, or, for a seek refused or landed on a
+            // keyframe it would not decode forward from, when Buffering is
+            // over. That second test needs the answer from an earlier
+            // refresh, so a state read before the event was drained does not
+            // count.
+            bool answered = _activePlayer.SeekAnsweredSince(_seekAwaitActedOn, _seekAwaitUs, SeekAnswerWithinUs);
+            bool landed = answered
+                && (System.Math.Abs(posS - _seekAwaitPosS) <= SeekLandedWithinSeconds
+                    || (_seekAwaitAnswered && _activePlayer.State != BmState.Buffering));
+            _seekAwaitAnswered = answered;
             if (!landed && Time.unscaledTime < _seekAwaitUntil)
             {
                 posS = _seekAwaitPosS;
