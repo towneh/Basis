@@ -1,7 +1,7 @@
 //! The gated release (per-track routing): a blocked track's events are
 //! skipped in place (order intact, Eos a barrier) while the other track
 //! keeps releasing, and the release cursor stays with the laggard so
-//! banked()/lag read exactly as an ungated release would.
+//! banked() reads exactly as an ungated release would.
 
 use media_bank::{Bank, BankConfig, BufferDepth, Liveness, PushOutcome};
 use media_clock::{Generation, MediaTime};

@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use media_clock::{Generation, MediaTime};
-use media_demux::StreamEvent;
+use media_demux::{StreamEvent, TrackId};
 
 pub use auto::AutoConfig;
 use auto::AutoDepth;
@@ -213,6 +213,47 @@ struct QueuedEvent {
     internal_dts: Option<MediaTime>,
 }
 
+/// One track's span this generation, internal timeline. Live tracks can
+/// sit apart at arrival (a relay may open a join with a cached keyframe
+/// stamped seconds before the live frames after it), so how far behind the
+/// edge release sits is read from the lead track: the one stamped furthest
+/// behind, which sets the pace by releasing as it arrives. A track stamped
+/// ahead of the lead waits on the schedule for it.
+#[derive(Debug, Clone, Copy)]
+struct TrackSpan {
+    track: TrackId,
+    first: MediaTime,
+    newest: MediaTime,
+    released: Option<MediaTime>,
+    /// Wall time of the newest arrival.
+    arrived_at: MediaTime,
+}
+
+impl TrackSpan {
+    fn banked(&self) -> MediaTime {
+        (self.newest - self.released.unwrap_or(self.first)).max(MediaTime::ZERO)
+    }
+
+    fn pending(&self) -> bool {
+        self.released.is_none_or(|released| released < self.newest)
+    }
+}
+
+/// A track that has delivered nothing for this long, while another has,
+/// no longer decides the lead: a track that stops must not hold lag and
+/// decay at its own drained span.
+const TRACK_QUIET: MediaTime = MediaTime::from_secs(1);
+
+/// The track an event keeps its place in. Metadata and captions have no
+/// consumer past the Bank and keep none.
+fn track_of(event: &StreamEvent) -> Option<TrackId> {
+    match event {
+        StreamEvent::Au(au) => Some(au.track),
+        StreamEvent::Format(track, _) | StreamEvent::Discontinuity(track, _) => Some(*track),
+        StreamEvent::Metadata(_) | StreamEvent::Caption(_) | StreamEvent::Eos(_) => None,
+    }
+}
+
 #[derive(Debug)]
 pub struct Bank {
     cfg: BankConfig,
@@ -235,12 +276,13 @@ pub struct Bank {
     splice_offset: MediaTime,
     /// A discontinuity arrived; the next AU re-bases the splice offset.
     splice_pending: bool,
+    tracks: Vec<TrackSpan>,
 
     /// Wall origin of the release schedule: an AU at internal position `rel`
     /// is due at `anchor + rel`.
     anchor: Option<MediaTime>,
-    /// The schedule's offset behind the live edge. Tracks `banked()`
-    /// upwards after the anchor and is what decay returns; see
+    /// The schedule's offset behind the live edge. Tracks the lead track's
+    /// banked span upwards after the anchor and is what decay returns; see
     /// [`Bank::set_downstream_parked`] for why decay is not always free
     /// to run.
     lag: MediaTime,
@@ -304,6 +346,7 @@ impl Bank {
             release_dts: None,
             splice_offset: MediaTime::ZERO,
             splice_pending: false,
+            tracks: Vec::new(),
             anchor: None,
             lag: MediaTime::ZERO,
             hold: Hold::Filling { since: None },
@@ -348,7 +391,7 @@ impl Bank {
 
     /// Media banked ahead of the release point, internal timeline.
     fn banked(&self) -> MediaTime {
-        match (self.newest_dts, self.release_dts.or(self.base_dts)) {
+        match (self.newest_dts, self.release_cursor()) {
             (Some(newest), Some(cursor)) => (newest - cursor).max(MediaTime::ZERO),
             _ => MediaTime::ZERO,
         }
@@ -361,6 +404,60 @@ impl Bank {
         match (self.newest_dts, self.base_dts) {
             (Some(newest), Some(base)) => (newest - base).max(MediaTime::ZERO),
             _ => MediaTime::ZERO,
+        }
+    }
+
+    /// The lead track (see [`TrackSpan`]): the lowest newest stamp among
+    /// tracks still arriving. What a track stamped ahead of it holds is
+    /// the gap between the tracks, not distance from the live edge. `None`
+    /// on VOD.
+    fn lead_span(&self) -> Option<&TrackSpan> {
+        if self.cfg.liveness != Liveness::Live {
+            return None;
+        }
+        let latest = self.tracks.iter().map(|span| span.arrived_at).max()?;
+        self.tracks
+            .iter()
+            .filter(|span| latest - span.arrived_at < TRACK_QUIET)
+            .min_by_key(|span| span.newest)
+    }
+
+    /// Where release stands for the whole queue: the head's cursor, or on
+    /// a live source the earliest unreleased point of any track with media
+    /// still queued (tracks release independently there, so the head's
+    /// cursor can follow a track stamped ahead of the rest).
+    fn release_cursor(&self) -> Option<MediaTime> {
+        if self.cfg.liveness == Liveness::Live && !self.tracks.is_empty() {
+            return self
+                .tracks
+                .iter()
+                .filter(|span| span.pending())
+                .map(|span| span.released.unwrap_or(span.first))
+                .min()
+                .or(self.newest_dts);
+        }
+        self.release_dts.or(self.base_dts)
+    }
+
+    /// What lag and decay read: the lead track's banked span on a live
+    /// source, the whole queue's otherwise.
+    fn lead_banked(&self) -> MediaTime {
+        self.lead_span()
+            .map_or_else(|| self.banked(), TrackSpan::banked)
+    }
+
+    /// When an AU at `internal` falls due, where the hold state gives each
+    /// AU its own time: a priming join (filling or primed) and a released
+    /// schedule. `None` while a strict startup hold decides from the head.
+    fn au_due(&self, internal: MediaTime) -> Option<MediaTime> {
+        let base = self.base_dts?;
+        match self.hold {
+            Hold::Filling { since: Some(since) } if self.priming() => {
+                Some(self.priming_line_due(since, internal - base))
+            }
+            Hold::Filling { .. } => None,
+            Hold::Primed { since } => Some(self.priming_line_due(since, internal - base)),
+            Hold::Released => Some(self.anchor? + (internal - base) - self.pace_lead()),
         }
     }
 
@@ -433,6 +530,7 @@ impl Bank {
         self.release_dts = None;
         self.splice_offset = MediaTime::ZERO;
         self.splice_pending = false;
+        self.tracks.clear();
         self.anchor = None;
         self.lag = MediaTime::ZERO;
         self.hold = Hold::Filling { since: None };
@@ -473,7 +571,7 @@ impl Bank {
         } else {
             au.dts + self.splice_offset
         };
-        if let Some(cursor) = self.release_dts.or(self.base_dts) {
+        if let Some(cursor) = self.release_cursor() {
             let span = internal - cursor;
             if span > self.cfg.time_cap {
                 return PushOutcome::Full(event);
@@ -494,6 +592,19 @@ impl Bank {
             self.base_dts = Some(internal);
         }
         self.newest_dts = Some(self.newest_dts.map_or(internal, |n| n.max(internal)));
+        match self.tracks.iter_mut().find(|span| span.track == au.track) {
+            Some(span) => {
+                span.newest = span.newest.max(internal);
+                span.arrived_at = wall;
+            }
+            None => self.tracks.push(TrackSpan {
+                track: au.track,
+                first: internal,
+                newest: internal,
+                released: None,
+                arrived_at: wall,
+            }),
+        }
         if let Hold::Filling { since: None } = self.hold {
             self.hold = Hold::Filling { since: Some(wall) };
         }
@@ -528,15 +639,15 @@ impl Bank {
             // anchor shift. That happens at the join: the anchor is fixed
             // part-way through the source's opening burst and the rest of
             // the burst lands behind it. `lag` is the schedule's distance
-            // from the edge, so it follows `banked()` upwards, less the
-            // cushion. Within the cushion a high `banked()` is arrival
-            // jitter (the same dead zone the debt bound keeps the other
-            // way), and tracking it would let each early burst ratchet the
-            // schedule earlier until arrivals read late. Downwards `lag` is
-            // left alone: a delivery stall drains `banked()` while the
-            // schedule stays put, and the estimator needs `lag` to hold so
-            // the stall reads as a delay.
-            let surplus = (self.banked() - self.cfg.decoder_cushion).max(MediaTime::ZERO);
+            // from the edge, so it follows the lead track's banked span
+            // upwards, less the cushion. Within the cushion a high banked
+            // span is arrival jitter (the same dead zone the debt bound
+            // keeps the other way), and tracking it would let each early
+            // burst ratchet the schedule earlier until arrivals read late.
+            // Downwards `lag` is left alone: a delivery stall drains the
+            // bank while the schedule stays put, and the estimator needs
+            // `lag` to hold so the stall reads as a delay.
+            let surplus = (self.lead_banked() - self.cfg.decoder_cushion).max(MediaTime::ZERO);
             self.lag = self.lag.max(surplus).min(self.cfg.lag_cap);
         }
 
@@ -580,9 +691,9 @@ impl Bank {
     }
 
     /// [`Bank::next_due`] under a release gate: the deadline for the first
-    /// event the gate admits. `None` means "wait for a push or an
-    /// unblock": an Eos barrier behind skipped events has no wall
-    /// deadline of its own.
+    /// event the gate admits, or on a live source the soonest of each
+    /// track's first. `None` means "wait for a push or an unblock": an Eos
+    /// barrier behind skipped events has no wall deadline of its own.
     pub fn next_due_gated(
         &mut self,
         wall: MediaTime,
@@ -590,21 +701,36 @@ impl Bank {
     ) -> Option<MediaTime> {
         self.tick(wall);
         self.advance_hold(wall);
-        let mut index = 0;
-        let head = loop {
-            let entry = self.queue.get(index)?;
-            if blocked(&entry.event) {
-                index += 1;
+        let per_track = self.cfg.liveness == Liveness::Live;
+        let mut waiting: Vec<TrackId> = Vec::new();
+        let mut soonest: Option<MediaTime> = None;
+        for (index, entry) in self.queue.iter().enumerate() {
+            let track = track_of(&entry.event);
+            if blocked(&entry.event) || track.is_some_and(|track| waiting.contains(&track)) {
                 continue;
             }
             if matches!(entry.event, StreamEvent::Eos(_)) && index > 0 {
-                return None;
+                break;
             }
-            break entry;
-        };
-        let Some(internal) = head.internal_dts else {
-            return Some(wall);
-        };
+            let Some(internal) = entry.internal_dts else {
+                return Some(wall);
+            };
+            let due = self.head_due(wall, internal);
+            if !per_track || self.au_due(internal).is_none() {
+                return due;
+            }
+            soonest = match (soonest, due) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            waiting.extend(track);
+        }
+        soonest
+    }
+
+    /// When the AU at `internal` becomes releasable under the hold state,
+    /// as a wall deadline.
+    fn head_due(&self, wall: MediaTime, internal: MediaTime) -> Option<MediaTime> {
         match self.hold {
             Hold::Filling { since } => {
                 let since = since?;
@@ -646,9 +772,11 @@ impl Bank {
     /// Only whole tracks may be blocked (the gate sees every event), which
     /// keeps per-track order exact. Eos is a barrier: it never overtakes a
     /// skipped event, so a blocked track's AUs reach their decoder before
-    /// its drain begins. The release cursor advances only on head pops, so
-    /// while a blocked track parks at the head, `banked()`, the caps and
-    /// decay all measure from the laggard.
+    /// its drain begins. On a live source a track whose next AU is not yet
+    /// due is skipped the same way, so a track stamped ahead of the others
+    /// waits on the schedule without holding them. The caps measure from
+    /// the laggard; lag and decay from the lead track (see
+    /// [`TrackSpan`]).
     pub fn pop_due_gated(
         &mut self,
         wall: MediaTime,
@@ -656,10 +784,13 @@ impl Bank {
     ) -> Option<StreamEvent> {
         self.tick(wall);
         self.advance_hold(wall);
+        let per_track = self.cfg.liveness == Liveness::Live;
+        let mut waiting: Vec<TrackId> = Vec::new();
         let mut index = 0;
         let internal = loop {
             let entry = self.queue.get(index)?;
-            if blocked(&entry.event) {
+            let track = track_of(&entry.event);
+            if blocked(&entry.event) || track.is_some_and(|track| waiting.contains(&track)) {
                 index += 1;
                 continue;
             }
@@ -674,6 +805,14 @@ impl Bank {
                 self.pop_non_au_bytes(&entry.event);
                 return Some(entry.event);
             };
+            if per_track
+                && let Some(due) = self.au_due(internal)
+                && wall < due
+            {
+                waiting.extend(track);
+                index += 1;
+                continue;
+            }
             break internal;
         };
 
@@ -709,7 +848,7 @@ impl Bank {
                     self.anchor = Some(
                         wall - (internal - self.base_dts.expect("anchored with base")) - burst,
                     );
-                    self.lag = self.banked();
+                    self.lag = self.lead_banked();
                 }
             }
             Hold::Primed { since } => {
@@ -735,6 +874,9 @@ impl Bank {
             self.queued_bytes -= au.data.len();
             if index == 0 {
                 self.release_dts = Some(self.release_dts.map_or(internal, |r| r.max(internal)));
+            }
+            if let Some(span) = self.tracks.iter_mut().find(|span| span.track == au.track) {
+                span.released = Some(span.released.map_or(internal, |r| r.max(internal)));
             }
             self.released_aus += 1;
         }
@@ -764,11 +906,20 @@ impl Bank {
             return;
         };
         self.hold = Hold::Released;
-        let sched_now = self.released_span();
+        // On a live source the lead track's release carries on at 1x; a
+        // track stamped ahead of it releases later on the same schedule.
+        // The lead may be stamped before the origin (the first AU pushed),
+        // so its position can be negative.
+        let sched_now = match (self.lead_span(), self.base_dts) {
+            (Some(span), Some(base)) => span.released.unwrap_or(span.first) - base,
+            _ => self.released_span(),
+        };
         self.anchor = Some(wall - sched_now);
-        self.lag = (self.arrived() - sched_now)
-            .max(MediaTime::ZERO)
-            .min(self.cfg.lag_cap);
+        self.lag = match self.lead_span() {
+            Some(span) => span.banked(),
+            None => (self.arrived() - sched_now).max(MediaTime::ZERO),
+        }
+        .min(self.cfg.lag_cap);
     }
 
     /// The release thread's report of downstream appetite: `true` while a
@@ -812,11 +963,12 @@ impl Bank {
         let Some(last) = last else { return };
         let dt = (wall - last).max(MediaTime::ZERO);
         let target = self.target_lag();
-        if self.lag > target && self.banked() > target {
+        let banked = self.lead_banked();
+        if self.lag > target && banked > target {
             let step = dt
                 .scale_ppm(self.cfg.decay_rate_ppm)
                 .min(self.lag - target)
-                .min((self.banked() - target).max(MediaTime::ZERO));
+                .min((banked - target).max(MediaTime::ZERO));
             if step > MediaTime::ZERO
                 && let Some(anchor) = self.anchor
             {
