@@ -2244,8 +2244,7 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                     // Anchor at the audible position: the master playhead
                     // reads sink latency behind the pull, so starting the
                     // clock that far back puts the standing error at zero
-                    // instead of leaving it to converge by slew. 0 on
-                    // desktop.
+                    // instead of leaving it to converge by slew.
                     let latency = MediaTime::from_micros(
                         px.audio_shared.output_latency_us.load(Ordering::Relaxed),
                     );

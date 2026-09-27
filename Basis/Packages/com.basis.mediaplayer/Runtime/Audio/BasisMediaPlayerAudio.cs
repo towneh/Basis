@@ -93,12 +93,9 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
     /// pulled from the ring and leaving the speaker. The tap delivers audio per
     /// DSP block, so it is ~the DSP output buffer plus a block of headroom.
     ///
-    /// Exposed on every platform for the diagnostics surfaces; only the Android
-    /// path reports it to the engine, because the desktop offset measures
-    /// inside the sync noise floor.
-    ///
     /// Cached because it's read per frame: the figure only changes with the DSP
-    /// configuration, which triggers an output rebuild that recomputes it.
+    /// configuration, and is recomputed on an output rebuild or when Unity
+    /// reports a new audio configuration.
     /// </summary>
     public long EstimatedOutputLatencyUs => estimatedOutputLatencyUs > 0 ? estimatedOutputLatencyUs : RecomputeOutputLatencyUs();
     private long estimatedOutputLatencyUs;
@@ -283,12 +280,17 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
 
     private void OnEnable()
     {
+        RecomputeOutputLatencyUs();
         if (AutoPlayOnEnable) PlayAll();
         if (TryGetComponent(out tickOwner)) tickOwner.AddTickConsumer(this);
+        AudioSettings.OnAudioConfigurationChanged += OnAudioConfigurationChanged;
     }
+
+    private void OnAudioConfigurationChanged(bool deviceWasChanged) => RecomputeOutputLatencyUs();
 
     private void OnDisable()
     {
+        AudioSettings.OnAudioConfigurationChanged -= OnAudioConfigurationChanged;
         if (tickOwner != null)
         {
             tickOwner.RemoveTickConsumer(this);

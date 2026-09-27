@@ -128,8 +128,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
 #if UNITY_ANDROID && !UNITY_EDITOR
     bool _renderHooked;
     int _lastRenderEventFrame = -1;
-    long _sentAudioLatencyUs = -1;
 #endif
+    long _sentAudioLatencyUs = -1;
     // Ordered by TickStage on insert, so the tick runs them in the order they
     // read each other rather than in registration order.
     readonly System.Collections.Generic.List<IBasisMediaTickConsumer> _consumers = new();
@@ -962,9 +962,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         // after the player still gets sound.
         if (_audio == null) TryGetComponent(out _audio);
         if (_audio != null) _audio.NativePcmSource = this;
-#if UNITY_ANDROID && !UNITY_EDITOR
         _sentAudioLatencyUs = -1;
-#endif
         _commandBuffer ??= new CommandBuffer { name = "BasisMedia present" };
     }
 
@@ -1265,20 +1263,21 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         if (_audio != null && snapshot.AudioSampleRate > 0 && snapshot.AudioChannels > 0)
             _audio.SetExpectedFormat((int)snapshot.AudioSampleRate, (int)snapshot.AudioChannels);
 
-#if UNITY_ANDROID && !UNITY_EDITOR
         // A/V output-latency compensation: the engine masters the clock
         // on the pull playhead, but audible audio leaves the speaker one
         // DSP output chain later. Report the sink's estimate so video
-        // paces to the audible position. Android only: the desktop
-        // offset is inside the sync noise floor. With no sink there is no
-        // audio master to compensate.
-        long latencyUs = _audio != null ? _audio.EstimatedOutputLatencyUs : 0;
+        // paces to the audible position. With no sink or no audio track
+        // there is no audio master to compensate.
+        long latencyUs = _audio != null
+            && snapshot.AudioSampleRate > 0
+            && snapshot.AudioChannels > 0
+            ? _audio.EstimatedOutputLatencyUs
+            : 0;
         if (latencyUs != _sentAudioLatencyUs)
         {
             BasisMediaNative.bm_session_set_audio_latency(_handle, latencyUs);
             _sentAudioLatencyUs = latencyUs;
         }
-#endif
 
         DrainEvents();
         ReportDroppedEvents(snapshot.EventsDropped);
