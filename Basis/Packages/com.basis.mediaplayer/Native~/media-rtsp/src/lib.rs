@@ -11,10 +11,14 @@
 //!
 //! A/V alignment: RTP timestamps are per-stream, so cross-stream offsets
 //! come from RTCP sender reports (NTP ↔ RTP mappings). Frames buffer
-//! briefly at start until every stream has a sender report (or a bounded
-//! wait expires, falling back to join-skew alignment), then flow with
-//! aligned timestamps. The Bank's startup hold is filling during that
-//! window anyway, so the join pays nothing extra.
+//! briefly at start until every stream has a sender report or a bounded
+//! wait expires, then flow with aligned timestamps. The Bank's startup
+//! hold is filling during that window anyway, so the join pays nothing
+//! extra. Without reports, each stream counts from the PLAY response's
+//! RTP-Info `rtptime` where the server gave one for every stream and it
+//! agrees with the first frames, and from its first frame otherwise.
+//! Reports that arrive later move the video onto them once; the audio
+//! keeps its timeline.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -25,6 +29,7 @@ use media_clock::{Generation, MediaTime};
 use media_demux::{
     Au, AudioCodec, DemuxError, Demuxer, EosReason, Format, StreamEvent, TrackId, VideoCodec,
 };
+use media_diag::diag_log;
 use media_rtp::{ntp_at_zero, units_to_us};
 use retina::client::{PlayOptions, SessionOptions, SetupOptions, Transport};
 use retina::codec::{CodecItem, FrameFormat, ParameterSetInsertion, ParametersRef, aac, h26x};
@@ -42,6 +47,16 @@ pub const CHANNEL_DEPTH: usize = 512;
 /// How long the aligner waits for sender reports before falling back to
 /// join-skew alignment.
 pub const ALIGN_WAIT: Duration = Duration::from_secs(2);
+/// Widest spread between the streams' first frames that the PLAY
+/// response's `rtptime` may put them at and still be believed, when no
+/// sender report has arrived. A live join delivers both streams' first
+/// frames within about a frame of the same moment; some servers' start
+/// times drift seconds from the streams they describe.
+pub const RTPTIME_AGREEMENT: Duration = Duration::from_millis(250);
+/// Largest correction applied when sender reports arrive after the start.
+/// Past it the reports disagree with the stream by more than any join
+/// skew, and the start's alignment is kept.
+pub const REALIGN_MAX: Duration = Duration::from_secs(3);
 /// No frames for this long is a dead session (the transport-loss class;
 /// the engine's reconnect path takes it from there).
 const FEED_STALL: Duration = Duration::from_secs(10);
@@ -358,6 +373,85 @@ pub fn frame_format() -> FrameFormat {
     }
 }
 
+/// How far apart the set-up streams' first buffered frames sit on their
+/// timelines; `None` until every stream has one. Streams counted from
+/// their first packets read zero; streams counted from the PLAY
+/// response's `rtptime` read how far that start is from the frames.
+fn start_spread(buffered: &VecDeque<PendingFrame>, needed: &[usize]) -> Option<i64> {
+    let mut firsts = Vec::with_capacity(needed.len());
+    for &index in needed {
+        firsts.push(buffered.iter().find(|f| f.stream_id == index)?.elapsed_us);
+    }
+    Some(firsts.iter().max()? - firsts.iter().min()?)
+}
+
+/// Every set-up stream has a sender report.
+pub fn reports_complete(align: &[StreamAlign; MAX_STREAMS], needed: &[usize]) -> bool {
+    needed.iter().all(|&i| align[i].ntp_at_zero.is_some())
+}
+
+/// What [`realign_video`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Realign {
+    /// The video offset moved by this many microseconds.
+    Moved(i64),
+    /// The reports asked for this many microseconds, past [`REALIGN_MAX`].
+    Refused(i64),
+    /// Already aligned, or a stream has no report.
+    Unchanged,
+}
+
+/// Align video to audio from sender reports that arrived after frames
+/// were already flowing. Audio keeps its timeline, since downstream it is
+/// the clock master and never gives way; the video offset takes the whole
+/// correction, which the picture shows as one hold or skip.
+pub fn realign_video(
+    align: &mut [StreamAlign; MAX_STREAMS],
+    video: usize,
+    audio: usize,
+) -> Realign {
+    let (Some(video_zero), Some(audio_zero)) = (align[video].ntp_at_zero, align[audio].ntp_at_zero)
+    else {
+        return Realign::Unchanged;
+    };
+    let wanted = if video_zero >= audio_zero {
+        ntp_delta_us(video_zero - audio_zero)
+    } else {
+        -ntp_delta_us(audio_zero - video_zero)
+    };
+    let step = wanted - (align[video].offset_us - align[audio].offset_us);
+    if step == 0 {
+        return Realign::Unchanged;
+    }
+    if step.unsigned_abs() > REALIGN_MAX.as_micros() as u64 {
+        return Realign::Refused(step);
+    }
+    align[video].offset_us += step;
+    Realign::Moved(step)
+}
+
+/// Apply late sender reports once all are in, and say what changed.
+pub(crate) fn realign_late(
+    align: &mut [StreamAlign; MAX_STREAMS],
+    video: Option<usize>,
+    audio: Option<usize>,
+) {
+    let (Some(video), Some(audio)) = (video, audio) else {
+        return;
+    };
+    match realign_video(align, video, audio) {
+        Realign::Moved(step) => diag_log!(
+            "rtsp: sender reports arrived after the start; video moved {:.1} ms to match audio",
+            step as f64 / 1000.0
+        ),
+        Realign::Refused(step) => diag_log!(
+            "rtsp: sender reports arrived after the start asking video to move {:.1} ms; kept the start's alignment",
+            step as f64 / 1000.0
+        ),
+        Realign::Unchanged => {}
+    }
+}
+
 pub fn ntp_delta_us(ntp: u64) -> i64 {
     // 32.32 fixed → microseconds. Relative use only; the epoch cancels.
     let secs = (ntp >> 32) as i64;
@@ -443,6 +537,9 @@ async fn run_session(
     let mut align = [StreamAlign::default(); MAX_STREAMS];
     let mut buffered: VecDeque<PendingFrame> = VecDeque::new();
     let mut aligning = true;
+    // Cleared once alignment comes from sender reports. Until then a
+    // report arriving after the start realigns video once all are in.
+    let mut late_reports = true;
     let align_deadline = tokio::time::Instant::now() + ALIGN_WAIT;
 
     loop {
@@ -527,9 +624,14 @@ async fn run_session(
                         }
                     }
                 }
-                if aligning && needed.iter().all(|&i| align[i].ntp_at_zero.is_some()) {
-                    flush_aligned(&mut buffered, &mut align, &needed, generation, tx).await?;
-                    aligning = false;
+                if reports_complete(&align, &needed) && late_reports {
+                    late_reports = false;
+                    if aligning {
+                        flush_aligned(&mut buffered, &mut align, &needed, generation, tx).await?;
+                        aligning = false;
+                    } else {
+                        realign_late(&mut align, video_index, audio_index);
+                    }
                 }
             }
             _ => {}
@@ -577,6 +679,21 @@ pub async fn flush_aligned(
         for &(index, ntp) in &ntp_zeroes {
             align[index].offset_us = ntp_delta_us(ntp.wrapping_sub(min_ntp));
         }
+    } else if let Some(spread) = start_spread(buffered, needed)
+        && spread > RTPTIME_AGREEMENT.as_micros() as i64
+    {
+        // The start times the server gave put the streams' first frames
+        // further apart than a live join delivers them. Count each stream
+        // from its first frame instead.
+        for &index in needed {
+            if let Some(first) = buffered.iter().find(|f| f.stream_id == index) {
+                align[index].offset_us = -first.elapsed_us;
+            }
+        }
+        diag_log!(
+            "rtsp: the server's start times put the streams {} ms apart; counting each from its first frame",
+            spread / 1000
+        );
     }
     for frame in std::mem::take(buffered) {
         emit_aligned(frame, align, generation, tx).await?;

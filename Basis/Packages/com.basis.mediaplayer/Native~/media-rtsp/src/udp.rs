@@ -27,7 +27,7 @@ use tokio::task::JoinSet;
 
 use crate::{
     ALIGN_WAIT, CHANNEL_DEPTH, MAX_STREAMS, PendingFrame, StreamAlign, emit, flush_aligned,
-    format_from, frame_format, select_streams, send_event,
+    format_from, frame_format, realign_late, reports_complete, select_streams, send_event,
 };
 
 /// Peer-address policy for UDP targets, backed by the engine's one
@@ -41,9 +41,15 @@ pub(crate) struct UdpStream {
     rtcp: Arc<UdpSocket>,
     receiver: RtpReceiver,
     depacketizer: Depacketizer,
-    /// First delivered packet's unwrapped RTP timestamp; every later
-    /// timestamp is rebased so stream elapsed starts at zero.
+    /// The PLAY response's `rtptime` for this stream, when the server gave
+    /// one for every stream.
+    play_rtptime: Option<u32>,
+    /// Unwrapped RTP timestamp at which stream elapsed is zero, latched at
+    /// the first delivered packet: `play_rtptime` where it is usable (see
+    /// [`rtptime_zero`]), otherwise that packet's own timestamp.
     ts_start: Option<i64>,
+    /// `ts_start` is the first delivered packet rather than `rtptime`.
+    zero_is_first_packet: bool,
     announced: bool,
     /// Packets the depacketizer would not take. Loss is expected on this
     /// lane; a count that only ever goes up is a stream nothing can
@@ -116,6 +122,7 @@ pub(crate) async fn setup_udp_session(
             .ok_or("stream cannot be depacketized")?;
         let clock_rate = NonZeroU32::new(session.streams()[index].clock_rate_hz())
             .ok_or("stream advertises a zero clock rate")?;
+        let play_rtptime = session.initial_rtptime(index);
         streams.push(UdpStream {
             index,
             clock_rate,
@@ -127,7 +134,9 @@ pub(crate) async fn setup_udp_session(
                 "basis-media",
             )),
             depacketizer,
+            play_rtptime,
             ts_start: None,
+            zero_is_first_packet: false,
             announced: false,
             refused: 0,
         });
@@ -209,6 +218,8 @@ pub(crate) async fn run_udp_session(
     let mut align = [StreamAlign::default(); MAX_STREAMS];
     let mut buffered: VecDeque<PendingFrame> = VecDeque::new();
     let mut aligning = true;
+    // As in the TCP loop: realign video once late reports are all in.
+    let mut late_reports = true;
     let align_deadline = tokio::time::Instant::now() + ALIGN_WAIT;
 
     loop {
@@ -262,12 +273,15 @@ pub(crate) async fn run_udp_session(
                                 return Ok(());
                             }
                             update_alignment(stream, &mut align);
-                            if aligning
-                                && needed.iter().all(|&i| align[i].ntp_at_zero.is_some())
-                            {
-                                flush_aligned(&mut buffered, &mut align, &needed, generation, tx)
-                                    .await?;
-                                aligning = false;
+                            if reports_complete(&align, &needed) && late_reports {
+                                late_reports = false;
+                                if aligning {
+                                    flush_aligned(&mut buffered, &mut align, &needed, generation, tx)
+                                        .await?;
+                                    aligning = false;
+                                } else {
+                                    realign_late(&mut align, video_index, audio_index);
+                                }
                             }
                         } else {
                             let _ = stream.receiver.on_rtp(now, &data);
@@ -310,6 +324,21 @@ pub(crate) async fn run_udp_session(
     }
 }
 
+/// Furthest a PLAY `rtptime` may sit from the stream's first packet and
+/// still be taken as its zero. A server's `rtptime` marks the start of
+/// the play range, which a live join delivers within a GOP or so; one
+/// further out is junk that would put the stream hours from the other.
+const RTPTIME_MAX_DISTANCE_SECS: i64 = 10;
+
+/// The stream's zero on the receiver's unwrapped timeline from the PLAY
+/// response's `rtptime`: the wrap of it nearest the first packet. `None`
+/// when there is no `rtptime` or it is too far from the stream to trust.
+fn rtptime_zero(first: i64, rtptime: Option<u32>, clock_rate: NonZeroU32) -> Option<i64> {
+    let distance = i64::from(rtptime?.wrapping_sub(first as u32) as i32);
+    (distance.abs() <= RTPTIME_MAX_DISTANCE_SECS * i64::from(clock_rate.get()))
+        .then_some(first + distance)
+}
+
 /// Release everything the reorder buffer will give up at `now` and feed
 /// it through the depacketizer into the emit path.
 async fn drain_stream(
@@ -322,10 +351,17 @@ async fn drain_stream(
     tx: &mpsc::Sender<Result<StreamEvent, String>>,
 ) -> Result<(), String> {
     while let Some(packet) = stream.receiver.poll_packet(now) {
-        let start = *stream.ts_start.get_or_insert(packet.timestamp);
+        let start = match stream.ts_start {
+            Some(start) => start,
+            None => {
+                let zero = rtptime_zero(packet.timestamp, stream.play_rtptime, stream.clock_rate);
+                stream.zero_is_first_packet = zero.is_none();
+                *stream.ts_start.insert(zero.unwrap_or(packet.timestamp))
+            }
+        };
         // Pre-join edge: a reordered predecessor of the first delivered
-        // packet has nowhere to go on a zero-based timeline.
-        if packet.timestamp < start {
+        // packet has nowhere to go on a timeline zeroed at that packet.
+        if stream.zero_is_first_packet && packet.timestamp < start {
             continue;
         }
         let Some(timestamp) =
@@ -481,7 +517,9 @@ mod tests {
                 rtcp: bind().await,
                 receiver: RtpReceiver::new(ReceiverConfig::new(90_000, 1, "basis-media")),
                 depacketizer,
+                play_rtptime: None,
                 ts_start: None,
+                zero_is_first_packet: false,
                 announced: false,
                 refused: 0,
             };
@@ -536,5 +574,118 @@ mod tests {
                 "nothing was refused, so the drain never covered the push that panicked"
             );
         });
+    }
+
+    async fn aac_stream(play_rtptime: Option<u32>) -> UdpStream {
+        const PARAMS: &str = "streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;\
+                              indexlength=3;indexdeltalength=3;config=1188";
+        let mut depacketizer =
+            Depacketizer::new("audio", "mpeg4-generic", 48_000, None, Some(PARAMS))
+                .expect("aac depacketizer");
+        depacketizer.set_frame_format(frame_format());
+        let bind = || async {
+            Arc::new(
+                UdpSocket::bind("127.0.0.1:0")
+                    .await
+                    .expect("loopback socket"),
+            )
+        };
+        UdpStream {
+            index: 1,
+            clock_rate: NonZeroU32::new(48_000).unwrap(),
+            rtp: bind().await,
+            rtcp: bind().await,
+            receiver: RtpReceiver::new(ReceiverConfig::new(48_000, 1, "basis-media")),
+            depacketizer,
+            play_rtptime,
+            ts_start: None,
+            zero_is_first_packet: false,
+            announced: true,
+            refused: 0,
+        }
+    }
+
+    /// One marked AAC-hbr datagram carrying a single access unit.
+    fn aac_datagram(seq: u16, timestamp: u32) -> Vec<u8> {
+        let mut out = vec![0x80, 0x80 | 97];
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.extend_from_slice(&timestamp.to_be_bytes());
+        out.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+        out.extend_from_slice(&[0x00, 0x10, 0x00, 0x20, 1, 2, 3, 4]);
+        out
+    }
+
+    /// Feed the datagrams, drain past the reorder window, and return each
+    /// buffered frame's elapsed microseconds.
+    fn elapsed_of(play_rtptime: Option<u32>, datagrams: &[(u16, u32)]) -> Vec<i64> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut stream = aac_stream(play_rtptime).await;
+            let fed_at = MediaTime::from_millis(0);
+            for &(seq, timestamp) in datagrams {
+                stream
+                    .receiver
+                    .on_rtp(fed_at, &aac_datagram(seq, timestamp))
+                    .expect("datagram accepted");
+            }
+            let now = fed_at
+                + ReceiverConfig::new(48_000, 1, "basis-media").reorder_wait
+                + MediaTime::from_millis(1);
+            let (tx, _rx) = mpsc::channel(16);
+            let mut buffered = VecDeque::new();
+            let align = [StreamAlign::default(); MAX_STREAMS];
+            drain_stream(
+                &mut stream,
+                now,
+                true,
+                &mut buffered,
+                &align,
+                Generation::default(),
+                &tx,
+            )
+            .await
+            .expect("drain");
+            buffered.iter().map(|f| f.elapsed_us).collect()
+        })
+    }
+
+    /// With the PLAY response's `rtptime`, a stream's elapsed time counts
+    /// from it, not from whichever packet happened to arrive first, so two
+    /// streams joined at different points of their GOPs stay aligned.
+    #[test]
+    fn a_stream_counts_from_the_play_rtptime() {
+        // First packet 480 ticks (10 ms at 48 kHz) after rtptime.
+        assert_eq!(
+            elapsed_of(Some(100_000), &[(7, 100_480), (8, 101_504)]),
+            [10_000, 31_333]
+        );
+        // And 480 ticks before it: elapsed runs negative, as over TCP.
+        assert_eq!(elapsed_of(Some(100_480), &[(7, 100_000)]), [-10_000]);
+        // Without one, the first packet is zero.
+        assert_eq!(elapsed_of(None, &[(7, 100_480), (8, 101_504)]), [0, 21_333]);
+    }
+
+    /// `rtptime` is taken at the wrap nearest the first packet, and one
+    /// more than 10 s from it is junk: the first packet is zero instead.
+    #[test]
+    fn the_rtptime_zero_is_bounded_and_wraps() {
+        let rate = NonZeroU32::new(90_000).unwrap();
+        let first = i64::from(u32::MAX) + 1 + 1_000;
+        assert_eq!(
+            rtptime_zero(first, Some(u32::MAX - 999), rate),
+            Some(first - 2_000),
+            "rtptime just before the wrap belongs to the first packet's cycle's predecessor"
+        );
+        assert_eq!(rtptime_zero(1_000, None, rate), None);
+        assert_eq!(
+            rtptime_zero(1_000_000, Some(1_900_000), rate),
+            Some(1_900_000)
+        );
+        assert_eq!(rtptime_zero(1_000_000, Some(1_900_001), rate), None);
+        assert_eq!(rtptime_zero(1_000_000, Some(100_000), rate), Some(100_000));
+        assert_eq!(rtptime_zero(1_000_000, Some(99_999), rate), None);
     }
 }

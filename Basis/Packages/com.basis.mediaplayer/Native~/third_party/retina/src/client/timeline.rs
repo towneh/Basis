@@ -54,6 +54,11 @@ impl Timeline {
         })
     }
 
+    /// The stream's starting RTP timestamp, once known.
+    pub fn start(&self) -> Option<u32> {
+        self.start
+    }
+
     /// Advances to the given (wrapping) RTP timestamp.
     ///
     /// If enforcement was enabled, this produces a monotonically increasing

@@ -2137,6 +2137,17 @@ impl Session<Playing> {
         }
     }
 
+    /// Stream `i`'s starting RTP timestamp as `play()` left it: the PLAY
+    /// response's `RTP-Info` `rtptime` where the initial timestamp policy
+    /// took it, otherwise `None`. Nothing moves it for a stream whose
+    /// sockets were taken, since the session no longer sees its packets.
+    pub fn initial_rtptime(&self, i: usize) -> Option<u32> {
+        match &self.0.presentation.streams.get(i)?.state {
+            StreamState::Playing { timeline, .. } => timeline.start(),
+            _ => None,
+        }
+    }
+
     /// Takes stream `i`'s depacketizer (SDP parameters and any requested
     /// frame format applied), for callers feeding packets outside the
     /// session's own demuxing.

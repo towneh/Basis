@@ -29,6 +29,10 @@ dropped. The source matches the crates.io release apart from these changes:
   hands over the stream's depacketizer with its SDP parameters applied.
   Retina's UDP receive has no reorder buffer and sends no RTCP receiver
   reports, which servers end sessions over, so the engine does both itself.
+  `initial_rtptime(i)` (with `Timeline::start`) reads the PLAY response's
+  `RTP-Info` `rtptime` as the initial timestamp policy applied it, so the
+  engine's UDP receive zeroes each stream where the server says, as retina's
+  own receive does.
 - `src/client/mod.rs`, `SessionOptions::udp_peer_validator` and `setup()`: an
   optional callback that checks the UDP peer address before the sockets
   connect or send hole-punch packets. The server controls the `Transport`
