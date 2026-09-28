@@ -117,6 +117,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// engine presents into a video texture every frame; art is a still it
     /// never touches, so the render event must not be issued for it.
     bool _textureIsArtwork;
+    /// Whether _texture has been handed to the outputs. A video texture is
+    /// registered with the engine as soon as the frame size is known, while
+    /// the session is still buffering, but holds nothing to show until the
+    /// first present.
+    bool _textureShown;
     CommandBuffer _commandBuffer;
     long _audioFramesPulled;
     int _engineChannels;
@@ -196,7 +201,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     public long BankedMilliseconds { get; private set; }
     public ulong FramesDecoded { get; private set; }
     public ulong FramesPresented { get; private set; }
-    public Texture Texture => _texture;
+    public Texture Texture => _textureShown ? _texture : null;
 
     /// <summary>Cover art the container carried, decoded, or null. Audio-only
     /// sources with art drive it onto the output texture, so a screen shows
@@ -207,7 +212,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     /// <see cref="OutputTextureChanged"/> is already spelled with. Sandbox
     /// permission grants name a member, so this is the name a world script or
     /// a DMX bridge asks for.</summary>
-    public Texture OutputTexture => _texture;
+    public Texture OutputTexture => Texture;
 
     public long AudioFramesPulled => System.Threading.Interlocked.Read(ref _audioFramesPulled);
 
@@ -246,8 +251,9 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         }
     }
 
-    /// <summary>Raised when the output texture is created or dropped
-    /// (null on close). Output sinks bind on this rather than polling.
+    /// <summary>Raised when the output texture is ready to show (the first
+    /// frame presented, or cover art) or dropped (null on close). Output
+    /// sinks bind on this rather than polling.
     /// </summary>
     public event Action<Texture> OutputTextureChanged;
 
@@ -1135,9 +1141,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             _renderHooked = false;
         }
 #endif
-        bool hadTexture = _texture != null;
+        bool hadTexture = _textureShown;
         SetOutputTexture(null);
         _textureIsArtwork = false;
+        _textureShown = false;
         _artworkRead = false;
         if (_artwork != null)
         {
@@ -1333,6 +1340,11 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
             SetOutputTexture(texture);
             BasisMediaNative.bm_session_set_output_texture(_handle, texture.GetNativeTexturePtr());
 #endif
+        }
+
+        if (_texture != null && !_textureShown && snapshot.FramesPresented > 0)
+        {
+            _textureShown = true;
             OutputTextureChanged?.Invoke(_texture);
         }
 
@@ -1505,6 +1517,7 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         {
             SetOutputTexture(_artwork);
             _textureIsArtwork = true;
+            _textureShown = true;
             VideoSize = new Vector2Int(_artwork.width, _artwork.height);
             OutputTextureChanged?.Invoke(_texture);
         }
