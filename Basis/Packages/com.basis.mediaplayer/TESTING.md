@@ -36,8 +36,8 @@ Give the build its own capture filenames first; both write to the same
 | Transport | Play, pause and stop from the owner | Each reaches the follower |
 | Seek | Owner scrubs, playing and then paused | The follower lands within a frame or two. Paused, both show the new frame and stay paused |
 | Convergence | Watch the follower for half a minute after a seek or late join | It slews onto the owner without visible jumps |
-| Late join | A client joins mid-playback | It lands at the owner's position |
-| Late join, owner paused | Owner paused; a client rejoins. Try a direct `.mp4`, a page URL, and the owner pausing (or resuming) while the client loads | It lands paused on the owner's frame, silently, and plays when the owner does. If the owner resumed during loading, it comes up playing at the owner's position |
+| Late join | A client joins mid-playback, on a clip that opens loud | It lands at the owner's position. Nothing from the start of the clip is shown or heard first, and the joiner never reads Playing at 0 |
+| Late join, owner paused | Owner paused; a client rejoins. Try a direct `.mp4`, a page URL, and the owner pausing (or resuming) while the client loads | It lands paused on the owner's frame, silently, without passing through Playing or showing the clip's first frame, and plays when the owner does. If the owner resumed during loading, it comes up playing at the owner's position |
 | Ownership | The second client takes control | The first becomes a follower; neither fights |
 | Late join, owner plays mid-load | Owner paused; a client joins, and the owner presses **Play** while the client is still loading | It comes up Buffering until its seek lands, then Playing at the owner's position. The status never reads Playing while the picture is still the pre-seek one |
 | Owner leaves | Close the owner mid-playback | The follower keeps playing |

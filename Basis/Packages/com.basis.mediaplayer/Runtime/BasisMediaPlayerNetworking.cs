@@ -1132,7 +1132,7 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
         }
     }
 
-    // The stashed owner state lands once the local session is actually running.
+    // The stashed owner state lands once the local session has opened.
     // Runs on every client that does not drive state, which includes an implicit
     // owner being fed by custodians.
     private void ApplyPendingRemoteStateWhenReady()
@@ -1147,7 +1147,10 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
         BmState state = mediaPlayer.State;
         bool loadStarted = mediaPlayer.LoadGeneration != pendingRemoteLoadGeneration;
-        bool settling = state == BmState.Idle || state == BmState.Opening || state == BmState.Buffering;
+        // Buffering is the window before the first frame is shown and the clock starts, so a
+        // seek and pause sent then take effect before anything at 0 is seen or heard; the
+        // engine holds the pause across the seek.
+        bool settling = state == BmState.Idle || state == BmState.Opening;
         // A resolve that fails reports Error without ever opening, and that releases the
         // stash too.
         bool failedBeforeOpening = !loadStarted && state == BmState.Error && !pendingRemoteErrorAtRequest;
