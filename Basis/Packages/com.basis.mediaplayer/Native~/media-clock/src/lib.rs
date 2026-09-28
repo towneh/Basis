@@ -136,15 +136,30 @@ pub enum Master {
 /// nothing downstream of a monotonic clock survives.
 const MAX_SLEW_PPM: i64 = 999_999;
 
-/// Ladder parameters. Defaults: 20 ms dead band (Media3's figure), 2% slew
-/// cap (well under the ~6% at which a rate change becomes noticeable), and a
-/// 700 ms snap threshold (the previous C player's live resync figure). The
-/// correction is proportional with the cap as a ceiling, and a wider cap
-/// applies for a short window after a snap or a master adoption, so a join
-/// converges in seconds rather than tens of seconds.
+/// Master offsets averaged by `ClockConfig::smooth_master`.
+pub const SMOOTHING_SAMPLES: usize = 10;
+/// The least wall time between two averaged offsets, so the window spans at
+/// least `SMOOTHING_SAMPLES` × this (300 ms) however often the master is
+/// observed.
+pub const SMOOTHING_INTERVAL: MediaTime = MediaTime::from_millis(30);
+
+/// Ladder parameters. Defaults: 20 ms dead band (Media3's figure) with a 5 ms
+/// release, 2% slew cap (well under the ~6% at which a rate change becomes
+/// noticeable), and a 700 ms snap threshold (the previous C player's live
+/// resync figure). The correction is proportional with the cap as a
+/// ceiling, and a wider cap applies for a short window after a snap or a
+/// master adoption, so a join converges in seconds rather than tens of
+/// seconds.
 #[derive(Debug, Clone)]
 pub struct ClockConfig {
     pub dead_band: MediaTime,
+    /// Once a slew has started, it runs until the error is inside this,
+    /// not merely back inside `dead_band`. The cap is reached at an error of
+    /// `slew_tau` × cap (5 ms at the defaults), so a slew released at the dead
+    /// band's edge never reaches its proportional range: the clock parks at
+    /// the edge, where a few ms of residual jitter starts the next slew.
+    /// Clamped to `dead_band`.
+    pub release_band: MediaTime,
     pub snap_threshold: MediaTime,
     pub slew_cap_ppm: i64,
     /// Time constant of the proportional correction: the rate offset is the
@@ -160,28 +175,31 @@ pub struct ClockConfig {
     pub fast_slew_cap_ppm: i64,
     /// How long `fast_slew_cap_ppm` stays in force.
     pub fast_window: MediaTime,
-    /// Time constant of a first-order filter applied to the master error
-    /// before the dead-band/slew rungs act on it. `None` acts on the raw
-    /// error. Set this where the master's *measurement* carries platform
-    /// jitter wider than the dead band (Android DSP callbacks alternate
-    /// and miss slots, wobbling a consumed-frames playhead by ±40 ms
-    /// around the true position); the filter keeps that wobble from
-    /// reaching frame due-times while genuine offsets still converge.
-    /// The snap rung always acts on the raw error, so a real discontinuity
-    /// never waits out the filter.
-    pub master_filter: Option<MediaTime>,
+    /// Smooth the master position before the dead-band/slew rungs act on
+    /// it. The audio playhead is timed from the host's pulls, and hosts pull
+    /// on their own scheduling grid with missed slots (Unity on Windows:
+    /// ±25 ms; Android: ±40 ms), which is wider than the dead band. The
+    /// playhead advances at 1x in wall time, so its offset from the wall
+    /// clock is steady apart from that jitter: the smoothed master is the
+    /// wall clock plus the mean of the last `SMOOTHING_SAMPLES` offsets,
+    /// sampled at least `SMOOTHING_INTERVAL` apart (Media3's
+    /// `AudioTrackPositionTracker` scheme). The clock's own corrections do
+    /// not enter the average, so a catch-up is not carried past its target.
+    /// The snap rung always acts on the raw position.
+    pub smooth_master: bool,
 }
 
 impl Default for ClockConfig {
     fn default() -> Self {
         Self {
             dead_band: MediaTime::from_millis(20),
+            release_band: MediaTime::from_millis(5),
             snap_threshold: MediaTime::from_millis(700),
             slew_cap_ppm: 20_000,
             slew_tau: MediaTime::from_millis(250),
             fast_slew_cap_ppm: 500_000,
             fast_window: MediaTime::from_millis(1200),
-            master_filter: None,
+            smooth_master: true,
         }
     }
 }
@@ -212,11 +230,10 @@ pub struct MediaClock {
     master: Master,
     playing: bool,
     generation: Generation,
-    /// Filtered master error (`master_filter` engaged): the running
-    /// estimate and the wall time it was last advanced. Cleared on snap
-    /// and master switch so a fresh timeline seeds from its first
-    /// observation.
-    filtered: Option<(MediaTime, MediaTime)>,
+    /// The master's recent offsets from the wall clock (`smooth_master`).
+    /// Cleared on snap, master switch and play/pause, the moments the
+    /// offset legitimately jumps, so the next observation seeds it afresh.
+    offsets: MasterOffsets,
     /// Wall time the fast cap stops applying. Opened by a snap and by
     /// adopting the audio master; `None` outside a fast window.
     fast_until: Option<MediaTime>,
@@ -237,7 +254,7 @@ impl MediaClock {
             master: Master::Wall,
             playing: false,
             generation,
-            filtered: None,
+            offsets: MasterOffsets::default(),
             fast_until: None,
         }
     }
@@ -278,6 +295,9 @@ impl MediaClock {
         if self.playing != playing {
             self.rebase(wall);
             self.playing = playing;
+            // The master stands still while paused and the wall does not,
+            // so offsets from before a pause read the pause as an error.
+            self.offsets.clear();
         }
     }
 
@@ -286,7 +306,7 @@ impl MediaClock {
     pub fn set_master(&mut self, wall: MediaTime, master: Master) {
         self.rebase(wall);
         self.master = master;
-        self.filtered = None;
+        self.offsets.clear();
         match master {
             Master::Wall => {
                 self.rate_ppm = 0;
@@ -299,11 +319,12 @@ impl MediaClock {
     }
 
     /// Feed a master position report (the audio playhead). Applies the
-    /// ladder: dead band → nothing (and any running slew ends), slew band →
-    /// rate offset capped at `slew_cap_ppm`, beyond `snap_threshold` → snap.
-    /// With `master_filter` set, the dead-band/slew rungs act on a
-    /// first-order-filtered error; the snap rung always acts on the raw
-    /// error and clears the filter.
+    /// ladder: dead band → nothing (a running slew ends at `release_band`),
+    /// slew band → rate offset capped at `slew_cap_ppm`, beyond
+    /// `snap_threshold` → snap.
+    /// With `smooth_master` set, the dead-band/slew rungs act on the
+    /// smoothed master position; the snap rung always acts on the raw
+    /// position and clears the average.
     pub fn observe_master(&mut self, wall: MediaTime, master_pos: MediaTime) -> Correction {
         if self.master != Master::Audio || !self.playing {
             return Correction::None;
@@ -314,12 +335,18 @@ impl MediaClock {
             self.snap(wall, master_pos);
             return Correction::Snap { error: raw };
         }
-        let error = match self.cfg.master_filter {
-            None => raw,
-            Some(tau) => self.filter_error(wall, raw, tau),
+        let error = if self.cfg.smooth_master {
+            wall + self.offsets.observe(wall, master_pos - wall) - self.now(wall)
+        } else {
+            raw
         };
         self.rebase(wall);
-        if error.abs() <= self.cfg.dead_band {
+        let band = if self.rate_ppm != 0 {
+            self.cfg.release_band.min(self.cfg.dead_band)
+        } else {
+            self.cfg.dead_band
+        };
+        if error.abs() <= band {
             self.rate_ppm = 0;
             return Correction::None;
         }
@@ -333,26 +360,6 @@ impl MediaClock {
         self.rate_ppm = ppm.clamp(-cap, cap);
         Correction::Slew {
             rate_ppm: self.rate_ppm,
-        }
-    }
-
-    /// Advance the filtered error towards `raw` with gain `dt / (tau + dt)`:
-    /// a first-order low-pass that is exact under irregular observation
-    /// cadence. The first observation after a reset seeds the estimate
-    /// directly, so a fresh timeline's initial correction is not delayed.
-    fn filter_error(&mut self, wall: MediaTime, raw: MediaTime, tau: MediaTime) -> MediaTime {
-        match &mut self.filtered {
-            None => {
-                self.filtered = Some((raw, wall));
-                raw
-            }
-            Some((estimate, last)) => {
-                let dt = (wall - *last).max(MediaTime::ZERO).as_micros();
-                *last = wall;
-                let step = (raw - *estimate).as_micros() * dt / (tau.as_micros() + dt).max(1);
-                *estimate += MediaTime::from_micros(step);
-                *estimate
-            }
         }
     }
 
@@ -429,10 +436,42 @@ impl MediaClock {
         self.anchor_wall = wall;
         self.anchor_media = pos;
         self.rate_ppm = 0;
-        self.filtered = None;
+        self.offsets.clear();
         // A snap lands the clock on the master but says nothing about the
         // rate it should run at from here; the window lets the first
         // corrections after it converge rather than crawl.
         self.fast_until = Some(wall + self.cfg.fast_window);
+    }
+}
+
+/// The master's recent offsets from the wall clock, for `smooth_master`.
+#[derive(Debug, Default)]
+struct MasterOffsets {
+    samples: [i64; SMOOTHING_SAMPLES],
+    count: usize,
+    next: usize,
+    last_sample: Option<MediaTime>,
+}
+
+impl MasterOffsets {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Take `offset` into the average if the last sample is at least
+    /// `SMOOTHING_INTERVAL` old, and return the mean. The first observation
+    /// after a clear stands alone, so a fresh timeline is not held back.
+    fn observe(&mut self, wall: MediaTime, offset: MediaTime) -> MediaTime {
+        let due = self
+            .last_sample
+            .is_none_or(|last| wall - last >= SMOOTHING_INTERVAL);
+        if due {
+            self.samples[self.next] = offset.as_micros();
+            self.next = (self.next + 1) % SMOOTHING_SAMPLES;
+            self.count = (self.count + 1).min(SMOOTHING_SAMPLES);
+            self.last_sample = Some(wall);
+        }
+        let sum: i128 = self.samples[..self.count].iter().map(|&s| s as i128).sum();
+        MediaTime::from_micros((sum / self.count as i128) as i64)
     }
 }

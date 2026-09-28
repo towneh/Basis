@@ -1,22 +1,20 @@
-//! The master-filter rung: DSP-callback jitter of the kind measured on
-//! Quest Pro must not reach frame due-times, while
-//! genuine offsets, discontinuities and generation changes correct
-//! exactly as on the unfiltered ladder.
+//! Master smoothing and the slew release: host pull jitter of the kind
+//! measured on Quest Pro and in the Unity Editor on Windows must not reach
+//! frame due-times, while genuine offsets, discontinuities and generation
+//! changes correct as on the unsmoothed ladder, and a start-up catch-up is
+//! not carried past its target.
 
 use media_clock::{ClockConfig, Correction, Generation, Master, MediaClock, MediaTime};
 
-const FILTER_TAU: MediaTime = MediaTime::from_millis(400);
+fn clock(smooth_master: bool) -> MediaClock {
+    clock_with(ClockConfig {
+        smooth_master,
+        ..ClockConfig::default()
+    })
+}
 
-fn clock(master_filter: Option<MediaTime>) -> MediaClock {
-    let mut c = MediaClock::new(
-        ClockConfig {
-            master_filter,
-            ..ClockConfig::default()
-        },
-        MediaTime::ZERO,
-        MediaTime::ZERO,
-        Generation(0),
-    );
+fn clock_with(cfg: ClockConfig) -> MediaClock {
+    let mut c = MediaClock::new(cfg, MediaTime::ZERO, MediaTime::ZERO, Generation(0));
     c.set_playing(MediaTime::ZERO, true);
     c.set_master(MediaTime::ZERO, Master::Audio);
     c
@@ -68,12 +66,10 @@ fn quest_delivery_schedule(duration_us: i64) -> Vec<Delivery> {
     }
 }
 
-/// The engine's measured playhead over that schedule: consumed frames
-/// plus wall-since-last-pull extrapolation capped at 40 ms (the
-/// `AudioShared::playhead` model). Piecewise constant error against true
-/// time, alternating ~±7 ms around one buffer of standing offset.
-fn measured_playhead(deliveries: &[Delivery], wall_us: i64) -> Option<i64> {
-    const RATE: i64 = 24_000;
+/// The engine's measured playhead over a schedule: consumed frames plus
+/// wall-since-last-pull extrapolation capped at 40 ms (the
+/// `AudioShared::playhead` model).
+fn measured_playhead(deliveries: &[Delivery], rate: i64, wall_us: i64) -> Option<i64> {
     let mut consumed = 0i64;
     let mut last_pull = None;
     for d in deliveries {
@@ -85,27 +81,36 @@ fn measured_playhead(deliveries: &[Delivery], wall_us: i64) -> Option<i64> {
     }
     let last_pull = last_pull?;
     let since = (wall_us - last_pull).clamp(0, 40_000);
-    Some(consumed * 1_000_000 / RATE + since)
+    Some(consumed * 1_000_000 / rate + since)
 }
 
-/// Run the capture pattern for 15 s, observing every 4 ms (the audio
-/// thread's cadence). Returns the clock's post-settle wander (how far
-/// `now(wall) - wall` moved over the measured window, which is how far the
-/// jitter dragged frame due-times) and the snap count.
-fn run_quest_pattern(c: &mut MediaClock, settle_us: i64) -> (i64, usize) {
-    let deliveries = quest_delivery_schedule(15_000_000);
+/// Run a schedule, observing every 4 ms (the audio thread's cadence).
+/// Returns the clock's post-settle wander (how far `now(wall) - wall` moved
+/// over the measured window, which is how far the jitter dragged frame
+/// due-times), the snap count and the number of slews started.
+fn run_pattern(
+    c: &mut MediaClock,
+    deliveries: &[Delivery],
+    rate: i64,
+    duration_us: i64,
+    settle_us: i64,
+) -> (i64, usize, usize) {
     let mut snaps = 0;
+    let mut slews = 0;
+    let mut slewing = false;
     let (mut lo, mut hi) = (i64::MAX, i64::MIN);
     let mut wall_us = 0i64;
-    while wall_us <= 15_000_000 {
-        if let Some(playhead) = measured_playhead(&deliveries, wall_us) {
+    while wall_us <= duration_us {
+        if let Some(playhead) = measured_playhead(deliveries, rate, wall_us) {
             let correction = c.observe_master(
                 MediaTime::from_micros(wall_us),
                 MediaTime::from_micros(playhead),
             );
             if wall_us >= settle_us {
-                if matches!(correction, Correction::Snap { .. }) {
-                    snaps += 1;
+                match correction {
+                    Correction::Snap { .. } => snaps += 1,
+                    Correction::Slew { .. } if !slewing => slews += 1,
+                    _ => {}
                 }
                 let err = (c.now(MediaTime::from_micros(wall_us))
                     - MediaTime::from_micros(wall_us))
@@ -113,52 +118,141 @@ fn run_quest_pattern(c: &mut MediaClock, settle_us: i64) -> (i64, usize) {
                 lo = lo.min(err);
                 hi = hi.max(err);
             }
+            slewing = matches!(correction, Correction::Slew { .. });
         }
         wall_us += 4_000;
     }
-    (hi - lo, snaps)
+    (hi - lo, snaps, slews)
 }
 
-/// Filtered ladder: once converged onto the playhead's standing offset,
-/// episode onsets and callback jitter move the clock (and every frame's due
-/// time with it) by only a couple of ms across the whole run, the band-edge
-/// walk at the first episode onset. That is under half a 72 Hz vsync
-/// (6.9 ms), so presentation holds its cadence through the episodes. The
-/// raw ladder walks the full alternation amplitude (~7 ms) on the same
-/// trace.
+/// Smoothed ladder on the Quest trace: once converged onto the playhead's
+/// standing offset, episode onsets and callback jitter move the clock (and
+/// every frame's due time with it) by only a couple of ms across the whole
+/// run. That is under half a 72 Hz vsync (6.9 ms), so presentation holds
+/// its cadence through the episodes.
 #[test]
-fn filter_holds_due_times_through_callback_jitter() {
-    let mut c = clock(Some(FILTER_TAU));
-    let (wander, snaps) = run_quest_pattern(&mut c, 2_500_000);
+fn smoothing_holds_due_times_through_quest_callback_jitter() {
+    let mut c = clock(true);
+    let deliveries = quest_delivery_schedule(15_000_000);
+    let (wander, snaps, slews) = run_pattern(&mut c, &deliveries, 24_000, 15_000_000, 2_500_000);
     assert_eq!(snaps, 0, "jitter must never snap");
+    assert_eq!(slews, 0, "the callback jitter must not start a slew");
     assert!(
         wander < 3_000,
-        "filtered clock wandered {wander} µs against 1x"
+        "smoothed clock wandered {wander} µs against 1x"
     );
 }
 
-/// The same trace on the raw ladder: each episode onset swings one side
-/// of the alternation past the dead band, and the resulting slew walks
-/// the clock by most of the jitter amplitude. Frame due-times slide across
-/// vsync boundaries, which is the judder seen on the device. Pinned so the
-/// comparison with the filtered ladder stays visible.
+/// The audio playhead traced in the Unity Editor on Windows (D3D11, 48 kHz
+/// output, 1024-frame DSP buffer, a 44.1 kHz source): wall time and
+/// playhead, both from the session's start, one row per audio-thread tick.
+/// Pulls land on a ~20 ms grid with missed slots, and the playhead wanders
+/// about ±23 ms around 1x.
+const WINDOWS_EDITOR_PLAYHEAD: &str = include_str!("data/windows-editor-playhead.csv");
+
+/// Replay the Windows trace. Returns the post-settle wander, snaps and
+/// slews started, as `run_pattern`.
+fn run_windows_trace(c: &mut MediaClock, settle_us: i64) -> (i64, usize, usize) {
+    let mut snaps = 0;
+    let mut slews = 0;
+    let mut slewing = false;
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+    for line in WINDOWS_EDITOR_PLAYHEAD.lines().filter(|l| !l.is_empty()) {
+        let (wall_us, playhead_us) = line.split_once(',').expect("wall,playhead");
+        let wall = MediaTime::from_micros(wall_us.trim().parse().expect("wall"));
+        let playhead = MediaTime::from_micros(playhead_us.trim().parse().expect("playhead"));
+        let correction = c.observe_master(wall, playhead);
+        if wall.as_micros() >= settle_us {
+            match correction {
+                Correction::Snap { .. } => snaps += 1,
+                Correction::Slew { .. } if !slewing => slews += 1,
+                _ => {}
+            }
+            let err = (c.now(wall) - wall).as_micros();
+            lo = lo.min(err);
+            hi = hi.max(err);
+        }
+        slewing = matches!(correction, Correction::Slew { .. });
+    }
+    (hi - lo, snaps, slews)
+}
+
+/// The Windows trace: no slew starts once settled, and the clock runs at
+/// 1x within a couple of ms.
 #[test]
-fn raw_ladder_wanders_on_the_same_trace() {
-    let mut c = clock(None);
-    let (wander, snaps) = run_quest_pattern(&mut c, 2_500_000);
+fn smoothing_holds_the_clock_through_the_windows_pull_jitter() {
+    let mut c = clock(true);
+    let (wander, snaps, slews) = run_windows_trace(&mut c, 2_500_000);
+    assert_eq!(snaps, 0);
+    assert_eq!(slews, 0, "the pull jitter must not start a slew");
+    assert!(wander < 3_000, "clock wandered {wander} µs against 1x");
+}
+
+/// Without smoothing the same trace keeps starting slews, the 2% hunting
+/// seen in the Editor. Pinned so the comparison stays visible.
+#[test]
+fn without_smoothing_the_windows_pull_jitter_hunts() {
+    let mut c = clock(false);
+    let (_, snaps, slews) = run_windows_trace(&mut c, 2_500_000);
     assert_eq!(snaps, 0);
     assert!(
-        wander > 4_000,
-        "expected the raw ladder to wander with the episodes, saw {wander} µs"
+        slews > 10,
+        "expected the raw ladder to hunt, saw {slews} slews"
     );
 }
 
-/// A genuine standing offset still converges through the filter: slew
-/// engages, closes to the dead band, and stays quiet, with no flapping at
-/// the band edge on a clean-cadence master.
+/// Smoothed but released at the dead band's edge, the clock parks there and
+/// the residual jitter still starts slews. Pinned so the release's part in
+/// the result stays visible.
 #[test]
-fn filter_converges_on_genuine_offset() {
-    let mut c = clock(Some(FILTER_TAU));
+fn without_the_release_band_the_clock_parks_at_the_edge() {
+    let mut c = clock_with(ClockConfig {
+        release_band: MediaTime::from_millis(20),
+        ..ClockConfig::default()
+    });
+    let (_, snaps, slews) = run_windows_trace(&mut c, 2_500_000);
+    assert_eq!(snaps, 0);
+    assert!(slews > 0, "expected slews at the band edge, saw none");
+}
+
+/// The start the Editor traced: the clock runs ~100 ms before the first
+/// pull, so the master's first reading is 100 ms behind it and the fast
+/// window closes the gap. The catch-up must stop at the target, not be
+/// carried past it by the average, and must not be slower than on the raw
+/// ladder.
+#[test]
+fn a_start_up_catch_up_is_not_carried_past_its_target() {
+    let mut c = clock(true);
+    let behind = MediaTime::from_millis(100);
+    let mut wall = MediaTime::ZERO;
+    let mut inside_at = None;
+    let mut overshoot = MediaTime::ZERO;
+    while wall <= MediaTime::from_secs(3) {
+        let master = wall - behind;
+        c.observe_master(wall, master);
+        let error = master - c.now(wall);
+        if inside_at.is_none() && error.abs() <= MediaTime::from_millis(20) {
+            inside_at = Some(wall);
+        }
+        overshoot = overshoot.max(error);
+        wall += MediaTime::from_millis(4);
+    }
+    let inside_at = inside_at.expect("never closed the start-up gap");
+    assert!(
+        inside_at <= MediaTime::from_millis(500),
+        "start-up gap closed only after {inside_at}"
+    );
+    assert!(
+        overshoot <= MediaTime::from_millis(5),
+        "the catch-up overshot by {overshoot}"
+    );
+}
+
+/// A genuine standing offset still converges through the smoothing: slew
+/// engages, closes to the dead band, and stays quiet.
+#[test]
+fn smoothing_converges_on_genuine_offset() {
+    let mut c = clock(true);
     let offset = MediaTime::from_millis(300);
     let mut wall = MediaTime::ZERO;
     let mut converged_at = None;
@@ -174,10 +268,7 @@ fn filter_converges_on_genuine_offset() {
         wall += MediaTime::from_millis(100);
     }
     let converged_at = converged_at.expect("never converged");
-    // At a 2% slew, 300 ms of error closes in 15 s; the filter's lag adds
-    // well under a second.
     assert!(converged_at < MediaTime::from_secs(18));
-    // Once inside the band it stays there.
     for _ in 0..50 {
         wall += MediaTime::from_millis(100);
         let correction = c.observe_master(wall, wall + offset);
@@ -188,13 +279,12 @@ fn filter_converges_on_genuine_offset() {
     }
 }
 
-/// The snap rung acts on the raw error: a real discontinuity must never
-/// be averaged away by a settled filter.
+/// The snap rung acts on the raw position: a real discontinuity must never
+/// be averaged away.
 #[test]
-fn snap_acts_on_the_raw_error() {
-    let mut c = clock(Some(FILTER_TAU));
+fn snap_acts_on_the_raw_position() {
+    let mut c = clock(true);
     let mut wall = MediaTime::ZERO;
-    // Settle the filter at zero error.
     for _ in 0..100 {
         c.observe_master(wall, wall);
         wall += MediaTime::from_millis(10);
@@ -205,28 +295,50 @@ fn snap_acts_on_the_raw_error() {
     assert_eq!(c.now(wall), target);
 }
 
-/// A generation change (seek) clears the filter: the first observation on
+/// A generation change (seek) clears the average: the first observation on
 /// the new timeline seeds fresh instead of blending with the old one.
 #[test]
-fn generation_change_resets_the_filter() {
-    let mut c = clock(Some(FILTER_TAU));
+fn generation_change_resets_the_average() {
+    let mut c = clock(true);
     let mut wall = MediaTime::ZERO;
-    // Settle the filter onto a large (sub-snap) standing error.
     for _ in 0..200 {
         c.observe_master(wall, wall + MediaTime::from_millis(600));
         wall += MediaTime::from_millis(10);
     }
     c.advance_generation(wall, Generation(1), MediaTime::from_secs(60));
-    // On the fresh timeline the master sits exactly on the clock: a stale
-    // filtered estimate would report a phantom error and slew.
     for _ in 0..10 {
         wall += MediaTime::from_millis(10);
         let now = c.now(wall);
         let correction = c.observe_master(wall, now);
         assert!(
             matches!(correction, Correction::None),
-            "stale filter state survived the generation change: {correction:?}"
+            "stale offsets survived the generation change: {correction:?}"
         );
     }
     assert_eq!(c.rate_ppm(), 0);
+}
+
+/// The master stands still through a pause while the wall runs on, so the
+/// offsets from before it must not be read as an error on resume.
+#[test]
+fn a_pause_is_not_read_as_an_error() {
+    let mut c = clock(true);
+    let mut wall = MediaTime::ZERO;
+    for _ in 0..100 {
+        let now = c.now(wall);
+        c.observe_master(wall, now);
+        wall += MediaTime::from_millis(10);
+    }
+    c.set_playing(wall, false);
+    wall += MediaTime::from_secs(5);
+    c.set_playing(wall, true);
+    for _ in 0..10 {
+        let now = c.now(wall);
+        let correction = c.observe_master(wall, now);
+        assert!(
+            matches!(correction, Correction::None),
+            "the pause was read as an error: {correction:?}"
+        );
+        wall += MediaTime::from_millis(10);
+    }
 }

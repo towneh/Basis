@@ -376,18 +376,12 @@ impl Session {
             None => bank_cfg,
         };
 
-        let clock_cfg = ClockConfig::default();
-        // Android's audio stack delivers DSP callbacks in jittery
-        // double-buffer bursts with missed slots (±40 ms measured on Quest
-        // Pro, against a 20 ms dead band), so master observations go
-        // through the clock's first-order filter there. Windows' cadence is
-        // uniform enough without it.
-        #[cfg(target_os = "android")]
-        let clock_cfg = ClockConfig {
-            master_filter: Some(MediaTime::from_millis(400)),
-            ..clock_cfg
-        };
-        let clock = MediaClock::new(clock_cfg, wall.now(), MediaTime::ZERO, Generation(0));
+        let clock = MediaClock::new(
+            ClockConfig::default(),
+            wall.now(),
+            MediaTime::ZERO,
+            Generation(0),
+        );
 
         let px = Arc::new(PipelineShared {
             shared: Arc::clone(&shared),

@@ -415,3 +415,40 @@ fn an_expired_fast_window_is_closed_without_an_observation() {
     // Closing the window must not move the position already reported.
     assert_eq!(before, c.now(later), "closing the window moved `now`");
 }
+
+/// A slew starts past the dead band (20 ms) and, once started, runs until
+/// the error is inside the release band (5 ms). Both edges pinned.
+#[test]
+fn a_slew_runs_until_the_release_band() {
+    let cfg = ClockConfig {
+        smooth_master: false,
+        ..ClockConfig::default()
+    };
+    let mut c = MediaClock::new(cfg, MediaTime::ZERO, MediaTime::ZERO, Generation(0));
+    c.set_playing(MediaTime::ZERO, true);
+    c.set_master(MediaTime::ZERO, Master::Audio);
+    // Past the fast window, so the steady cap applies.
+    let mut wall = MediaTime::from_secs(2);
+    let mut at = |c: &mut MediaClock, error_us: i64| {
+        wall += MediaTime::from_millis(10);
+        let master = c.now(wall) + MediaTime::from_micros(error_us);
+        c.observe_master(wall, master)
+    };
+    assert_eq!(
+        at(&mut c, 20_000),
+        Correction::None,
+        "the dead band's edge starts nothing"
+    );
+    assert!(matches!(at(&mut c, 20_001), Correction::Slew { .. }));
+    assert!(
+        matches!(at(&mut c, 5_001), Correction::Slew { .. }),
+        "a running slew must not stop outside the release band"
+    );
+    assert_eq!(at(&mut c, 5_000), Correction::None);
+    assert_eq!(c.rate_ppm(), 0);
+    assert_eq!(
+        at(&mut c, 19_000),
+        Correction::None,
+        "idle again, the dead band applies"
+    );
+}
