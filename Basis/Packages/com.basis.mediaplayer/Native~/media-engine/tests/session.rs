@@ -426,6 +426,71 @@ fn audio_latency_setter_clamps_to_a_sane_range() {
     session.close();
 }
 
+/// An audio-only clock starts the moment the ring fills, before the host
+/// has reported its latency, so a later report moves the running clock by
+/// the change. A parked clock is left alone.
+#[test]
+fn a_latency_report_moves_a_running_clock_by_the_change() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/sine-48k-stereo.flac")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let px = session.pipeline().clone();
+    assert!(
+        wait_for(Duration::from_secs(10), || px
+            .clock_playing
+            .load(Ordering::Relaxed)),
+        "the clock never started"
+    );
+    // Read at one wall before and after, so the figure is the move alone.
+    let reading = |wall| px.clock.lock().expect("clock lock").now(wall);
+
+    let wall = px.wall.now();
+    let before = reading(wall);
+    Session::set_audio_latency(&px, 100_000);
+    let moved = before - reading(wall);
+    assert!(
+        (moved - MediaTime::from_millis(100)).abs() <= MediaTime::from_millis(1),
+        "a 100 ms report moved the clock back {moved}"
+    );
+
+    let wall = px.wall.now();
+    let before = reading(wall);
+    Session::set_audio_latency(&px, 100_000);
+    let moved = before - reading(wall);
+    assert!(
+        moved.abs() <= MediaTime::from_millis(1),
+        "an unchanged report moved the clock {moved}"
+    );
+
+    let wall = px.wall.now();
+    let before = reading(wall);
+    Session::set_audio_latency(&px, 40_000);
+    let moved = reading(wall) - before;
+    assert!(
+        (moved - MediaTime::from_millis(60)).abs() <= MediaTime::from_millis(1),
+        "a 60 ms smaller report moved the clock forward {moved}"
+    );
+
+    session.pause();
+    assert!(
+        wait_for(Duration::from_secs(5), || !px
+            .clock_playing
+            .load(Ordering::Relaxed)),
+        "the pause never parked the clock"
+    );
+    let wall = px.wall.now();
+    let before = reading(wall);
+    Session::set_audio_latency(&px, 200_000);
+    let moved = before - reading(wall);
+    session.close();
+    assert!(
+        moved.abs() <= MediaTime::from_millis(1),
+        "a report while paused moved the parked clock {moved}"
+    );
+}
+
 /// A pause that lands while the open is still settling is ignored: nothing
 /// is playing yet, and the request must not carry forward into the session
 /// that follows. The state is read before the liveness flag, so a request

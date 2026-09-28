@@ -597,10 +597,30 @@ impl Session {
     /// playhead the clock masters on is shifted back by it, so video paces
     /// to the audible position. Clamped to 0..=500 ms; 0 (the default)
     /// applies no shift.
+    ///
+    /// A running clock moves by the change, since it was started from the
+    /// latency then in force. An audio-only session's clock starts the
+    /// moment the ring fills, usually before the host has reported any.
+    /// A parked clock stays where it is, so a paused position does not jump
+    /// on screen: a landing restarts it from the new value, and after a
+    /// resume the audio master brings it round.
     pub fn set_audio_latency(px: &PipelineShared, latency_us: i64) {
-        px.audio_shared
+        let latency = latency_us.clamp(0, 500_000);
+        // Under the clock lock, which both clock starts hold while reading
+        // the latency: a start reads either the old value and is moved
+        // here, or the new one and is not.
+        let mut clock = px.clock.lock().expect("clock lock");
+        let old = px
+            .audio_shared
             .output_latency_us
-            .store(latency_us.clamp(0, 500_000), Ordering::Relaxed);
+            .swap(latency, Ordering::Relaxed);
+        if old == latency || !clock.is_playing() {
+            return;
+        }
+        let wall = px.wall.now();
+        let moved = clock.now(wall) - MediaTime::from_micros(latency - old);
+        clock.discontinuity(wall, moved);
+        px.present.mirror_clock(wall, moved, true);
     }
 
     /// Lock-free audio pull for the Unity audio thread. Fills `out`
