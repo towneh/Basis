@@ -347,6 +347,30 @@ fn buffering_ends(presented: u64, current: u64, pause_wanted: bool) -> bool {
     presented == current && !pause_wanted
 }
 
+/// Whether the audio pull may serve the ring: in Playing, or in Buffering
+/// once the clock runs, since a start anchors the clock an output latency
+/// before the first picture and that picture is not due until the clock
+/// covers the latency, so sound pulled from the start is heard as it
+/// shows. Never while the clock is parked, and in either state only for
+/// the timeline in force: not with a seek queued (the clock still runs on
+/// the timeline being left, and a present in flight can publish Playing
+/// on it), not before the ring is this timeline's, and not with a pause
+/// waiting on the landing. Split out as above.
+pub(crate) fn audio_serves(
+    state: u32,
+    clock_playing: bool,
+    pause_wanted: bool,
+    seeks_pending: u32,
+    ring_generation: u64,
+    current: u64,
+) -> bool {
+    clock_playing
+        && (state == State::Playing as u32 || state == State::Buffering as u32)
+        && !pause_wanted
+        && seeks_pending == 0
+        && ring_generation == current
+}
+
 /// Whether a thread that reached the end of the `ended` timeline may end
 /// the session: not while a seek is in flight, and not once the timeline
 /// has moved on. Split out as above.
@@ -474,6 +498,10 @@ pub struct PipelineShared {
     /// gate alone is not enough, since a present in flight can race a seek
     /// back to Playing.
     pub clock_playing: std::sync::atomic::AtomicBool,
+    /// The generation whose ring the audio consumer slot holds, or
+    /// [`NO_GENERATION`]. Stored after each install, so a pull that reads
+    /// the current generation here finds that generation's ring.
+    pub audio_ring_generation: std::sync::atomic::AtomicU64,
     /// Decode-route preference from the descriptor, read by the video
     /// thread's route resolution.
     pub decode_preference: crate::DecodePreference,
@@ -3061,6 +3089,8 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                             },
                             Arc::clone(&px.audio_shared),
                         ));
+                        px.audio_ring_generation
+                            .store(generation.0, Ordering::Release);
                         px.shared.audio_rate.store(out_rate, Ordering::Relaxed);
                         px.shared
                             .audio_channels
@@ -3136,6 +3166,7 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         },
                         Arc::clone(&px.audio_shared),
                     ));
+                    px.audio_ring_generation.store(new.0, Ordering::Release);
                 } else {
                     // No decoder to size a ring from, so no swap retires the
                     // old consumer and it would keep serving samples and a
@@ -3581,6 +3612,41 @@ mod tests {
             !buffering_ends(7, 7, true),
             "a pause waiting on the landing keeps Buffering for settle_pause"
         );
+    }
+
+    /// The pull serves in Playing, and in Buffering once the clock runs,
+    /// only on the timeline in force with nothing waiting to land on it.
+    #[test]
+    fn audio_serves_only_for_the_running_timeline() {
+        let playing = State::Playing as u32;
+        let buffering = State::Buffering as u32;
+        assert!(audio_serves(playing, true, false, 0, 7, 7), "playing");
+        assert!(
+            audio_serves(buffering, true, false, 0, 7, 7),
+            "the clock runs ahead of the first picture"
+        );
+        assert!(
+            !audio_serves(State::Paused as u32, true, false, 0, 7, 7),
+            "paused"
+        );
+        for (state, name) in [(playing, "Playing"), (buffering, "Buffering")] {
+            assert!(
+                !audio_serves(state, false, false, 0, 7, 7),
+                "{name}: a parked clock serves nothing"
+            );
+            assert!(
+                !audio_serves(state, true, true, 0, 7, 7),
+                "{name}: a pause waiting on the landing is heard before it lands"
+            );
+            assert!(
+                !audio_serves(state, true, false, 1, 7, 7),
+                "{name}: a queued seek's clock still runs on the timeline being left"
+            );
+            assert!(
+                !audio_serves(state, true, false, 0, 7, 8),
+                "{name}: the retired timeline's ring served the new one"
+            );
+        }
     }
 
     /// A thread that decided on a transition from an earlier read loses to

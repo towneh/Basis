@@ -491,6 +491,34 @@ fn a_latency_report_moves_a_running_clock_by_the_change() {
     );
 }
 
+/// A clock started with video is anchored an output latency before the
+/// first picture, which is not due until the clock covers that latency.
+/// Sound pulled from the start is heard as the picture shows, so the pull
+/// serves from the clock start rather than waiting for the present.
+#[test]
+fn the_pull_serves_from_the_clock_start_before_the_first_present() {
+    let mut session = Session::open(OpenRequest::new(fixture_path()));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+    Session::set_audio_latency(&px, 300_000);
+
+    let mut buf = vec![0f32; 2048];
+    let mut served_in_buffering = 0usize;
+    let reached_playing = wait_for(Duration::from_secs(10), || {
+        let state = shared.state.load(Ordering::Relaxed);
+        if state == State::Buffering as u32 && px.clock_playing.load(Ordering::Relaxed) {
+            served_in_buffering += Session::read_audio(&px, &mut buf);
+        }
+        state == State::Playing as u32
+    });
+    session.close();
+    assert!(reached_playing, "the session never reached Playing");
+    assert!(
+        served_in_buffering > 0,
+        "nothing was served between the clock start and the first present"
+    );
+}
+
 /// A pause that lands while the open is still settling is ignored: nothing
 /// is playing yet, and the request must not carry forward into the session
 /// that follows. The state is read before the liveness flag, so a request

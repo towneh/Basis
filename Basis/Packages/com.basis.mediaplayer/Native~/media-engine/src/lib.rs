@@ -406,6 +406,7 @@ impl Session {
             playable: playable::Playable::default(),
             audio_tail_out: AtomicU64::new(u64::MAX),
             clock_playing: AtomicBool::new(false),
+            audio_ring_generation: AtomicU64::new(pipeline::NO_GENERATION),
             decode_preference: request.decode_preference,
             presented_generation: AtomicU64::new(pipeline::NO_GENERATION),
             presented_pts_us: AtomicI64::new(i64::MIN),
@@ -624,14 +625,21 @@ impl Session {
     }
 
     /// Lock-free audio pull for the Unity audio thread. Fills `out`
-    /// (interleaved f32) and returns frames written. Serves silence when
-    /// not playing, while the clock is parked, or under contention.
+    /// (interleaved f32) and returns frames written. Serves silence while
+    /// the clock is parked, outside the timeline in force (see
+    /// `audio_serves`), or under contention.
     pub fn read_audio(px: &PipelineShared, out: &mut [f32]) -> usize {
-        // Both gates matter. The state alone races (a present in flight can
-        // flip a seeking session back to Playing), and a parked clock means
-        // presentation has not reached this timeline yet: serving the ring
-        // then would play the post-seek audio against a frozen picture.
-        if px.state() != State::Playing as u32 || !px.clock_playing.load(Ordering::Relaxed) {
+        // A parked clock means presentation has not reached this timeline
+        // yet, and the state alone races (a present in flight can flip a
+        // seeking session back to Playing).
+        if !pipeline::audio_serves(
+            px.state(),
+            px.clock_playing.load(Ordering::Relaxed),
+            px.pause_wanted.load(Ordering::Relaxed),
+            px.seeks_pending.load(Ordering::Acquire),
+            px.audio_ring_generation.load(Ordering::Acquire),
+            px.shared.generation.load(Ordering::Relaxed),
+        ) {
             out.fill(0.0);
             return 0;
         }
