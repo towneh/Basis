@@ -12,13 +12,15 @@
 //! A/V alignment: RTP timestamps are per-stream, so cross-stream offsets
 //! come from RTCP sender reports (NTP ↔ RTP mappings). Frames buffer
 //! briefly at start until every stream has a sender report or a bounded
-//! wait expires, then flow with aligned timestamps. The Bank's startup
-//! hold is filling during that window anyway, so the join pays nothing
-//! extra. Without reports, each stream counts from the PLAY response's
-//! RTP-Info `rtptime` where the server gave one for every stream and it
-//! agrees with the first frames, and from its first frame otherwise.
-//! Reports that arrive later move the video onto them once; the audio
-//! keeps its timeline.
+//! wait expires, then flow with aligned timestamps. Without reports, each
+//! stream counts from the PLAY response's RTP-Info `rtptime` where the
+//! server gave one for every stream and it agrees with the first frames,
+//! and from its first frame otherwise. When the `rtptime` starts already
+//! agree, the wait is cut to a short grace after the first frames: a
+//! server that sends reports promptly still lands inside it, and one that
+//! sends none does not hold every join for the whole wait. Reports that
+//! arrive later move the video onto them once; the audio keeps its
+//! timeline.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -47,6 +49,11 @@ pub const CHANNEL_DEPTH: usize = 512;
 /// How long the aligner waits for sender reports before falling back to
 /// join-skew alignment.
 pub const ALIGN_WAIT: Duration = Duration::from_secs(2);
+/// How long the aligner still waits for sender reports once every
+/// stream's first frame is in and the PLAY response's `rtptime` starts
+/// agree (see [`declared_starts_agree`]). Servers that send reports at
+/// once deliver them within tens of milliseconds of the first frames.
+pub const REPORT_GRACE: Duration = Duration::from_millis(300);
 /// Widest spread between the streams' first frames that the PLAY
 /// response's `rtptime` may put them at and still be believed, when no
 /// sender report has arrived. A live join delivers both streams' first
@@ -385,6 +392,21 @@ fn start_spread(buffered: &VecDeque<PendingFrame>, needed: &[usize]) -> Option<i
     Some(firsts.iter().max()? - firsts.iter().min()?)
 }
 
+/// Whether the start can already be aligned without sender reports: every
+/// set-up stream has a frame buffered, each is counted from the PLAY
+/// response's `rtptime` (`from_rtptime`), and those starts put the first
+/// frames within [`RTPTIME_AGREEMENT`] of one another. The aligner then
+/// waits only [`REPORT_GRACE`] more for reports.
+pub fn declared_starts_agree(
+    buffered: &VecDeque<PendingFrame>,
+    needed: &[usize],
+    from_rtptime: bool,
+) -> bool {
+    from_rtptime
+        && start_spread(buffered, needed)
+            .is_some_and(|spread| spread <= RTPTIME_AGREEMENT.as_micros() as i64)
+}
+
 /// Every set-up stream has a sender report.
 pub fn reports_complete(align: &[StreamAlign; MAX_STREAMS], needed: &[usize]) -> bool {
     needed.iter().all(|&i| align[i].ntp_at_zero.is_some())
@@ -530,6 +552,11 @@ async fn run_session(
         }
     }
 
+    // Retina counts every stream from the PLAY response's `rtptime` only
+    // when all of them have one; otherwise from their first packets.
+    let from_rtptime = needed
+        .iter()
+        .all(|&index| session.initial_rtptime(index).is_some());
     let mut demuxed = session.demuxed().map_err(|e| format!("rtsp demux: {e}"))?;
 
     // Alignment: buffer until every set-up stream has a sender report or
@@ -541,10 +568,11 @@ async fn run_session(
     // report arriving after the start realigns video once all are in.
     let mut late_reports = true;
     let align_deadline = tokio::time::Instant::now() + ALIGN_WAIT;
+    let mut flush_at = align_deadline;
 
     loop {
         let item = if aligning {
-            match tokio::time::timeout_at(align_deadline, demuxed.next()).await {
+            match tokio::time::timeout_at(flush_at, demuxed.next()).await {
                 Ok(item) => item,
                 Err(_) => {
                     flush_aligned(&mut buffered, &mut align, &needed, generation, tx).await?;
@@ -640,6 +668,12 @@ async fn run_session(
         if aligning && buffered.len() >= CHANNEL_DEPTH {
             flush_aligned(&mut buffered, &mut align, &needed, generation, tx).await?;
             aligning = false;
+        }
+        if aligning
+            && flush_at == align_deadline
+            && declared_starts_agree(&buffered, &needed, from_rtptime)
+        {
+            flush_at = align_deadline.min(tokio::time::Instant::now() + REPORT_GRACE);
         }
     }
 }

@@ -26,8 +26,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::{
-    ALIGN_WAIT, CHANNEL_DEPTH, MAX_STREAMS, PendingFrame, StreamAlign, emit, flush_aligned,
-    format_from, frame_format, realign_late, reports_complete, select_streams, send_event,
+    ALIGN_WAIT, CHANNEL_DEPTH, MAX_STREAMS, PendingFrame, REPORT_GRACE, StreamAlign,
+    declared_starts_agree, emit, flush_aligned, format_from, frame_format, realign_late,
+    reports_complete, select_streams, send_event,
 };
 
 /// Peer-address policy for UDP targets, backed by the engine's one
@@ -221,6 +222,7 @@ pub(crate) async fn run_udp_session(
     // As in the TCP loop: realign video once late reports are all in.
     let mut late_reports = true;
     let align_deadline = tokio::time::Instant::now() + ALIGN_WAIT;
+    let mut flush_at = align_deadline;
 
     loop {
         // Next reorder-gap release or receiver report across streams,
@@ -235,7 +237,7 @@ pub(crate) async fn run_udp_session(
                 let delta = deadline.saturating_sub(now).as_micros().max(0) as u64;
                 tokio::time::Instant::now() + std::time::Duration::from_micros(delta)
             });
-            let align_wake = if aligning { Some(align_deadline) } else { None };
+            let align_wake = if aligning { Some(flush_at) } else { None };
             match (media_wake, align_wake) {
                 (Some(a), Some(b)) => {
                     wake = Some(MediaTime::ZERO); // marker: a wake exists
@@ -310,7 +312,7 @@ pub(crate) async fn run_udp_session(
                         let _ = stream.rtcp.send(&report).await;
                     }
                 }
-                if aligning && tokio::time::Instant::now() >= align_deadline {
+                if aligning && tokio::time::Instant::now() >= flush_at {
                     flush_aligned(&mut buffered, &mut align, &needed, generation, tx).await?;
                     aligning = false;
                 }
@@ -320,6 +322,15 @@ pub(crate) async fn run_udp_session(
         if aligning && buffered.len() >= CHANNEL_DEPTH {
             flush_aligned(&mut buffered, &mut align, &needed, generation, tx).await?;
             aligning = false;
+        }
+        let from_rtptime = streams
+            .iter()
+            .all(|s| s.ts_start.is_some() && !s.zero_is_first_packet);
+        if aligning
+            && flush_at == align_deadline
+            && declared_starts_agree(&buffered, &needed, from_rtptime)
+        {
+            flush_at = align_deadline.min(tokio::time::Instant::now() + REPORT_GRACE);
         }
     }
 }

@@ -1,8 +1,13 @@
 //! Sender reports that arrive after frames are already flowing move the
 //! video onto the audio's timeline. Audio keeps its own: downstream it is
-//! the clock master and never gives way.
+//! the clock master and never gives way. The start waits for reports only
+//! briefly when the PLAY `rtptime` starts already agree.
 
-use media_rtsp::{MAX_STREAMS, Realign, StreamAlign, realign_video};
+use std::collections::VecDeque;
+
+use media_rtsp::{
+    MAX_STREAMS, PendingFrame, Realign, StreamAlign, declared_starts_agree, realign_video,
+};
 
 const VIDEO: usize = 0;
 const AUDIO: usize = 1;
@@ -179,4 +184,43 @@ mod start_without_reports {
         let out = flush(vec![frame(AUDIO, 400_000), frame(VIDEO, 0)], &mut align);
         assert_eq!(out, [(1, 400_000), (0, 0)]);
     }
+}
+
+fn first_frames(video_elapsed_us: i64, audio_elapsed_us: i64) -> VecDeque<PendingFrame> {
+    [(VIDEO, video_elapsed_us), (AUDIO, audio_elapsed_us)]
+        .into_iter()
+        .map(|(stream_id, elapsed_us)| PendingFrame {
+            stream_id,
+            data: Vec::new(),
+            elapsed_us,
+            key: true,
+        })
+        .collect()
+}
+
+/// A server that never sends reports early should not hold every join for
+/// the whole wait when its PLAY `rtptime` starts already line the first
+/// frames up: the aligner then waits only a short grace for reports.
+#[test]
+fn rtptime_starts_that_agree_end_the_wait_for_reports() {
+    let needed = [VIDEO, AUDIO];
+    assert!(declared_starts_agree(
+        &first_frames(100_000, 350_000),
+        &needed,
+        true
+    ));
+    assert!(
+        !declared_starts_agree(&first_frames(100_000, 350_001), &needed, true),
+        "starts 250.001 ms apart are not believed"
+    );
+    assert!(
+        !declared_starts_agree(&first_frames(100_000, 100_000), &needed, false),
+        "streams counted from their first packets say nothing about alignment"
+    );
+    let mut video_only = first_frames(100_000, 100_000);
+    video_only.retain(|frame| frame.stream_id == VIDEO);
+    assert!(
+        !declared_starts_agree(&video_only, &needed, true),
+        "a stream with no frame yet cannot be placed"
+    );
 }
