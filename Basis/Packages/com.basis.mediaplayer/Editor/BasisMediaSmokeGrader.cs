@@ -112,7 +112,7 @@ public static class BasisMediaSmokeGrader
         var report = new BasisMediaSmokeReport();
         if (lines == null || lines.Count < 2)
         {
-            report.Failures.Add("the capture is empty — the logger never wrote a row");
+            report.Failures.Add("the capture is empty: the logger never wrote a row");
             return report;
         }
 
@@ -129,7 +129,7 @@ public static class BasisMediaSmokeGrader
         {
             if (!column.ContainsKey(name))
             {
-                report.Failures.Add($"the capture has no '{name}' column — it was written by a different build");
+                report.Failures.Add($"the capture has no '{name}' column; it comes from a different build");
                 return report;
             }
         }
@@ -244,13 +244,13 @@ public static class BasisMediaSmokeGrader
         if (windowSeconds <= 0.5)
         {
             report.Failures.Add(
-                $"only {windowSeconds:F2} s of playing time past the join — too short to grade");
+                $"only {windowSeconds:F2} s of playing time past the join, too short to grade");
             return;
         }
 
         if (report.BackwardsSteps > 0)
             report.Failures.Add(
-                $"the clock went backwards {report.BackwardsSteps} time(s) — that is a snap, not drift");
+                $"the clock snapped backwards {report.BackwardsSteps} time(s)");
 
         double drift = Math.Abs(report.PositionRate - 1.0);
         if (drift > bands.PositionRateTolerance)
@@ -260,7 +260,7 @@ public static class BasisMediaSmokeGrader
         long behind = report.Decoded - report.Presented;
         if (behind > bands.MaxDecodedMinusPresented)
             report.Failures.Add(
-                $"presented trails decoded by {behind} frames — frames are being dropped after decode");
+                $"{behind} decoded frames were dropped before being presented");
 
         if (report.StreamRate > 0)
         {
@@ -269,7 +269,7 @@ public static class BasisMediaSmokeGrader
             {
                 string message =
                     $"audio pulled at {report.PullRate:F0} Hz against a {report.StreamRate} Hz stream " +
-                    $"({ratio:F3}×) — the pull masters the clock, so this drags everything behind it";
+                    $"({ratio:F3}×), and the clock and picture follow the pull";
                 report.Failures.Add(message);
             }
         }
@@ -286,11 +286,11 @@ public static class BasisMediaSmokeGrader
                 $"only {report.IdealHoldShare:P1} of presented frames held for {report.IdealHold} " +
                 $"unity frame(s), against a {bands.MinIdealHoldShare:P0} bar";
             if (bands.EnforceHoldShare) report.Failures.Add(message);
-            else report.Notes.Add(message + " — not enforced off a stable display cadence");
+            else report.Notes.Add(message + " (not enforced off a stable display cadence)");
         }
 
         if (report.MinBankedWhilePlaying <= 0)
-            report.Notes.Add("the bank reached 0 ms while playing — the source was not keeping ahead");
+            report.Notes.Add("the bank reached 0 ms while playing: the source was not keeping ahead");
     }
 
     /// <summary>
@@ -312,7 +312,7 @@ public static class BasisMediaSmokeGrader
         if (report.BoundOutputs <= 0)
         {
             report.Failures.Add(
-                "no audio outputs were bound — the player decoded audio nothing was listening to");
+                "no audio outputs were bound; nothing heard the decoded audio");
             return;
         }
 
@@ -323,14 +323,14 @@ public static class BasisMediaSmokeGrader
             {
                 report.Failures.Add(
                     $"the primary output ran at {report.OutputRate:F0} Hz against a {report.DspRate} Hz device " +
-                    $"({ratio:F3}×) — DSP blocks were missed, which is audible as break-up");
+                    $"({ratio:F3}×): missed DSP blocks, heard as break-up");
             }
         }
 
         if (report.PeakOutputLevel <= 0f)
         {
             report.Failures.Add(
-                "every block the primary output mixed was silent — the outputs ran but carried nothing");
+                "every block the primary output mixed was silent: the outputs ran but carried nothing");
         }
     }
 

@@ -45,7 +45,7 @@ public static class BasisMediaSmokeTest
     {
         if (EditorApplication.isPlayingOrWillChangePlaymode)
         {
-            Report("already in play mode — leave it first", batch, pass: false);
+            Report("already in play mode; leave it first", batch, pass: false);
             return;
         }
 

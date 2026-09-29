@@ -100,7 +100,7 @@ public static class BasisMediaSceneMenu
             // cap cannot really be exercised in it.
             scene = EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
             Debug.LogWarning(
-                "[BasisMedia] initialization scene not found — built on an empty scene instead. " +
+                "[BasisMedia] initialization scene not found; built on an empty scene instead. " +
                 "There is no spawn or floor here, so the distance-based rows cannot be tested.");
         }
 
@@ -145,12 +145,12 @@ public static class BasisMediaSceneMenu
                 ? $"Pre-filled with {clips.Length} lettered test clips."
                 : string.IsNullOrEmpty(fixture)
                     ? "Set a URL on each, then enter play mode."
-                    : "Pre-filled with the engine's A/V fixture — 6 s, which is too "
+                    : "Pre-filled with the engine's 6 s A/V fixture, too "
                       + "short for the rows that need walking. See TESTING.md.";
         Debug.Log($"[BasisMedia] test scene built with {count} {arrangement} player(s). {where} " +
                   "Both captures are on: the per-frame one writes as it goes, the engine's " +
                   $"lands when each session ends. Look in {Application.persistentDataPath}. " +
-                  "The scene is unsaved on purpose — discard it when you are done, or save it " +
+                  "The scene is unsaved on purpose: discard it when you are done, or save it " +
                   "if the pass needs a build.");
     }
 
