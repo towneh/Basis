@@ -141,8 +141,8 @@ fn write_detail(text: &str, out: &mut [u8]) -> u32 {
         out[..bytes.len()].copy_from_slice(bytes);
         return bytes.len() as u32;
     }
-    // Room for the mark first, then back to a boundary — the caller
-    // decodes the whole buffer, so a split character is its problem.
+    // Room for the mark first, then back to a boundary: the caller decodes
+    // the whole buffer, so a split character would be its problem.
     let mut len = out.len() - DETAIL_ELLIPSIS.len();
     while len > 0 && !text.is_char_boundary(len) {
         len -= 1;
@@ -508,7 +508,7 @@ pub unsafe extern "C" fn bm_capabilities(out_buf: *mut u8, cap: usize) -> i32 {
         let json = media_engine::capabilities().to_json();
         let bytes = json.as_bytes();
         if !out_buf.is_null() && cap >= bytes.len() {
-            // SAFETY: caller contract — out_buf points to cap writable
+            // SAFETY: caller contract: out_buf points to cap writable
             // bytes and cap covers the blob.
             unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len()) };
         }
@@ -540,7 +540,7 @@ pub unsafe extern "C" fn bm_session_open(
         if desc_ptr.is_null() || out_handle.is_null() {
             return BM_ERR_INVALID_ARG;
         }
-        // SAFETY: caller contract — desc_ptr points to desc_len readable
+        // SAFETY: caller contract: desc_ptr points to desc_len readable
         // bytes for the duration of this call.
         let bytes = unsafe { std::slice::from_raw_parts(desc_ptr, desc_len) };
         let Ok(descriptor) = serde_json::from_slice::<Descriptor>(bytes) else {
@@ -594,7 +594,7 @@ pub unsafe extern "C" fn bm_session_open(
         let slot = &mut registry.slots[index];
         slot.generation = slot.generation.wrapping_add(1);
         slot.entry = Some(entry);
-        // SAFETY: caller contract — out_handle is valid for writes.
+        // SAFETY: caller contract: out_handle is valid for writes.
         unsafe { *out_handle = pack_handle(index as u32, slot.generation) };
         BM_OK
     }))
@@ -674,7 +674,7 @@ pub unsafe extern "C" fn bm_session_poll(handle: u64, out: *mut BmSnapshot) -> i
             sync_rate_ppm: entry.pipeline.sync_rate_ppm.load(Ordering::Relaxed) as i32,
             events_dropped: saturate_u32(entry.pipeline.diag.events_dropped()),
         };
-        // SAFETY: caller contract — out is valid for writes.
+        // SAFETY: caller contract: out is valid for writes.
         unsafe { out.write(snapshot) };
         BM_OK
     }))
@@ -732,7 +732,7 @@ pub extern "C" fn bm_session_seek(handle: u64, position_us: i64) -> i32 {
     .unwrap_or(BM_ERR_PANIC)
 }
 
-/// Report the managed audio sink's estimated output latency in µs — the
+/// Report the managed audio sink's estimated output latency in µs: the
 /// chain between `bm_session_read_audio` and the speaker (DSP buffers +
 /// HAL headroom). The engine shifts the audio master clock back by it so
 /// video presentation paces to the *audible* position. Send whenever the
@@ -787,7 +787,7 @@ pub unsafe extern "C" fn bm_session_read_audio(
         if out_ptr.is_null() {
             return BM_ERR_INVALID_ARG;
         }
-        // SAFETY: caller contract — out_ptr points to max_samples writable
+        // SAFETY: caller contract: out_ptr points to max_samples writable
         // f32s for the duration of this call.
         let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, max_samples as usize) };
         let Some(entry) = lookup(handle) else {
@@ -827,7 +827,7 @@ pub unsafe extern "C" fn bm_session_drain_events(handle: u64, out: *mut BmEvent,
                 detail_len,
                 detail,
             };
-            // SAFETY: caller contract — out points to cap writable
+            // SAFETY: caller contract: out points to cap writable
             // BmEvents; i < count <= cap.
             unsafe { out.add(i).write(record) };
         }
@@ -861,7 +861,7 @@ pub unsafe extern "C" fn bm_drain_log(
             return BM_ERR_INVALID_ARG;
         }
         if !out_dropped.is_null() {
-            // SAFETY: caller contract — non-NULL points to a writable u64.
+            // SAFETY: caller contract: non-NULL points to a writable u64.
             unsafe { out_dropped.write(media_diag::log_dropped()) };
         }
         let lines = media_diag::drain_log(cap as usize);
@@ -878,7 +878,7 @@ pub unsafe extern "C" fn bm_drain_log(
                 detail_len,
                 detail,
             };
-            // SAFETY: caller contract — out points to cap writable
+            // SAFETY: caller contract: out points to cap writable
             // BmLogRecords; i < count <= cap.
             unsafe { out.add(i).write(record) };
         }
@@ -922,7 +922,7 @@ pub unsafe extern "C" fn bm_session_drain_captions(
                 text,
                 reserved: 0,
             };
-            // SAFETY: caller contract — out points to cap writable
+            // SAFETY: caller contract: out points to cap writable
             // BmCaptions; i < cues.len() <= cap.
             unsafe { out.add(i).write(record) };
         }
@@ -967,7 +967,7 @@ pub unsafe extern "C" fn bm_session_drain_user_data(
                 offset: offset as u32,
                 len: m.payload.len() as u32,
             };
-            // SAFETY: caller contract — out points to cap writable
+            // SAFETY: caller contract: out points to cap writable
             // BmUserDatas and bytes to bytes_cap writable bytes; i <
             // messages.len() <= cap, and the drain bounded the payload
             // total to bytes_cap, so offset + len <= bytes_cap.
@@ -1086,13 +1086,13 @@ pub unsafe extern "C" fn bm_session_get_artwork(
         if art.data.len() > cap as usize {
             return BM_ERR_INVALID_ARG;
         }
-        // SAFETY: caller contract — out points to cap writable bytes and
+        // SAFETY: caller contract: out points to cap writable bytes and
         // the copy is bounded by the check above.
         unsafe { std::ptr::copy_nonoverlapping(art.data.as_ptr(), out, art.data.len()) };
         if !mime.is_null() && mime_cap > 0 {
             let bytes = art.mime.as_bytes();
             let n = bytes.len().min(mime_cap as usize - 1);
-            // SAFETY: caller contract — mime points to mime_cap writable
+            // SAFETY: caller contract: mime points to mime_cap writable
             // bytes; n leaves room for the terminator.
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), mime, n);
@@ -1144,7 +1144,7 @@ pub unsafe extern "C" fn bm_session_get_audio_tracks(
                 label_len,
                 label,
             };
-            // SAFETY: caller contract — out points to cap writable
+            // SAFETY: caller contract: out points to cap writable
             // BmAudioTracks; i < n <= cap.
             unsafe { out.add(i).write(record) };
         }
