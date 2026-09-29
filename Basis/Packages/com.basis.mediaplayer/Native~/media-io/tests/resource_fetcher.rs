@@ -1,12 +1,20 @@
 //! `ResourceFetcher`: the byte cap that bounds how much attacker-chosen
-//! data a playlist lane will buffer, and the origin split that decides
-//! whether the lane has a filesystem arm at all.
+//! data a playlist lane will buffer, the origin split that decides
+//! whether the lane has a filesystem arm at all, and connection reuse
+//! across a live playlist's fetches.
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use media_hls::SegmentFetcher;
-use media_io::{CancelToken, IoLimits, PublicAddressGate, ResourceFetcher};
+use media_io::{
+    AddressGate, AllowAllGate, CancelToken, IoError, IoErrorKind, IoLimits, PublicAddressGate,
+    ResourceFetcher,
+};
 
 /// Per-process scratch directory, created on first use.
 fn scratch_dir() -> PathBuf {
@@ -317,4 +325,240 @@ fn a_root_of_the_current_directory_serves_what_resolves_against_it() {
         .fetch(url, 1024 * 1024)
         .unwrap_or_else(|e| panic!("{url:?} is inside the root and must serve: {e}"));
     assert!(!bytes.is_empty(), "served the manifest");
+}
+
+/// A keep-alive HTTP/1.1 server: `/missing` answers 404, any other path
+/// answers 200 with `body`. Returns the base URL and a count of the
+/// connections it has accepted.
+fn spawn_keep_alive_server(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    let body = Arc::new(body);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            counter.fetch_add(1, Ordering::SeqCst);
+            let body = Arc::clone(&body);
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut stream = stream;
+                loop {
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if header == "\r\n" {
+                            break;
+                        }
+                    }
+                    let missing = request_line.contains(" /missing ");
+                    let (status, payload): (&str, &[u8]) = if missing {
+                        ("404 Not Found", b"")
+                    } else {
+                        ("200 OK", &body)
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n",
+                        payload.len()
+                    );
+                    if stream.write_all(head.as_bytes()).is_err()
+                        || stream.write_all(payload).is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), accepted)
+}
+
+fn loopback_fetcher() -> ResourceFetcher {
+    ResourceFetcher::remote(
+        IoLimits::default(),
+        Arc::new(AllowAllGate),
+        CancelToken::new(),
+    )
+}
+
+#[test]
+fn network_fetches_to_one_host_share_a_connection() {
+    let (base, accepted) = spawn_keep_alive_server(vec![7u8; 4096]);
+    let mut fetcher = loopback_fetcher();
+    for name in [
+        "index.m3u8",
+        "part0.mp4",
+        "part1.mp4",
+        "index.m3u8",
+        "part2.mp4",
+    ] {
+        let bytes = fetcher
+            .fetch(&format!("{base}/{name}"), 1 << 20)
+            .expect("fetch");
+        assert_eq!(bytes.len(), 4096);
+    }
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "a live playlist's reloads and parts ride one connection"
+    );
+}
+
+#[test]
+fn a_network_body_past_the_cap_refuses() {
+    let (base, _) = spawn_keep_alive_server(vec![1u8; 1001]);
+    let mut fetcher = loopback_fetcher();
+    assert_eq!(
+        fetcher
+            .fetch(&format!("{base}/at-cap"), 1001)
+            .expect("at the cap")
+            .len(),
+        1001
+    );
+    let error = fetcher
+        .fetch(&format!("{base}/past-cap"), 1000)
+        .expect_err("one byte past the cap");
+    assert!(error.to_string().contains("cap"), "{error}");
+}
+
+#[test]
+fn a_network_error_status_is_an_http_error_with_its_status() {
+    let (base, _) = spawn_keep_alive_server(vec![0u8; 16]);
+    let mut fetcher = loopback_fetcher();
+    let error = fetcher
+        .fetch(&format!("{base}/missing"), 1 << 20)
+        .expect_err("404");
+    let io = error.downcast_ref::<IoError>().expect("an IoError");
+    assert_eq!(io.kind, IoErrorKind::Http);
+    assert_eq!(io.status, Some(404));
+}
+
+/// Permits everything and counts what it is asked, so a test can see when
+/// a host's addresses are vetted again.
+#[derive(Default)]
+struct CountingGate(AtomicUsize);
+
+impl AddressGate for CountingGate {
+    fn permit(&self, _ip: std::net::IpAddr) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+}
+
+/// Accepts every connection and hangs up without answering, for as long
+/// as the test runs. Returns its port.
+fn spawn_hang_up_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    port
+}
+
+#[test]
+fn a_transport_failure_makes_the_next_fetch_vet_the_host_again() {
+    let (base, _) = spawn_keep_alive_server(vec![3u8; 64]);
+    let port = base.rsplit(':').next().expect("port");
+    let good = format!("http://localhost:{port}/segment");
+    let closed = format!("http://localhost:{}/gone", spawn_hang_up_server());
+    let gate = Arc::new(CountingGate::default());
+    let mut fetcher = ResourceFetcher::remote(
+        IoLimits::default(),
+        Arc::clone(&gate) as Arc<dyn AddressGate>,
+        CancelToken::new(),
+    );
+    let asked = || gate.0.load(Ordering::SeqCst);
+
+    fetcher.fetch(&good, 1 << 20).expect("first fetch");
+    let after_first = asked();
+    fetcher.fetch(&good, 1 << 20).expect("second fetch");
+    let reuse_cost = asked() - after_first;
+
+    fetcher
+        .fetch(&closed, 1 << 20)
+        .expect_err("the server hangs up");
+    let before_retry = asked();
+    fetcher
+        .fetch(&good, 1 << 20)
+        .expect("fetch after the failure");
+    assert!(
+        asked() - before_retry > reuse_cost,
+        "the fetch after a transport failure resolved and vetted the host again \
+         (asked {} times, a reused client {reuse_cost})",
+        asked() - before_retry
+    );
+}
+
+#[test]
+fn a_transport_failure_on_one_host_keeps_another_hosts_client() {
+    let (base, _) = spawn_keep_alive_server(vec![3u8; 64]);
+    let port = base.rsplit(':').next().expect("port");
+    let good = format!("http://localhost:{port}/segment");
+    let elsewhere = format!("http://127.0.0.1:{}/gone", spawn_hang_up_server());
+    let gate = Arc::new(CountingGate::default());
+    let mut fetcher = ResourceFetcher::remote(
+        IoLimits::default(),
+        Arc::clone(&gate) as Arc<dyn AddressGate>,
+        CancelToken::new(),
+    );
+    let asked = || gate.0.load(Ordering::SeqCst);
+
+    fetcher.fetch(&good, 1 << 20).expect("first fetch");
+    let after_first = asked();
+    fetcher.fetch(&good, 1 << 20).expect("second fetch");
+    let reuse_cost = asked() - after_first;
+
+    fetcher
+        .fetch(&elsewhere, 1 << 20)
+        .expect_err("the other host hangs up");
+    let before_retry = asked();
+    fetcher
+        .fetch(&good, 1 << 20)
+        .expect("fetch after the failure");
+    assert_eq!(
+        asked() - before_retry,
+        reuse_cost,
+        "the healthy host's client was kept"
+    );
+}
+
+#[test]
+fn a_stated_length_past_the_cap_refuses_before_the_body() {
+    // States 2000 bytes and never sends one, holding the connection open.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+            line.clear();
+        }
+        let mut stream = stream;
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n");
+        thread::sleep(std::time::Duration::from_secs(30));
+    });
+    let mut fetcher = loopback_fetcher();
+    let started = std::time::Instant::now();
+    let error = fetcher
+        .fetch(&format!("http://127.0.0.1:{port}/big"), 1000)
+        .expect_err("stated past the cap");
+    let io = error.downcast_ref::<IoError>().expect("an IoError");
+    assert_eq!(io.kind, IoErrorKind::Cap, "{error}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "refused on the stated length, not after waiting for the body"
+    );
 }

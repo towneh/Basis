@@ -1,7 +1,9 @@
 //! Whole-resource fetcher for playlist-driven lanes (HLS). Every fetch is
-//! either an independent, cancellable GET, with each URL re-running the
-//! resolve → vet → pinned-connect discipline, or a local file read for
-//! fixture playback.
+//! either a cancellable GET or a local file read for fixture playback. A
+//! GET goes out on a client pinned to its host's vetted addresses, and a
+//! host's client is kept until a fetch to that host fails in transport: a
+//! live playlist's reloads, segments and parts reuse its open connections.
+//! Each hop of a redirect is vetted and pinned the same way.
 //!
 //! Which of those two a fetcher can do is fixed when it is built, from
 //! where the session's playlist came from, and never widens afterwards. A
@@ -16,10 +18,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use media_demux::{ByteSource, SourceError};
+use media_demux::SourceError;
 use media_hls::SegmentFetcher;
+use url::Url;
 
-use crate::{AddressGate, CancelToken, HttpLiveSource, IoError, IoErrorKind, IoLimits};
+use crate::http::{PinnedClients, awaiting, follow};
+use crate::{AddressGate, CancelToken, IoError, IoErrorKind, IoLimits};
 
 /// The directory a disk-origin playlist's reads are confined to, kept in
 /// both forms because the two screens need different ones: the path as
@@ -37,6 +41,8 @@ pub struct ResourceFetcher {
     /// The directory local reads resolve within. `None` is a
     /// network-origin playlist, which has no local arm.
     root: Option<LocalRoot>,
+    /// One pinned client per host, kept across fetches.
+    clients: PinnedClients,
 }
 
 /// The file `url` names, confined to `root`, or a refusal.
@@ -89,6 +95,7 @@ impl ResourceFetcher {
             gate,
             cancel,
             root: None,
+            clients: PinnedClients::default(),
         }
     }
 
@@ -112,7 +119,74 @@ impl ResourceFetcher {
                 given: root.to_path_buf(),
                 canonical,
             }),
+            clients: PinnedClients::default(),
         })
+    }
+}
+
+impl ResourceFetcher {
+    fn fetch_remote(&mut self, url: &str, cap: u64) -> Result<Vec<u8>, IoError> {
+        let origin =
+            Url::parse(url).map_err(|e| IoError::new(IoErrorKind::Url, format!("{url}: {e}")))?;
+        let Self {
+            limits,
+            gate,
+            cancel,
+            clients,
+            ..
+        } = self;
+        clients.clear_last();
+        let fetched = awaiting(cancel, IoErrorKind::Read, "fetch cancelled", async {
+            let (at, mut response) = follow(
+                &mut *clients,
+                &origin,
+                limits,
+                gate.as_ref(),
+                None,
+                IoErrorKind::Connect,
+            )
+            .await?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(IoError {
+                    kind: IoErrorKind::Http,
+                    status: Some(status.as_u16()),
+                    detail: format!("GET {at}"),
+                });
+            }
+            if let Some(stated) = response.content_length()
+                && stated > cap
+            {
+                return Err(IoError::new(
+                    IoErrorKind::Cap,
+                    format!("resource exceeds the {cap}-byte cap: {url}"),
+                ));
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| IoError::from_chain(IoErrorKind::Read, &e))?
+            {
+                if bytes.len() as u64 + chunk.len() as u64 > cap {
+                    return Err(IoError::new(
+                        IoErrorKind::Cap,
+                        format!("resource exceeds the {cap}-byte cap: {url}"),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
+        });
+        // A host whose pinned addresses stop answering may have moved; the
+        // next fetch to it resolves and vets it afresh.
+        if let Err(e) = &fetched
+            && matches!(e.kind, IoErrorKind::Connect | IoErrorKind::Read)
+            && !cancel.is_cancelled()
+        {
+            clients.forget_last();
+        }
+        fetched
     }
 }
 
@@ -122,25 +196,8 @@ impl SegmentFetcher for ResourceFetcher {
             return Err("fetch cancelled".into());
         }
         if url.starts_with("http://") || url.starts_with("https://") {
-            let mut source = HttpLiveSource::open(
-                url,
-                self.limits.clone(),
-                Arc::clone(&self.gate),
-                self.cancel.child(),
-            )
-            .map_err(|e| Box::new(e) as SourceError)?;
-            let mut bytes = Vec::new();
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = source.read_at(bytes.len() as u64, &mut buf)?;
-                if n == 0 {
-                    return Ok(bytes);
-                }
-                if bytes.len() as u64 + n as u64 > cap {
-                    return Err(format!("resource exceeds the {cap}-byte cap: {url}").into());
-                }
-                bytes.extend_from_slice(&buf[..n]);
-            }
+            self.fetch_remote(url, cap)
+                .map_err(|e| Box::new(e) as SourceError)
         } else {
             let Some(root) = self.root.as_ref() else {
                 return Err(format!(

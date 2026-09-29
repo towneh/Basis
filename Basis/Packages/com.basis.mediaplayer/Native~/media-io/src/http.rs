@@ -567,7 +567,7 @@ impl ByteSource for HttpSource {
 /// cancel token. The live source gets that race from the `select!` around
 /// its own open; this lane stays synchronous all the way down to the demux
 /// thread, so the race belongs at each call instead.
-fn awaiting<T>(
+pub(crate) fn awaiting<T>(
     cancel: &CancelToken,
     kind: IoErrorKind,
     detail: &'static str,
@@ -581,14 +581,18 @@ fn awaiting<T>(
     })
 }
 
-/// The pinned client for each host a source has been sent to. A ranged
+/// The pinned client for each host a source or playlist fetcher has been
+/// sent to. A ranged
 /// source asks again every chunk and every request walks from the URL the
 /// caller opened, so without these a redirected source would pay a resolve
 /// and a handshake per hop per chunk. A client held here only ever connects
 /// to the addresses that were vetted when it was built.
 #[derive(Default)]
-struct PinnedClients {
+pub(crate) struct PinnedClients {
     by_host: Vec<(String, reqwest::Client)>,
+    /// The host most recently handed a client since `clear_last`: where a
+    /// failure happened, whichever hop of a redirect walk it was on.
+    last: Option<String>,
 }
 
 impl PinnedClients {
@@ -602,6 +606,7 @@ impl PinnedClients {
         // scheme belongs to the URL, not to the host.
         vet_target(url, gate)?;
         let host = url.host_str().unwrap_or_default();
+        self.last = Some(host.to_string());
         if let Some((_, client)) = self.by_host.iter().find(|(known, _)| known == host) {
             return Ok(client.clone());
         }
@@ -613,13 +618,25 @@ impl PinnedClients {
         self.by_host.push((host.to_string(), client.clone()));
         Ok(client)
     }
+
+    pub(crate) fn clear_last(&mut self) {
+        self.last = None;
+    }
+
+    /// Drop the client of the host last handed one, so that host is
+    /// resolved and vetted afresh next time.
+    pub(crate) fn forget_last(&mut self) {
+        if let Some(host) = self.last.take() {
+            self.by_host.retain(|(known, _)| *known != host);
+        }
+    }
 }
 
 /// Send one GET to `origin` and follow what it answers, one hop at a time
 /// so that each target is vetted and pinned before anything is sent to it.
 /// Returns the first response that is not a redirect, whatever its status,
 /// with the URL that gave it.
-async fn follow(
+pub(crate) async fn follow(
     clients: &mut PinnedClients,
     origin: &Url,
     limits: &IoLimits,
