@@ -380,6 +380,27 @@ fn wav_refuses_what_the_pcm_adapter_cannot_play() {
     );
 }
 
+/// A parse error from any demuxer carries the neutral `parse:` label ahead
+/// of the demuxer's own message.
+#[test]
+fn a_wav_parse_error_reads_as_wav() {
+    let mut wav = b"RIFF".to_vec();
+    wav.extend_from_slice(&20u32.to_le_bytes());
+    wav.extend_from_slice(b"WAVEdata");
+    wav.extend_from_slice(&8u32.to_le_bytes());
+    wav.extend_from_slice(&[0u8; 8]);
+
+    assert_eq!(sniff_container(&wav), Some(ContainerKind::Wav));
+    let err = open_auto(
+        Box::new(MemSource(wav)),
+        DemuxLimits::default(),
+        Generation::default(),
+    )
+    .err()
+    .expect("a data chunk before fmt refuses");
+    assert_eq!(err.to_string(), "parse: WAV data chunk before fmt");
+}
+
 #[test]
 fn wav_handles_the_shapes_a_writer_leaves_behind() {
     fn riff(chunks: &[u8]) -> Vec<u8> {

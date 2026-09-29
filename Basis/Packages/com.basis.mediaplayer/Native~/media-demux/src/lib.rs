@@ -188,7 +188,7 @@ impl fmt::Display for DemuxError {
         match self {
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Source(e) => write!(f, "source: {e}"),
-            Self::Parse(e) => write!(f, "mp4 parse: {e}"),
+            Self::Parse(e) => write!(f, "parse: {e}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
             Self::Refused(why) => f.write_str(why),
             Self::Cap(what) => write!(f, "cap exceeded: {what}"),

@@ -731,7 +731,7 @@ impl Mp4Demuxer {
             .index
             .entries
             .get(at)
-            .ok_or(DemuxError::Parse("subsegment past the index".into()))?;
+            .ok_or(DemuxError::Parse("mp4: subsegment past the index".into()))?;
         if anchor {
             let index_scale = fragments.index.timescale;
             for (id, defaults) in &fragments.defaults {
@@ -754,7 +754,7 @@ impl Mp4Demuxer {
                 &mut fragments.cursors,
                 &mut budget,
             )
-            .map_err(|why| DemuxError::Parse(why.into()))?;
+            .map_err(|why| DemuxError::Parse(format!("mp4: {why}")))?;
             for (track_id, samples) in built {
                 let (out, shift) = if Some(track_id) == video_id {
                     (&mut loaded.video, video_shift)
@@ -1222,7 +1222,7 @@ fn read_metadata(
     match parsed {
         Ok(Ok(mp4)) => Ok(mp4),
         Ok(Err(re_mp4::Error::Io(io))) => Err(DemuxError::Io(io)),
-        Ok(Err(other)) => Err(DemuxError::Parse(other.to_string())),
+        Ok(Err(other)) => Err(DemuxError::Parse(format!("mp4: {other}"))),
         Err(_) => Err(DemuxError::Parse(
             "mp4 parser panicked on inconsistent metadata".into(),
         )),
@@ -1363,7 +1363,7 @@ fn read_subsegment(
     while end - pos >= 8 {
         reader.seek(SeekFrom::Start(pos)).map_err(DemuxError::Io)?;
         let header = BoxHeader::read(&mut reader)
-            .map_err(|e| DemuxError::Parse(format!("subsegment box header: {e}")))?;
+            .map_err(|e| DemuxError::Parse(format!("mp4: subsegment box header: {e}")))?;
         let body = reader.stream_position().map_err(DemuxError::Io)?;
         // As in the prefix walk, the size counts from `body - 8`, so a
         // 64-bit header's box reaches eight bytes further than its size,
@@ -1371,7 +1371,8 @@ fn read_subsegment(
         // ends when `pos` reaches `end`, so a sum that wrapped would
         // step backwards and could cycle rather than finish.
         let size = header.size;
-        let past_the_end = DemuxError::Parse("a box in the subsegment runs past its end".into());
+        let past_the_end =
+            DemuxError::Parse("mp4: a box in the subsegment runs past its end".into());
         let Some(next) = (body - 8).checked_add(size) else {
             return Err(past_the_end);
         };
@@ -1385,7 +1386,7 @@ fn read_subsegment(
             let moof = match catch_unwind(AssertUnwindSafe(|| MoofBox::read_box(&mut reader, size)))
             {
                 Ok(Ok(moof)) => moof,
-                Ok(Err(e)) => return Err(DemuxError::Parse(format!("movie fragment: {e}"))),
+                Ok(Err(e)) => return Err(DemuxError::Parse(format!("mp4: movie fragment: {e}"))),
                 Err(_) => {
                     return Err(DemuxError::Parse(
                         "mp4 parser panicked on a movie fragment".into(),
@@ -1404,7 +1405,7 @@ fn read_subsegment(
                 || kind == u32::from(BoxType::FreeBox);
             if !allowed {
                 return Err(DemuxError::Parse(
-                    "the segment index does not land on a movie fragment".into(),
+                    "mp4: the segment index does not land on a movie fragment".into(),
                 ));
             }
         }
@@ -1413,7 +1414,7 @@ fn read_subsegment(
 
     if moofs.is_empty() {
         return Err(DemuxError::Parse(
-            "the segment index does not land on a movie fragment".into(),
+            "mp4: the segment index does not land on a movie fragment".into(),
         ));
     }
     Ok(moofs)
