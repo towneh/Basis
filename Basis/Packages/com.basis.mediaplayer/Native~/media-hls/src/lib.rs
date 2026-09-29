@@ -18,6 +18,12 @@
 //! with `_HLS_msn`/`_HLS_part` so the server
 //! answers as soon as the next part exists. Parts flow through the same
 //! TS chain or per-fragment fMP4 parse as segments.
+//!
+//! A variant whose audio is a separate rendition (`EXT-X-MEDIA
+//! TYPE=AUDIO` with a URI) names that rendition's playlist
+//! ([`HlsDemuxer::audio_rendition`]); the engine opens it as a second
+//! demuxer ([`HlsDemuxer::open_rendition`]), joined at the same point on
+//! the timeline as the variant.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -189,6 +195,8 @@ pub struct PlaylistSegment {
     pub map_url: Option<String>,
     /// Its partial segments, when the playlist's parts are in use.
     pub parts: Vec<PlaylistPart>,
+    /// `EXT-X-PROGRAM-DATE-TIME`, milliseconds since the Unix epoch.
+    pub program_time_ms: Option<i64>,
 }
 
 /// One Low-Latency HLS partial segment (`EXT-X-PART`).
@@ -410,10 +418,23 @@ fn scan_low_latency(text: &str, base_url: &str) -> LowLatencyTags {
     tags
 }
 
+/// One variant of a master playlist.
+#[derive(Debug, Clone)]
+pub struct Variant {
+    pub bandwidth: u64,
+    pub url: String,
+    /// The playlist of its audio rendition: of the `EXT-X-MEDIA
+    /// TYPE=AUDIO` entries in its `AUDIO` group, the `DEFAULT=YES` one,
+    /// else the first `AUTOSELECT=YES`, else the first. `None` when that
+    /// entry has no URI, since its audio is muxed in the variant (RFC 8216
+    /// §4.3.4.1); `Err` when its URI was refused, with the reason.
+    pub audio_url: Option<Result<String, String>>,
+}
+
 /// A parsed playlist of either kind; also the fuzz target's surface.
 pub enum ParsedPlaylist {
-    /// (bandwidth, resolved URI) per variant, best candidate first.
-    Master(Vec<(u64, String)>),
+    /// Its variants, best candidate first.
+    Master(Vec<Variant>),
     Media(Box<PlaylistWindow>),
 }
 
@@ -424,19 +445,40 @@ pub fn parse_playlist(bytes: &[u8], base_url: &str) -> Result<ParsedPlaylist, De
         .map_err(|_| DemuxError::Parse("not a valid m3u8 playlist".into()))?;
     match playlist {
         m3u8_rs::Playlist::MasterPlaylist(master) => {
-            let mut variants: Vec<(u64, String)> = Vec::new();
+            let mut variants: Vec<Variant> = Vec::new();
             for variant in &master.variants {
                 if variant.is_i_frame {
                     continue;
                 }
-                variants.push((variant.bandwidth, resolve(base_url, &variant.uri)?));
+                let group: Vec<&m3u8_rs::AlternativeMedia> = master
+                    .alternatives
+                    .iter()
+                    .filter(|media| {
+                        media.media_type == m3u8_rs::AlternativeMediaType::Audio
+                            && Some(&media.group_id) == variant.audio.as_ref()
+                    })
+                    .collect();
+                let chosen = group
+                    .iter()
+                    .find(|media| media.default)
+                    .or_else(|| group.iter().find(|media| media.autoselect))
+                    .or(group.first());
+                // A refused rendition costs the audio leg, not the variant.
+                let audio_url = chosen
+                    .and_then(|media| media.uri.as_deref())
+                    .map(|uri| resolve(base_url, uri).map_err(|e| e.to_string()));
+                variants.push(Variant {
+                    bandwidth: variant.bandwidth,
+                    url: resolve(base_url, &variant.uri)?,
+                    audio_url,
+                });
             }
             if variants.is_empty() {
                 return Err(DemuxError::Unsupported(
                     "master playlist with no usable variant",
                 ));
             }
-            variants.sort_by_key(|v| std::cmp::Reverse(v.0));
+            variants.sort_by_key(|v| std::cmp::Reverse(v.bandwidth));
             Ok(ParsedPlaylist::Master(variants))
         }
         m3u8_rs::Playlist::MediaPlaylist(media) => {
@@ -478,6 +520,9 @@ pub fn parse_playlist(bytes: &[u8], base_url: &str) -> Result<ParsedPlaylist, De
                     discontinuity: segment.discontinuity,
                     map_url: current_map.clone(),
                     parts: Vec::new(),
+                    program_time_ms: segment
+                        .program_date_time
+                        .map(|time| time.timestamp_millis()),
                 });
             }
 
@@ -581,6 +626,29 @@ impl Cursor {
             part: None,
         }
     }
+}
+
+/// A point in the window a decoder can start from.
+#[derive(Debug, Clone, Copy)]
+struct JoinPoint {
+    /// From the start of the window.
+    at: MediaTime,
+    /// Program time here, milliseconds since the Unix epoch, when the
+    /// playlist states one.
+    program_ms: Option<i64>,
+    cursor: Cursor,
+}
+
+/// Where a live playlist joined, so that a rendition of the same
+/// presentation can join at the same point on the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinAnchor {
+    pub sequence: u64,
+    /// `None` for a whole segment.
+    pub part: Option<usize>,
+    /// Program time at the join, milliseconds since the Unix epoch, when
+    /// the playlist states one.
+    pub program_time_ms: Option<i64>,
 }
 
 /// What the cursor points at in the current window.
@@ -765,7 +833,7 @@ impl Scheduler {
         loop {
             // Fell out of the window: jump to the live join point and say so.
             if self.live && self.cursor.sequence < self.window.first_sequence {
-                let (jump_to, _) = self.live_join();
+                let jump_to = self.live_join().0.cursor;
                 let from = self.cursor.sequence;
                 push_note(&mut self.notes, || {
                     format!(
@@ -846,53 +914,74 @@ impl Scheduler {
         }
     }
 
-    /// Where a live session starts, and how far that is behind the end
-    /// (RFC 8216bis §6.3.3): the playlist's `EXT-X-START`, else its hold
-    /// back behind the end (`PART-HOLD-BACK` when riding parts,
-    /// `HOLD-BACK` otherwise, three target durations when unstated),
-    /// snapped back to the nearest point a decoder can start from.
-    fn live_join(&self) -> (Cursor, MediaTime) {
+    /// Every point in the window a decoder can start from, in playlist
+    /// order, and where the window ends. Program time runs on from the
+    /// last `EXT-X-PROGRAM-DATE-TIME` stated at or before a point.
+    fn join_points(&self) -> (Vec<JoinPoint>, MediaTime) {
         let window = &self.window;
         let low_latency = window.low_latency.as_ref();
-        let mut points: Vec<(MediaTime, Cursor)> = Vec::new();
+        let mut points = Vec::new();
         let mut at = MediaTime::ZERO;
+        let mut program_ms: Option<i64> = None;
         for (offset, segment) in window.segments.iter().enumerate() {
             let sequence = window.first_sequence + offset as u64;
-            points.push((at, Cursor::segment(sequence)));
+            if segment.program_time_ms.is_some() {
+                program_ms = segment.program_time_ms;
+            }
+            let start_ms = program_ms;
+            points.push(JoinPoint {
+                at,
+                program_ms: start_ms,
+                cursor: Cursor::segment(sequence),
+            });
             if low_latency.is_some() {
                 let starts = part_starts(&segment.parts, Some(segment.duration));
                 for (index, (part, start)) in segment.parts.iter().zip(starts).enumerate() {
                     // A part at the segment's own start is the segment.
                     if start > MediaTime::ZERO && part.independent && !part.gap {
-                        points.push((
-                            at + start,
-                            Cursor {
+                        points.push(JoinPoint {
+                            at: at + start,
+                            program_ms: start_ms.map(|ms| ms + start.as_millis()),
+                            cursor: Cursor {
                                 sequence,
                                 part: Some(index),
                             },
-                        ));
+                        });
                     }
                 }
             }
             at += segment.duration;
+            program_ms = start_ms.map(|ms| ms + segment.duration.as_millis());
         }
         if let Some(ll) = low_latency {
             let sequence = window.in_progress_sequence();
+            let start = at;
             for (index, part) in ll.in_progress.parts.iter().enumerate() {
                 if part.independent && !part.gap {
-                    points.push((
+                    points.push(JoinPoint {
                         at,
-                        Cursor {
+                        program_ms: program_ms.map(|ms| ms + (at - start).as_millis()),
+                        cursor: Cursor {
                             sequence,
                             part: Some(index),
                         },
-                    ));
+                    });
                 }
                 at += part.duration;
             }
         }
-        let end = at;
-        let target = match (window.start_offset, low_latency) {
+        (points, at)
+    }
+
+    /// Where a live session starts, and how far that is behind the end
+    /// (RFC 8216bis §6.3.3): the playlist's `EXT-X-START`, else its hold
+    /// back behind the end (`PART-HOLD-BACK` when riding parts,
+    /// `HOLD-BACK` otherwise, three target durations when unstated),
+    /// snapped back to the nearest point a decoder can start from.
+    fn live_join(&self) -> (JoinPoint, MediaTime) {
+        let window = &self.window;
+        let (points, end) = self.join_points();
+        let target = match (window.start_offset, window.low_latency.as_ref()) {
             (Some(offset), _) if offset < MediaTime::ZERO => end + offset,
             (Some(offset), _) => offset,
             (None, Some(ll)) => end - ll.part_hold_back,
@@ -903,17 +992,52 @@ impl Scheduler {
             }
         }
         .clamp(MediaTime::ZERO, end);
-        let (start, cursor) = points
+        let point = points
             .iter()
             .rev()
-            .find(|(start, _)| *start <= target)
+            .find(|point| point.at <= target)
             .or(points.first())
             .copied()
-            .unwrap_or((
-                MediaTime::ZERO,
-                Cursor::segment(window.in_progress_sequence()),
-            ));
-        (cursor, end - start)
+            .unwrap_or(JoinPoint {
+                at: MediaTime::ZERO,
+                program_ms: None,
+                cursor: Cursor::segment(window.in_progress_sequence()),
+            });
+        (point, end - point.at)
+    }
+
+    /// Where a rendition joins to meet another playlist's join on the
+    /// timeline, as hls.js aligns renditions: by program time when both
+    /// playlists state one (the last point at or before it, within a target
+    /// duration), else by the
+    /// same sequence number, on the same part when this window lists it
+    /// as a start point. `None` when neither lands in this window.
+    fn aligned_join(&self, anchor: JoinAnchor) -> Option<(Cursor, &'static str)> {
+        let (points, _) = self.join_points();
+        if let Some(target) = anchor.program_time_ms
+            && let Some(point) = points
+                .iter()
+                .rev()
+                .find(|point| point.program_ms.is_some_and(|ms| ms <= target))
+            && point
+                .program_ms
+                .is_some_and(|ms| target - ms <= self.window.target_duration.as_millis())
+        {
+            return Some((point.cursor, "program time"));
+        }
+        let wanted = Cursor {
+            sequence: anchor.sequence,
+            part: anchor.part,
+        };
+        points
+            .iter()
+            .find(|point| point.cursor == wanted)
+            .or_else(|| {
+                points
+                    .iter()
+                    .find(|point| point.cursor.sequence == anchor.sequence)
+            })
+            .map(|point| (point.cursor, "sequence number"))
     }
 
     /// The playlist URL with the blocking-reload directives (RFC 8216bis
@@ -1264,6 +1388,8 @@ pub struct HlsDemuxer {
     pending: VecDeque<StreamEvent>,
     ended: bool,
     notes: Vec<String>,
+    audio_rendition: Option<Result<String, String>>,
+    join_anchor: Option<JoinAnchor>,
 }
 
 impl HlsDemuxer {
@@ -1272,26 +1398,76 @@ impl HlsDemuxer {
     pub fn open(
         playlist_url: &str,
         playlist_bytes: Vec<u8>,
-        mut fetcher: Box<dyn SegmentFetcher>,
+        fetcher: Box<dyn SegmentFetcher>,
         limits: DemuxLimits,
         generation: Generation,
     ) -> Result<Self, DemuxError> {
+        Self::open_with(
+            playlist_url,
+            playlist_bytes,
+            fetcher,
+            limits,
+            generation,
+            None,
+        )
+    }
+
+    /// Open an audio rendition's media playlist, as named by
+    /// [`HlsDemuxer::audio_rendition`]. On a live playlist it joins where
+    /// `anchor` (the variant's [`HlsDemuxer::join_anchor`]) sits on the
+    /// timeline, or on its own hold-back when nothing lines up.
+    pub fn open_rendition(
+        playlist_url: &str,
+        playlist_bytes: Vec<u8>,
+        fetcher: Box<dyn SegmentFetcher>,
+        limits: DemuxLimits,
+        generation: Generation,
+        anchor: Option<JoinAnchor>,
+    ) -> Result<Self, DemuxError> {
+        if let ParsedPlaylist::Master(_) = parse_playlist(&playlist_bytes, playlist_url)? {
+            return Err(DemuxError::Unsupported(
+                "audio rendition is a master playlist",
+            ));
+        }
+        Self::open_with(
+            playlist_url,
+            playlist_bytes,
+            fetcher,
+            limits,
+            generation,
+            Some(anchor),
+        )
+    }
+
+    /// `rendition` is `None` for a variant or a single playlist, and
+    /// `Some` of the variant's join (if it had one) for an audio rendition.
+    fn open_with(
+        playlist_url: &str,
+        playlist_bytes: Vec<u8>,
+        mut fetcher: Box<dyn SegmentFetcher>,
+        limits: DemuxLimits,
+        generation: Generation,
+        rendition: Option<Option<JoinAnchor>>,
+    ) -> Result<Self, DemuxError> {
         let mut url = playlist_url.to_string();
         let mut notes = Vec::new();
+        let mut audio_rendition = None;
         let window = match parse_playlist(&playlist_bytes, &url)? {
             ParsedPlaylist::Media(window) => *window,
             ParsedPlaylist::Master(variants) => {
-                let (bandwidth, variant_url) = variants[0].clone();
+                let chosen = variants[0].clone();
                 push_note(&mut notes, || {
                     format!(
-                        "master playlist: picked {bandwidth} bps of {} variants",
+                        "master playlist: picked {} bps of {} variants",
+                        chosen.bandwidth,
                         variants.len()
                     )
                 });
                 let bytes = fetcher
-                    .fetch(&variant_url, PLAYLIST_CAP)
+                    .fetch(&chosen.url, PLAYLIST_CAP)
                     .map_err(DemuxError::Source)?;
-                url = variant_url;
+                url = chosen.url;
+                audio_rendition = chosen.audio_url;
                 match parse_playlist(&bytes, &url)? {
                     ParsedPlaylist::Media(window) => *window,
                     ParsedPlaylist::Master(_) => {
@@ -1326,23 +1502,53 @@ impl HlsDemuxer {
             blocking_refused: false,
             notes,
         };
+        let mut join_anchor = None;
         if live {
-            let (join, behind) = scheduler.live_join();
-            scheduler.cursor = join;
+            let (point, behind) = scheduler.live_join();
+            let aligned = rendition
+                .flatten()
+                .and_then(|anchor| scheduler.aligned_join(anchor));
+            let joined = aligned.map_or(point.cursor, |(cursor, _)| cursor);
+            scheduler.cursor = joined;
+            join_anchor = Some(JoinAnchor {
+                sequence: joined.sequence,
+                part: joined.part,
+                program_time_ms: scheduler
+                    .join_points()
+                    .0
+                    .iter()
+                    .find(|p| p.cursor == joined)
+                    .and_then(|p| p.program_ms),
+            });
             if let Some(why) = scheduler.window.low_latency_declined {
                 push_note(&mut scheduler.notes, || {
                     format!("low-latency parts not used ({why}); playing whole segments")
                 });
             }
-            if scheduler.window.low_latency.is_some() {
-                push_note(&mut scheduler.notes, || {
-                    let part = join.part.unwrap_or(0);
+            let join = scheduler.cursor;
+            let at = match join.part {
+                Some(part) => format!("sequence {} part {part}", join.sequence),
+                None => format!("sequence {}", join.sequence),
+            };
+            match (rendition, aligned) {
+                (Some(_), Some((_, by))) => push_note(&mut scheduler.notes, || {
+                    format!("audio rendition: joining {at}, aligned with the variant by {by}")
+                }),
+                (Some(_), None) => push_note(&mut scheduler.notes, || {
                     format!(
-                        "low-latency HLS: joining sequence {} part {part}, {} ms behind the end",
-                        join.sequence,
+                        "audio rendition: joining {at}, {} ms behind the end (nothing lines up with the variant's join)",
                         behind.as_millis()
                     )
-                });
+                }),
+                (None, _) if scheduler.window.low_latency.is_some() => {
+                    push_note(&mut scheduler.notes, || {
+                        format!(
+                            "low-latency HLS: joining {at}, {} ms behind the end",
+                            behind.as_millis()
+                        )
+                    });
+                }
+                (None, _) => {}
             }
         }
 
@@ -1356,7 +1562,23 @@ impl HlsDemuxer {
             pending: VecDeque::new(),
             ended: false,
             notes: Vec::new(),
+            audio_rendition,
+            join_anchor,
         })
+    }
+
+    /// The playlist of the chosen variant's audio rendition, when its
+    /// audio is carried apart from the variant.
+    pub fn audio_rendition(&self) -> Option<Result<&str, &str>> {
+        self.audio_rendition
+            .as_ref()
+            .map(|rendition| rendition.as_deref().map_err(String::as_str))
+    }
+
+    /// Where a live playlist joined, for opening a rendition at the same
+    /// point. `None` on an on-demand playlist, which starts at the top.
+    pub fn join_anchor(&self) -> Option<JoinAnchor> {
+        self.join_anchor
     }
 
     /// Liveness as the playlist itself states it (`EXT-X-ENDLIST` ⇒ VOD).

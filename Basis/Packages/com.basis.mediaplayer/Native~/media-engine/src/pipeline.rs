@@ -1608,7 +1608,14 @@ pub fn run_demux_leg(
                             }
                         }
                     }
-                    px.fail(EngineError::demux(e));
+                    let refused = matches!(e, media_demux::DemuxError::Refused(_));
+                    let mut error = EngineError::demux(e);
+                    // Named beside whatever else was left out, such as an
+                    // audio rendition that could not be opened.
+                    if refused {
+                        error.detail = px.playable.all_reasons_with(&error.detail);
+                    }
+                    px.fail(error);
                     return;
                 }
             },

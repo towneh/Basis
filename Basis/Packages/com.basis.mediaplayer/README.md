@@ -351,8 +351,10 @@ SEI survives repackaging but not re-encoding.
   next keyframe.
 - An MPEG-TS file opened directly plays from the start with no duration and
   no seeking. The same content served as HLS seeks.
-- HLS plays the highest-quality variant with no switching. Encrypted,
-  byte-range and keyframe-only playlists are refused.
+- HLS plays the highest-quality variant with no switching. Audio carried
+  as a separate rendition plays the variant's default choice, with no
+  language selection. Encrypted, byte-range and keyframe-only playlists
+  are refused.
 - WHEP never requests a keyframe; unrecovered loss lasts until the next one.
 - Shared playback is not enforced by the server, which relays its messages
   without inspecting them and keeps no media state.

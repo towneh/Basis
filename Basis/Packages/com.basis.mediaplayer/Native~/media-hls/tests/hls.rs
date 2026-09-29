@@ -953,6 +953,176 @@ fn ll_fmp4_parts_play_against_the_init_segment() {
     );
 }
 
+#[test]
+fn a_variant_names_its_default_audio_rendition() {
+    let master = "#EXTM3U\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"dub\",AUTOSELECT=YES,URI=\"dub.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"main.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"auto\",NAME=\"a\",URI=\"plain.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"auto\",NAME=\"b\",AUTOSELECT=YES,URI=\"auto.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"first\",NAME=\"x\",URI=\"x.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"first\",NAME=\"y\",URI=\"y.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"muxed\",NAME=\"m\",DEFAULT=YES\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"beside\",NAME=\"English\",DEFAULT=YES,AUTOSELECT=YES\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"beside\",NAME=\"French\",AUTOSELECT=YES,URI=\"fr.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"refused\",NAME=\"r\",DEFAULT=YES,URI=\"ftp://elsewhere/r.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=7000,AUDIO=\"refused\"\ntop.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=6000,AUDIO=\"beside\"\nbeside.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=5000,AUDIO=\"aud\"\nhi.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=4000,AUDIO=\"auto\"\nmid.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=3000,AUDIO=\"first\"\nlow.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=2000,AUDIO=\"muxed\"\nlower.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=1000\nlowest.m3u8\n";
+    let Ok(ParsedPlaylist::Master(variants)) = media_hls::parse_playlist(master.as_bytes(), BASE)
+    else {
+        panic!("master playlist expected");
+    };
+    let named: Vec<(&str, Option<&str>)> = variants
+        .iter()
+        .map(|v| {
+            let audio = v.audio_url.as_ref().map(|rendition| match rendition {
+                Ok(url) => url.as_str(),
+                Err(_) => "refused",
+            });
+            (v.url.as_str(), audio)
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("https://test/top.m3u8", Some("refused")),
+            ("https://test/beside.m3u8", None),
+            ("https://test/hi.m3u8", Some("https://test/main.m3u8")),
+            ("https://test/mid.m3u8", Some("https://test/auto.m3u8")),
+            ("https://test/low.m3u8", Some("https://test/x.m3u8")),
+            ("https://test/lower.m3u8", None),
+            ("https://test/lowest.m3u8", None),
+        ],
+        "DEFAULT, else AUTOSELECT, else the first; none when the chosen entry is muxed, \
+         even beside one with a URI; a refused URI does not refuse the playlist"
+    );
+}
+
+/// A live variant of five 2 s segments from sequence 100: its join is
+/// three target durations back, at sequence 102 (4 s in).
+fn live_variant(with_program_time: bool) -> String {
+    let program_time = if with_program_time {
+        "#EXT-X-PROGRAM-DATE-TIME:2026-09-29T10:00:00.000Z\n"
+    } else {
+        ""
+    };
+    format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:100\n{program_time}\
+#EXTINF:2.0,\nv100.ts\n#EXTINF:2.0,\nv101.ts\n#EXTINF:2.0,\nv102.ts\n\
+#EXTINF:2.0,\nv103.ts\n#EXTINF:2.0,\nv104.ts\n"
+    )
+}
+
+/// A live audio rendition of six 2 s segments. On its own it would join
+/// at its fourth segment (6 s in); in step with the variant, its third.
+fn live_rendition(first_sequence: u64, with_program_time: bool) -> String {
+    let program_time = if with_program_time {
+        "#EXT-X-PROGRAM-DATE-TIME:2026-09-29T10:00:00.000Z\n"
+    } else {
+        ""
+    };
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first_sequence}\n{program_time}"
+    );
+    for n in 0..6 {
+        playlist.push_str(&format!("#EXTINF:2.0,\na{}.ts\n", first_sequence + n));
+    }
+    playlist
+}
+
+/// Open the variant, then the rendition against its join, pull one event
+/// so the rendition fetches its first segment, and report that fetch and
+/// the rendition's notes.
+fn rendition_join(variant: &str, rendition: &str, rendition_first: u64) -> (String, Vec<String>) {
+    let (variant_fetcher, _) = MockFetcher::new(BASE, vec![]);
+    let variant = open(variant, variant_fetcher).expect("variant opens");
+    let anchor = variant.join_anchor();
+    assert!(anchor.is_some(), "a live variant has a join");
+
+    let audio_url = "https://test/audio.m3u8";
+    let (fetcher, log) = MockFetcher::new(audio_url, vec![]);
+    let dir = fixture_dir("ts");
+    let fetcher = (0..6).fold(fetcher, |fetcher, n| {
+        fetcher.with_file(
+            &format!("https://test/a{}.ts", rendition_first + n),
+            dir.join(format!("seg00{}.ts", n % 3)),
+        )
+    });
+    let mut demuxer = HlsDemuxer::open_rendition(
+        audio_url,
+        rendition.as_bytes().to_vec(),
+        Box::new(fetcher),
+        DemuxLimits::default(),
+        Generation(0),
+        anchor,
+    )
+    .expect("rendition opens");
+    demuxer.next_event().expect("first event");
+    let first = media_fetches(&log.lock().unwrap())
+        .first()
+        .cloned()
+        .expect("a segment was fetched");
+    (first, demuxer.take_notes())
+}
+
+#[test]
+fn a_rendition_joins_the_variant_by_program_time() {
+    // Numbered from 500: only the program time lines them up.
+    let (first, notes) = rendition_join(&live_variant(true), &live_rendition(500, true), 500);
+    assert_eq!(first, "https://test/a502.ts", "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("aligned with the variant by program time")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_rendition_without_program_time_joins_by_sequence_number() {
+    let (first, notes) = rendition_join(&live_variant(false), &live_rendition(100, false), 100);
+    assert_eq!(first, "https://test/a102.ts", "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("aligned with the variant by sequence number")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_rendition_on_another_program_clock_joins_by_sequence_number() {
+    // An hour behind the variant's clock: every point is before the
+    // anchor, but none within a target duration of it.
+    let rendition = live_rendition(100, true).replace("T10:00:00", "T09:00:00");
+    let (first, notes) = rendition_join(&live_variant(true), &rendition, 100);
+    assert_eq!(first, "https://test/a102.ts", "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("aligned with the variant by sequence number")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_rendition_that_lines_up_with_nothing_joins_on_its_own() {
+    let (first, notes) = rendition_join(&live_variant(false), &live_rendition(500, false), 500);
+    assert_eq!(
+        first, "https://test/a503.ts",
+        "three target durations back: {notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("nothing lines up")),
+        "{notes:?}"
+    );
+}
+
 /// Segment 0 is complete but has lost its first part: its listed
 /// independent part starts 4 s in, not 2 s. With 8 s on the list and a
 /// 5 s hold-back the join belongs at the segment's start (0 s), since the

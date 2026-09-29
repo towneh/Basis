@@ -75,6 +75,14 @@ impl Playable {
         }
     }
 
+    /// Every reason kept so far with `reason` after them, for a refusal
+    /// that ends the session outright.
+    pub fn all_reasons_with(&self, reason: &str) -> String {
+        self.reason(reason);
+        let reasons = self.reasons.lock().unwrap_or_else(|e| e.into_inner());
+        reasons.join("; ")
+    }
+
     /// The kind's decoder refused it. Returns the failure's detail when
     /// that leaves nothing to play.
     pub fn refused(&self, kind: TrackKind, reason: &str) -> Option<String> {

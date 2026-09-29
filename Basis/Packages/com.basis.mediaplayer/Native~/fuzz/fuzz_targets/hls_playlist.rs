@@ -15,7 +15,7 @@ fuzz_target!(|data: &[u8]| {
     match parse_playlist(data, "https://fuzz.invalid/path/index.m3u8") {
         Ok(ParsedPlaylist::Master(variants)) => {
             // Best-candidate ordering must hold for any parse result.
-            assert!(variants.windows(2).all(|w| w[0].0 >= w[1].0));
+            assert!(variants.windows(2).all(|w| w[0].bandwidth >= w[1].bandwidth));
         }
         Ok(ParsedPlaylist::Media(window)) => {
             let mut total = media_clock::MediaTime::ZERO;

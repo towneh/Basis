@@ -771,6 +771,7 @@ const PLAYLIST_CAP: u64 = 4 * 1024 * 1024;
 /// life of the session. A playlist read off the network can name only more
 /// network. One opened from disk can name either, since the address gate
 /// already covers reaching the network.
+#[derive(Clone, Copy)]
 enum PlaylistOrigin {
     Network,
     Disk,
@@ -779,7 +780,9 @@ enum PlaylistOrigin {
 /// HLS: hand the URL to the HLS demuxer with a per-resource fetcher built
 /// for where the playlist came from. The playlist states its own liveness
 /// (EXT-X-ENDLIST) and the Bank mode follows it. The HLS scheduler handles
-/// reconnects itself, so no engine reconnect factory is passed.
+/// reconnects itself, so no engine reconnect factory is passed. A variant
+/// whose audio is a separate rendition gets that rendition as the audio
+/// leg of a split pair.
 fn open_hls(
     px: Arc<PipelineShared>,
     url: &str,
@@ -789,16 +792,78 @@ fn open_hls(
     mut bank_cfg: BankConfig,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
+    let fetcher = match hls_fetcher(&px, url, origin, allow_local) {
+        Ok(fetcher) => fetcher,
+        Err(e) => {
+            px.fail(EngineError::io(e));
+            return;
+        }
+    };
+    let demuxer = match media_hls::HlsDemuxer::open(
+        url,
+        playlist,
+        Box::new(fetcher),
+        DemuxLimits::default(),
+        Generation(0),
+    ) {
+        Ok(demuxer) => demuxer,
+        Err(e) => {
+            px.fail(EngineError::demux(e));
+            return;
+        }
+    };
+    bank_cfg.liveness = if demuxer.is_live() {
+        Liveness::Live
+    } else {
+        Liveness::Vod
+    };
+    let audio_leg = demuxer.audio_rendition().and_then(|rendition| {
+        let opened = rendition.map_err(str::to_owned).and_then(|audio_url| {
+            open_hls_rendition(
+                &px,
+                url,
+                audio_url,
+                origin,
+                allow_local,
+                demuxer.join_anchor(),
+            )
+        });
+        match opened {
+            Ok(leg) => Some(Box::new(leg) as Box<dyn media_demux::Demuxer>),
+            // The picture plays on; the reason goes where any other
+            // track left out is shown.
+            Err(detail) => {
+                let reason = format!("audio rendition not played: {detail}");
+                px.playable.reason(&reason);
+                px.diag
+                    .event(px.wall.now(), EventCode::CodecRefused, Stage::Demux, reason);
+                None
+            }
+        }
+    });
+    finish_open_split(px, Box::new(demuxer), audio_leg, bank_cfg, None, threads);
+}
+
+/// The fetcher for a playlist lane: network-only for a playlist that came
+/// off the network, confined to the playlist's directory for one on disk.
+fn hls_fetcher(
+    px: &Arc<PipelineShared>,
+    url: &str,
+    origin: PlaylistOrigin,
+    allow_local: bool,
+) -> Result<media_io::ResourceFetcher, media_io::IoError> {
     let gate: Arc<dyn media_io::AddressGate> = if allow_local {
         Arc::new(AllowAllGate)
     } else {
         Arc::new(PublicAddressGate)
     };
     let limits = IoLimits::default();
-    let fetcher = match origin {
-        PlaylistOrigin::Network => {
-            media_io::ResourceFetcher::remote(limits, gate, px.io_cancel.clone())
-        }
+    match origin {
+        PlaylistOrigin::Network => Ok(media_io::ResourceFetcher::remote(
+            limits,
+            gate,
+            px.io_cancel.clone(),
+        )),
         PlaylistOrigin::Disk => {
             // Segments resolve beside the playlist, so its own directory
             // is the root. A bare filename has none; that is the cwd.
@@ -810,32 +875,35 @@ fn open_hls(
             } else {
                 dir
             };
-            match media_io::ResourceFetcher::local(dir, limits, gate, px.io_cancel.clone()) {
-                Ok(fetcher) => fetcher,
-                Err(e) => {
-                    px.fail(EngineError::io(e));
-                    return;
-                }
-            }
+            media_io::ResourceFetcher::local(dir, limits, gate, px.io_cancel.clone())
         }
-    };
-    match media_hls::HlsDemuxer::open(
-        url,
+    }
+}
+
+/// An audio rendition's demuxer, fetched and joined beside its variant.
+/// The fetcher is rooted where the master playlist's was, since the
+/// rendition's URI was resolved against it.
+fn open_hls_rendition(
+    px: &Arc<PipelineShared>,
+    master_url: &str,
+    audio_url: &str,
+    origin: PlaylistOrigin,
+    allow_local: bool,
+    anchor: Option<media_hls::JoinAnchor>,
+) -> Result<media_hls::HlsDemuxer, String> {
+    let mut fetcher =
+        hls_fetcher(px, master_url, origin, allow_local).map_err(|e| e.to_string())?;
+    let playlist = media_hls::SegmentFetcher::fetch(&mut fetcher, audio_url, PLAYLIST_CAP)
+        .map_err(|e| e.to_string())?;
+    media_hls::HlsDemuxer::open_rendition(
+        audio_url,
         playlist,
         Box::new(fetcher),
         DemuxLimits::default(),
         Generation(0),
-    ) {
-        Ok(demuxer) => {
-            bank_cfg.liveness = if demuxer.is_live() {
-                Liveness::Live
-            } else {
-                Liveness::Vod
-            };
-            finish_open(px, Box::new(demuxer), bank_cfg, None, threads);
-        }
-        Err(e) => px.fail(EngineError::demux(e)),
-    }
+        anchor,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Live HTTP: build the streaming source once and sniff it. An HLS
@@ -1604,7 +1672,11 @@ fn finish_open_split(
     reconnect_factory: Option<pipeline::DemuxFactory>,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) {
-    for note in demuxer.take_notes() {
+    let leg_notes = audio_leg
+        .as_mut()
+        .map(|leg| leg.take_notes())
+        .unwrap_or_default();
+    for note in demuxer.take_notes().into_iter().chain(leg_notes) {
         px.diag.event(
             px.wall.now(),
             EventCode::CapabilityProbe,
