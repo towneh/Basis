@@ -60,10 +60,10 @@ GitHub runs the same gate on every push and pull request that touches the
 package (`.github/workflows/media-engine.yml`), on Windows and Linux, with a
 separate Android build. Its runners have no GPU. The session tests take the
 software decode route there, and the hardware decode tests find no decoder,
-return early and pass. They print `SKIPPED:`, but `cargo test` hides the output
-of a test that passes, so the log does not show it. A green check on a pull
-request says nothing about the **CI, Windows** rows that need hardware decode;
-run the gate on a Windows machine with a GPU for those.
+return early and pass. They print `SKIPPED:`, but `cargo test` hides a passing
+test's output and the log never shows it. A green check on a pull request does
+not cover the **CI, Windows** rows that need hardware decode; run the gate on a
+Windows machine with a GPU for those.
 `cargo test -p decode-mf --test dxva_decode -- --nocapture` shows which of
 those tests skipped on the machine it runs on.
 
@@ -249,7 +249,7 @@ connection. Set **Liveness** to Live for those.
 | Audio pts-marker budget | The 1024 timestamp markers survive tiny audio chunks: contiguous chunks need none, and without a free slot the producer waits. | `cargo test -p media-engine --lib audio` | CI |
 | Audio ring sizing | Whatever rate and channel count is announced, the audio ring's allocation stays under 6 Mi samples, rounded to whole frames. | `cargo test -p media-engine --lib audio` | CI |
 | A/V output-latency compensation | The device's reported output latency shifts the audio clock back, clamped to 0 to 500 ms. A report that changes the latency moves a running clock by the change at once; a parked clock is left where it is. | `cargo test -p media-engine --lib audio` + `--test session latency`; on desktop and device: listen for sync on a fixture and on the RTSP stereo stream | CI; by hand; Device (Quest) |
-| Clock start | The host is served audio from the moment the clock starts, an output latency before the first picture, so the first picture and the first sound arrive together. Audio is held back while a pause waits on the landing, a seek is queued, or the ring belongs to another timeline. | `cargo test -p media-engine --lib audio_serves` + `--test session pull_serves`; in the Editor: play an on-demand MP4 with video; the engine log shows no `SlewCorrection` in the first second | CI; by hand; Device (Quest) |
+| Clock start | The host is served audio from the moment the clock starts, an output latency before the first picture, and the first picture and the first sound arrive together. Audio is held back while a pause waits on the landing, a seek is queued, or the ring belongs to another timeline. | `cargo test -p media-engine --lib audio_serves` + `--test session pull_serves`; in the Editor: play an on-demand MP4 with video; the engine log shows no `SlewCorrection` in the first second | CI; by hand; Device (Quest) |
 | Clock under host pull jitter | The audio playhead is averaged against the wall clock before the ladder acts on it, and a slew once started runs to a 5 ms release: a playhead traced in the Editor on Windows and the Quest callback pattern start no slew once settled, and a start-up catch-up stops at its target. | `cargo test -p media-clock --test jitter` + `--test properties a_slew_runs_until_the_release_band`; in the Editor: play an audio-only 44.1 kHz file and a 1080p60 MP4 for a minute untouched; the engine log shows no `SlewCorrection` after the first second | CI; by hand; Device (Quest) |
 | Render-event frame selection | The render event shows each 24 fps frame once at 72 Hz; the video thread takes over without events. On Direct3D 12, where the copy lands one event later, frames are chosen and judged late one refresh further ahead. | `cargo test -p media-engine --lib present` | CI |
 | Output-texture ownership | Closing and reopening a source releases the output texture, and the texture count stays level across open and close cycles. | In the Editor or a standalone build, open, close and reopen a source half a dozen times with the Profiler's Memory module on Texture2D count | By hand |

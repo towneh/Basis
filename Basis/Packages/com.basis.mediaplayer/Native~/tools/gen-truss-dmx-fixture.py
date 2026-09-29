@@ -16,10 +16,10 @@ big-endian):
 
 2 s of H.264 (no B-frames, GOP 60) with a 48 kHz AAC sine beside it.
 Record i has seq and frame_index i. Universes 0-3 are sent whole on every
-frame and universe 4 joins at frame 30, so the message size changes
+frame and universe 4 joins at frame 30, which changes the message size
 mid-stream. Slot s of universe u holds (u * 520 + s + i) % 251, which
-changes every frame. Every block header carries a 00 00 02 run, so the
-SEI carries emulation-prevention bytes the engine has to remove.
+changes every frame. Every block header carries a 00 00 02 run, and the
+SEI needs emulation-prevention bytes that the engine has to remove.
 
 Needs ffmpeg + ffprobe on PATH. Run from Native~:
 
