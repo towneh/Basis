@@ -69,7 +69,7 @@ four players, or two clients sharing playback, recording diagnostics.
 | `whep://` / `wheps://` | WHEP (WebRTC), sub-second join | `whep://stream.example:8889/live/whep` |
 | `https://….mp4` | Fragmented live or on-demand MP4 | `https://stream.vrcdn.live/live/vrcdn.live.mp4` |
 | `https://….ts` | MPEG-TS | `https://stream.vrcdn.live/live/vrcdn.live.ts` |
-| `https://….m3u8` | HLS, on-demand or live | `https://stream.example/live/index.m3u8` |
+| `https://….m3u8` | HLS, on-demand or live, including Low-Latency HLS | `https://stream.example/live/index.m3u8` |
 | `https://….webm`, `.mkv` | WebM or Matroska: VP9 or AV1 video, Opus audio | `https://stream.example/vod/clip.webm` |
 | `https://….flac` `.mp3` `.aac` `.opus` `.wav` | Audio only | `https://stream.example/audio/track.flac` |
 | An absolute path | Local file (not a network share; `file://` URLs are refused) | `C:\media\clip.mp4` |

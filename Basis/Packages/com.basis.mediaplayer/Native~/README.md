@@ -15,7 +15,7 @@ the built binaries are committed in `../Runtime/Plugins/`.
 | `media-bank` | The buffer between demux and decode |
 | `media-demux` | Container demuxers |
 | `media-bitstream` | Elementary-stream parsing (Annex-B, captions, SEI) |
-| `media-hls` | HLS playlists and segments |
+| `media-hls` | HLS playlists, segments and Low-Latency HLS parts |
 | `media-io` | Sockets and files, with the address rules |
 | `media-rtp`, `media-rtsp` | RTP and RTSP |
 | `media-whep` | WHEP (WebRTC receive) |
@@ -44,7 +44,7 @@ to `Linux/x86_64/`. Each needs librist staged first (see
 | `tools/stage-android-plugin.ps1` | Builds the Android plugin and copies it into the package |
 | `tools/build-librist.ps1`, `build-librist.sh`, `build-librist-android.sh` | Build the librist library for Windows, Linux and Android |
 | `tools/gen-*.py` | Generate the test fixtures in `fixtures/` |
-| `tools/live-ts-server.py`, `tools/live-hls-server.py` | Serve a fixture as a live MPEG-TS or HLS stream, for tests by hand |
+| `tools/live-ts-server.py` | Serve a fixture as a live MPEG-TS stream, for tests by hand |
 
 [`TESTING.md`](TESTING.md) covers prerequisites and testing, and
 [`DIAGNOSTICS.md`](DIAGNOSTICS.md) the captures. Fuzz targets are in `fuzz/`.

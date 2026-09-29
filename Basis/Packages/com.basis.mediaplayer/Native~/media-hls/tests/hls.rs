@@ -1,7 +1,8 @@
 //! HLS scheduler + chaining tests over a virtual fetcher: VOD both
 //! container flavours, live window advance, window fall-out,
-//! stated discontinuities, master variant choice, feature refusals, and
-//! seek-to-segment. Segment bytes come from the committed HLS fixtures;
+//! stated discontinuities, master variant choice, feature refusals,
+//! seek-to-segment, and Low-Latency HLS (join point, parts, blocking
+//! reloads). Segment bytes come from the committed HLS fixtures;
 //! time is virtual (recorded waits, no sleeps).
 
 use std::collections::HashMap;
@@ -21,6 +22,8 @@ fn fixture_dir(kind: &str) -> PathBuf {
 struct FetchLog {
     fetched: Vec<String>,
     waits: Vec<Duration>,
+    /// Virtual time: advanced by waits and by held blocking reloads.
+    now: Duration,
 }
 
 /// Virtual fetcher: static resources plus a sequence of playlist bodies
@@ -30,6 +33,11 @@ struct MockFetcher {
     playlist_url: String,
     refreshes: Vec<Vec<u8>>,
     refresh_cursor: usize,
+    /// Answer blocking reloads with an error, as a server past its
+    /// blocking limit does.
+    refuse_blocking: bool,
+    /// How long the server holds each blocking reload before answering.
+    blocking_hold: Duration,
     log: Arc<Mutex<FetchLog>>,
 }
 
@@ -42,6 +50,8 @@ impl MockFetcher {
                 playlist_url: playlist_url.to_string(),
                 refreshes,
                 refresh_cursor: 0,
+                refuse_blocking: false,
+                blocking_hold: Duration::ZERO,
                 log: Arc::clone(&log),
             },
             log,
@@ -58,7 +68,14 @@ impl MockFetcher {
 impl SegmentFetcher for MockFetcher {
     fn fetch(&mut self, url: &str, _cap: u64) -> Result<Vec<u8>, SourceError> {
         self.log.lock().unwrap().fetched.push(url.to_string());
-        if url == self.playlist_url {
+        let (path, query) = url.split_once('?').unwrap_or((url, ""));
+        if path == self.playlist_url {
+            if query.contains("_HLS_msn") {
+                self.log.lock().unwrap().now += self.blocking_hold;
+            }
+            if self.refuse_blocking && query.contains("_HLS_msn") {
+                return Err("503 Service Unavailable".into());
+            }
             let body = self.refreshes[self.refresh_cursor.min(self.refreshes.len() - 1)].clone();
             self.refresh_cursor += 1;
             return Ok(body);
@@ -70,7 +87,13 @@ impl SegmentFetcher for MockFetcher {
     }
 
     fn wait(&mut self, duration: Duration) {
-        self.log.lock().unwrap().waits.push(duration);
+        let mut log = self.log.lock().unwrap();
+        log.waits.push(duration);
+        log.now += duration;
+    }
+
+    fn now(&self) -> Duration {
+        self.log.lock().unwrap().now
     }
 }
 
@@ -617,5 +640,566 @@ fn scheduler_notes_stay_bounded_over_a_long_live_session() {
         notes.len(),
         media_demux::MAX_NOTES,
         "filled and stopped rather than growing with the session: {notes:?}"
+    );
+}
+
+/// A live Low-Latency HLS window: segments 0 and 1 complete, segment 2
+/// in progress with one part. Parts are 2 s fixture files; `missing*`,
+/// `whole*` and `hint*` are never served.
+const LL_TS: &str = "#EXTM3U\n#EXT-X-VERSION:9\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=4.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-PART:DURATION=2.0,URI=\"missing0a.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"missing0b.ts\"\n\
+#EXT-X-PART:DURATION=2.0,URI=\"missing0c.ts\"\n\
+#EXTINF:6.0,\nmissing0.ts\n\
+#EXT-X-PART:DURATION=2.0,URI=\"missing1a.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg000.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\"\n\
+#EXTINF:6.0,\nwhole1.ts\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg002.ts\",INDEPENDENT=YES\n\
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"hint.ts\"\n";
+
+/// The same window once segment 2 completes and the stream ends.
+const LL_TS_ENDED: &str = "#EXTM3U\n#EXT-X-VERSION:9\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=4.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXTINF:6.0,\nmissing0.ts\n\
+#EXT-X-PART:DURATION=2.0,URI=\"missing1a.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg000.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\"\n\
+#EXTINF:6.0,\nwhole1.ts\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg002.ts\",INDEPENDENT=YES\n\
+#EXTINF:2.0,\nwhole2.ts\n#EXT-X-ENDLIST\n";
+
+fn media_fetches(log: &FetchLog) -> Vec<String> {
+    log.fetched
+        .iter()
+        .filter(|url| !url.contains(".m3u8"))
+        .cloned()
+        .collect()
+}
+
+fn playlist_fetches(log: &FetchLog) -> Vec<String> {
+    log.fetched
+        .iter()
+        .filter(|url| url.contains(".m3u8"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn ll_join_is_part_hold_back_behind_the_end_on_an_independent_part() {
+    // The end is 14 s in; 4 s back is 10 s, where part 2 of segment 1
+    // starts, but it is not independent. Part 1, at 8 s, is.
+    let fetcher = ts_fetcher(vec![LL_TS_ENDED.as_bytes().to_vec()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(LL_TS, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(
+        media_fetches(&log.lock().unwrap()),
+        [
+            "https://test/seg000.ts",
+            "https://test/seg001.ts",
+            "https://test/seg002.ts"
+        ],
+        "joined on segment 1's independent part, then rode parts"
+    );
+    assert_eq!(drained.video_aus.len(), 180);
+    assert_eq!(drained.discontinuities, 0);
+    let notes = demuxer.take_notes();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("joining sequence 1 part 1, 6000 ms behind the end")),
+        "join noted: {notes:?}"
+    );
+}
+
+#[test]
+fn ll_reload_blocks_for_the_next_part_without_waiting() {
+    let fetcher = ts_fetcher(vec![LL_TS_ENDED.as_bytes().to_vec()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(LL_TS, fetcher).expect("open");
+    drain(&mut demuxer).expect("drain");
+    let log = log.lock().unwrap();
+    assert_eq!(
+        playlist_fetches(&log),
+        ["https://test/index.m3u8?_HLS_msn=2&_HLS_part=1"],
+        "one blocking reload, for part 1 of segment 2"
+    );
+    assert!(
+        log.waits.is_empty(),
+        "a blocking reload goes out at once: {:?}",
+        log.waits
+    );
+}
+
+/// Segment 0 in progress with one part; the reload completes it with a
+/// second part, adds segment 1 whole, and ends the stream.
+const LL_TS_EDGE: &str = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=4.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg000.ts\",INDEPENDENT=YES\n";
+const LL_TS_EDGE_ENDED: &str = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=4.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg000.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\"\n\
+#EXTINF:4.0,\nwhole0.ts\n#EXTINF:2.0,\nseg002.ts\n#EXT-X-ENDLIST\n";
+
+#[test]
+fn a_segment_begun_on_parts_is_finished_on_parts_after_the_stream_ends() {
+    let fetcher = ts_fetcher(vec![LL_TS_EDGE_ENDED.as_bytes().to_vec()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(LL_TS_EDGE, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(
+        media_fetches(&log.lock().unwrap()),
+        [
+            "https://test/seg000.ts",
+            "https://test/seg001.ts",
+            "https://test/seg002.ts"
+        ],
+        "the rest of segment 0 on parts, never whole, then segment 1"
+    );
+    assert_eq!(drained.video_aus.len(), 180);
+    assert_eq!(drained.discontinuities, 0);
+}
+
+#[test]
+fn a_refused_blocking_reload_falls_back_to_a_plain_one() {
+    let mut fetcher = ts_fetcher(vec![LL_TS_EDGE_ENDED.as_bytes().to_vec()]);
+    fetcher.refuse_blocking = true;
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(LL_TS_EDGE, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(drained.video_aus.len(), 180, "the lane kept going");
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(
+            playlist_fetches(&log),
+            [
+                "https://test/index.m3u8?_HLS_msn=0&_HLS_part=1",
+                "https://test/index.m3u8"
+            ]
+        );
+        assert!(
+            !log.waits.is_empty(),
+            "the plain reload waited its interval"
+        );
+    }
+    let notes = demuxer.take_notes();
+    assert!(
+        notes.iter().any(|n| n.contains("blocking reload failed")),
+        "fallback noted: {notes:?}"
+    );
+}
+
+#[test]
+fn a_refused_blocking_reload_is_not_sent_again() {
+    // The first reload brings nothing new, so a second is needed.
+    let mut fetcher = ts_fetcher(vec![
+        LL_TS_EDGE.as_bytes().to_vec(),
+        LL_TS_EDGE_ENDED.as_bytes().to_vec(),
+    ]);
+    fetcher.refuse_blocking = true;
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(LL_TS_EDGE, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(drained.video_aus.len(), 180, "the lane kept going");
+    let log = log.lock().unwrap();
+    assert_eq!(
+        playlist_fetches(&log),
+        [
+            "https://test/index.m3u8?_HLS_msn=0&_HLS_part=1",
+            "https://test/index.m3u8",
+            "https://test/index.m3u8"
+        ]
+    );
+    assert_eq!(
+        log.waits.len(),
+        2,
+        "one interval per plain reload: {:?}",
+        log.waits
+    );
+}
+
+#[test]
+fn a_refused_map_uri_declines_the_parts() {
+    // No complete segment yet: the in-progress parts' init segment is named
+    // only after the last segment URI, where only our own scan reads.
+    let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5\n\
+#EXT-X-PART-INF:PART-TARGET=0.5\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-MAP:URI=\"ftp://elsewhere/init.mp4\"\n\
+#EXT-X-PART:DURATION=0.5,URI=\"part0.m4s\",INDEPENDENT=YES\n";
+    let (fetcher, _) = MockFetcher::new(BASE, vec![]);
+    let mut demuxer = open(playlist, fetcher).expect("the playlist itself still opens");
+    let notes = demuxer.take_notes();
+    assert!(
+        notes.iter().any(|n| n
+            .contains("low-latency parts not used (a low-latency tag could not be read)")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn parts_without_blocking_reload_play_whole_segments() {
+    // Parts listed, no CAN-BLOCK-RELOAD: whole segments, joined three
+    // target durations back (seg000 at 4 s of 10 s).
+    let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n\
+#EXT-X-PART-INF:PART-TARGET=1.0\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXTINF:2.0,\nmissing0.ts\n\
+#EXT-X-PART:DURATION=1.0,URI=\"part1a.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=1.0,URI=\"part1b.ts\"\n\
+#EXTINF:2.0,\nmissing1.ts\n\
+#EXTINF:2.0,\nseg000.ts\n#EXTINF:2.0,\nseg001.ts\n#EXTINF:2.0,\nseg002.ts\n\
+#EXT-X-PART:DURATION=1.0,URI=\"part5a.ts\",INDEPENDENT=YES\n";
+    let ended = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXTINF:2.0,\nmissing0.ts\n#EXTINF:2.0,\nmissing1.ts\n\
+#EXTINF:2.0,\nseg000.ts\n#EXTINF:2.0,\nseg001.ts\n#EXTINF:2.0,\nseg002.ts\n#EXT-X-ENDLIST\n";
+    let fetcher = ts_fetcher(vec![ended.as_bytes().to_vec()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(playlist, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(drained.video_aus.len(), 180);
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(
+            media_fetches(&log),
+            [
+                "https://test/seg000.ts",
+                "https://test/seg001.ts",
+                "https://test/seg002.ts"
+            ]
+        );
+        assert!(
+            !log.fetched.iter().any(|u| u.contains("_HLS_")),
+            "no blocking directives to a server that did not offer them"
+        );
+    }
+    let notes = demuxer.take_notes();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("low-latency parts not used")),
+        "decline noted: {notes:?}"
+    );
+}
+
+#[test]
+fn a_plain_live_join_honours_hold_back() {
+    // HOLD-BACK 8 s of a 12 s window: the join is at 4 s (sequence 2),
+    // where three target durations would put it at 6 s.
+    let head = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-SERVER-CONTROL:HOLD-BACK=8.0\n";
+    let body = "#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXTINF:2.0,\nmissing0.ts\n#EXTINF:2.0,\nmissing1.ts\n\
+#EXTINF:2.0,\nseg000.ts\n#EXTINF:2.0,\nseg001.ts\n#EXTINF:2.0,\nseg002.ts\n\
+#EXT-X-DISCONTINUITY\n#EXTINF:2.0,\nseg000.ts\n";
+    let playlist = format!("{head}{body}");
+    let ended = format!("{head}{body}#EXT-X-ENDLIST\n");
+    let fetcher = ts_fetcher(vec![ended.into_bytes()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(&playlist, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    let fetched = media_fetches(&log.lock().unwrap());
+    assert_eq!(
+        fetched.first().map(String::as_str),
+        Some("https://test/seg000.ts"),
+        "joined HOLD-BACK behind the end: {fetched:?}"
+    );
+    assert!(!fetched.iter().any(|u| u.contains("missing")));
+    assert_eq!(drained.video_aus.len(), 240);
+    assert_eq!(drained.discontinuities, 1);
+}
+
+#[test]
+fn ll_fmp4_parts_play_against_the_init_segment() {
+    let dir = fixture_dir("fmp4");
+    let head = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=6.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg000.m4s\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg001.m4s\"\n";
+    let ended = format!(
+        "{head}#EXT-X-PART:DURATION=2.0,URI=\"seg002.m4s\"\n#EXTINF:6.0,\nwhole0.m4s\n#EXT-X-ENDLIST\n"
+    );
+    let (fetcher, log) = MockFetcher::new(BASE, vec![ended.into_bytes()]);
+    let fetcher = fetcher
+        .with_file("https://test/init.mp4", dir.join("init.mp4"))
+        .with_file("https://test/seg000.m4s", dir.join("seg000.m4s"))
+        .with_file("https://test/seg001.m4s", dir.join("seg001.m4s"))
+        .with_file("https://test/seg002.m4s", dir.join("seg002.m4s"));
+    let mut demuxer = open(head, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(drained.video_aus.len(), 180);
+    assert_eq!(drained.audio_aus, 283);
+    let mut sorted = drained.video_aus.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted, drained.video_aus,
+        "tfdt keeps dts absolute across parts"
+    );
+    assert_eq!(
+        media_fetches(&log.lock().unwrap()),
+        [
+            "https://test/seg000.m4s",
+            "https://test/init.mp4",
+            "https://test/seg001.m4s",
+            "https://test/seg002.m4s"
+        ],
+        "init fetched once, the segment never whole"
+    );
+}
+
+/// Segment 0 is complete but has lost its first part: its listed
+/// independent part starts 4 s in, not 2 s. With 8 s on the list and a
+/// 5 s hold-back the join belongs at the segment's start (0 s), since the
+/// part (4 s) is past the 3 s target.
+#[test]
+fn a_complete_segment_missing_leading_parts_joins_by_where_parts_start() {
+    let head = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=5.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n";
+    let segment_zero = "#EXT-X-PART:DURATION=2.0,URI=\"pa.ts\"\n\
+#EXT-X-PART:DURATION=2.0,URI=\"pb.ts\",INDEPENDENT=YES\n#EXTINF:6.0,\nseg000.ts\n";
+    let playlist =
+        format!("{head}{segment_zero}#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\",INDEPENDENT=YES\n");
+    let ended = format!(
+        "{head}{segment_zero}#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\",INDEPENDENT=YES\n\
+#EXTINF:2.0,\nwhole1.ts\n#EXT-X-ENDLIST\n"
+    );
+    let fetcher = ts_fetcher(vec![ended.into_bytes()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(&playlist, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(
+        media_fetches(&log.lock().unwrap()),
+        ["https://test/seg000.ts", "https://test/seg001.ts"],
+        "joined at the segment's start, not on the part counted from it"
+    );
+    assert_eq!(drained.video_aus.len(), 120);
+}
+
+/// A low-latency lane whose playlist stops advancing is given the same
+/// twenty target durations as a plain one, however quick its reloads.
+#[test]
+fn a_stalled_low_latency_lane_is_given_twenty_target_durations() {
+    let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5\n\
+#EXT-X-PART-INF:PART-TARGET=0.5\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-PART:DURATION=0.5,URI=\"seg000.ts\",INDEPENDENT=YES\n";
+    let fetcher = ts_fetcher(vec![playlist.as_bytes().to_vec()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(playlist, fetcher).expect("open");
+    let error = drain(&mut demuxer)
+        .err()
+        .expect("the lane is declared dead");
+    assert!(error.to_string().contains("stopped advancing"), "{error}");
+    // Twenty target durations of 2 s: eighty waits of 0.5 s after the
+    // first reload, which goes out at once.
+    let waited: Duration = log.lock().unwrap().waits.iter().sum();
+    assert_eq!(waited, Duration::from_secs(40));
+}
+
+/// A server that holds each blocking reload three target durations and
+/// then answers with nothing new: the hold counts towards the twenty
+/// target durations, and the lane is judged dead after about forty seconds.
+#[test]
+fn a_held_blocking_reload_counts_towards_a_stalled_lane() {
+    let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5\n\
+#EXT-X-PART-INF:PART-TARGET=0.5\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-PART:DURATION=0.5,URI=\"seg000.ts\",INDEPENDENT=YES\n";
+    let mut fetcher = ts_fetcher(vec![playlist.as_bytes().to_vec()]);
+    fetcher.blocking_hold = Duration::from_secs(6);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(playlist, fetcher).expect("open");
+    let error = drain(&mut demuxer)
+        .err()
+        .expect("the lane is declared dead");
+    assert!(error.to_string().contains("stopped advancing"), "{error}");
+    let log = log.lock().unwrap();
+    let held = log
+        .fetched
+        .iter()
+        .filter(|url| url.contains("_HLS_msn"))
+        .count();
+    // 6 s held, then 0.5 s waited, each round: 45 s once the seventh
+    // ends, the first round to reach forty.
+    assert_eq!(held, 7, "{:?}", log.now);
+}
+
+/// A live playlist on disk that states CAN-BLOCK-RELOAD: a drive path is
+/// not a URL to put directives on.
+#[test]
+fn a_disk_playlist_is_never_sent_blocking_directives() {
+    let path = "C:/media/live.m3u8";
+    let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES\n#EXT-X-MEDIA-SEQUENCE:0\n";
+    let ended = format!("{playlist}#EXT-X-ENDLIST\n");
+    let (fetcher, log) = MockFetcher::new(path, vec![ended.into_bytes()]);
+    let mut demuxer = HlsDemuxer::open(
+        path,
+        playlist.as_bytes().to_vec(),
+        Box::new(fetcher),
+        DemuxLimits::default(),
+        Generation(0),
+    )
+    .expect("open");
+    drain(&mut demuxer).expect("drain");
+    let fetched = log.lock().unwrap().fetched.clone();
+    assert!(!fetched.is_empty(), "the playlist was reloaded");
+    assert!(
+        fetched.iter().all(|url| !url.contains("_HLS_")),
+        "{fetched:?}"
+    );
+}
+
+/// Segment 0 in progress with its first part listed; on the reload it has
+/// completed, but its first part has left the list.
+#[test]
+fn a_reload_that_drops_leading_parts_keeps_the_next_part() {
+    let head = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=4.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n";
+    let playlist = format!("{head}#EXT-X-PART:DURATION=2.0,URI=\"seg000.ts\",INDEPENDENT=YES\n");
+    let ended = format!(
+        "{head}#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\"\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg002.ts\"\n#EXTINF:6.0,\nwhole0.ts\n#EXT-X-ENDLIST\n"
+    );
+    let fetcher = ts_fetcher(vec![ended.into_bytes()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(&playlist, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    assert_eq!(
+        media_fetches(&log.lock().unwrap()),
+        [
+            "https://test/seg000.ts",
+            "https://test/seg001.ts",
+            "https://test/seg002.ts"
+        ],
+        "placed by time, the cursor stays on the next part"
+    );
+    assert_eq!(drained.video_aus.len(), 180);
+    assert_eq!(drained.discontinuities, 0);
+}
+
+/// After a lost part, the reload lists only the segment's later parts,
+/// the first of them not independent: resync passes over it rather than
+/// taking the first listed part for a segment start.
+#[test]
+fn a_resync_does_not_start_on_the_first_listed_part() {
+    let head = "#EXTM3U\n#EXT-X-TARGETDURATION:8\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=4.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n";
+    let playlist = format!(
+        "{head}#EXT-X-PART:DURATION=2.0,URI=\"seg000.ts\",INDEPENDENT=YES\n\
+#EXT-X-PART:DURATION=2.0,URI=\"lost.ts\"\n"
+    );
+    let ended = format!(
+        "{head}#EXT-X-PART:DURATION=2.0,URI=\"dependent.ts\"\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\",INDEPENDENT=YES\n\
+#EXTINF:8.0,\nwhole0.ts\n#EXTINF:2.0,\nseg002.ts\n#EXT-X-ENDLIST\n"
+    );
+    let fetcher = ts_fetcher(vec![ended.into_bytes()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(&playlist, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    let fetched = media_fetches(&log.lock().unwrap());
+    let served: Vec<&str> = fetched
+        .iter()
+        .map(String::as_str)
+        .filter(|url| !url.ends_with("lost.ts"))
+        .collect();
+    assert_eq!(
+        served,
+        [
+            "https://test/seg000.ts",
+            "https://test/seg001.ts",
+            "https://test/seg002.ts"
+        ],
+        "the dependent part is never fetched"
+    );
+    assert_eq!(drained.video_aus.len(), 180);
+}
+
+/// Segment 0 in progress with four 2 s parts: `seg000.ts`, a part named
+/// by `second` (never served), `dependent.ts` (not independent, never
+/// served) and `seg001.ts` (independent). The reload completes segment
+/// 0, adds segment 1 whole and ends the stream.
+fn ll_with_a_broken_second_part(second: &str) -> (String, String) {
+    let head = "#EXTM3U\n#EXT-X-TARGETDURATION:8\n\
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=4.0\n\
+#EXT-X-PART-INF:PART-TARGET=2.0\n#EXT-X-MEDIA-SEQUENCE:0\n";
+    let parts = format!(
+        "#EXT-X-PART:DURATION=2.0,URI=\"seg000.ts\",INDEPENDENT=YES\n{second}\n\
+#EXT-X-PART:DURATION=2.0,URI=\"dependent.ts\"\n\
+#EXT-X-PART:DURATION=2.0,URI=\"seg001.ts\",INDEPENDENT=YES\n"
+    );
+    (
+        format!("{head}{parts}"),
+        format!("{head}{parts}#EXTINF:8.0,\nwhole0.ts\n#EXTINF:2.0,\nseg002.ts\n#EXT-X-ENDLIST\n"),
+    )
+}
+
+fn play_past_a_broken_part(second: &str) -> (Vec<String>, Drained, Vec<String>) {
+    let (playlist, ended) = ll_with_a_broken_second_part(second);
+    let fetcher = ts_fetcher(vec![ended.into_bytes()]);
+    let log = Arc::clone(&fetcher.log);
+    let mut demuxer = open(&playlist, fetcher).expect("open");
+    let drained = drain(&mut demuxer).expect("drain");
+    let fetched = media_fetches(&log.lock().unwrap());
+    (fetched, drained, demuxer.take_notes())
+}
+
+#[test]
+fn a_lost_part_resumes_at_the_next_independent_part() {
+    let (fetched, drained, notes) =
+        play_past_a_broken_part("#EXT-X-PART:DURATION=2.0,URI=\"lost.ts\"");
+    let served: Vec<&str> = fetched
+        .iter()
+        .map(String::as_str)
+        .filter(|url| !url.ends_with("lost.ts"))
+        .collect();
+    assert_eq!(
+        served,
+        [
+            "https://test/seg000.ts",
+            "https://test/seg001.ts",
+            "https://test/seg002.ts"
+        ],
+        "the dependent part is passed over and the rest of the segment kept"
+    );
+    assert_eq!(drained.video_aus.len(), 180);
+    assert_eq!(drained.discontinuities, 1, "the loss is a splice");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("part 1 of sequence 0 unfetchable")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_gap_part_resumes_at_the_next_independent_part() {
+    let (fetched, drained, notes) =
+        play_past_a_broken_part("#EXT-X-PART:DURATION=2.0,URI=\"gap.ts\",GAP=YES");
+    assert_eq!(
+        fetched,
+        [
+            "https://test/seg000.ts",
+            "https://test/seg001.ts",
+            "https://test/seg002.ts"
+        ],
+        "neither the gap nor the dependent part is fetched"
+    );
+    assert_eq!(drained.video_aus.len(), 180);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("part 1 of sequence 0 is a gap")),
+        "{notes:?}"
     );
 }

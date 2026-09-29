@@ -10,6 +10,14 @@
 //! rebuilds only across stated discontinuities. fMP4 segments parse
 //! per-segment as `init + segment`; `tfdt` keeps their timestamps
 //! absolute, so no cross-segment correction is needed.
+//!
+//! Low-Latency HLS (a live playlist listing parts and offering blocking
+//! reloads) joins `PART-HOLD-BACK` behind the end on an independent part,
+//! reads complete segments whole, and parts only from the segment still
+//! being written or to finish one joined part way through, and reloads
+//! with `_HLS_msn`/`_HLS_part` so the server
+//! answers as soon as the next part exists. Parts flow through the same
+//! TS chain or per-fragment fMP4 parse as segments.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -24,20 +32,28 @@ use media_demux::{
 };
 
 /// Whole-resource fetch plus a pacing seam. `media-io` implements the
-/// network version; tests drive a virtual one. `wait` exists so the
-/// refresh cadence stays schedulable without the demuxer owning a clock.
+/// network version; tests drive a virtual one. `wait` and `now` keep the
+/// refresh cadence schedulable without the demuxer owning a clock.
 pub trait SegmentFetcher: Send {
     /// Fetch an entire resource, refusing past `cap` bytes.
     fn fetch(&mut self, url: &str, cap: u64) -> Result<Vec<u8>, SourceError>;
 
     /// Sleep (or advance virtual time) between live playlist refreshes.
     fn wait(&mut self, duration: Duration);
+
+    /// Monotonic time, for judging how long a live playlist has gone
+    /// without advancing, blocking reloads held by the server included.
+    fn now(&self) -> Duration {
+        static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        EPOCH.get_or_init(std::time::Instant::now).elapsed()
+    }
 }
 
 /// Parse-time caps: enforced here, not around the demuxer.
 const PLAYLIST_CAP: u64 = 4 * 1024 * 1024;
 const SEGMENT_CAP: u64 = 64 * 1024 * 1024;
 const MAX_SEGMENTS: usize = 65_536;
+const MAX_PARTS: usize = 65_536;
 /// Stated durations beyond this are hostile numbers, not media: with the
 /// segment-count cap this keeps every cumulative-duration fold far from
 /// i64 microseconds (fuzz-found overflow).
@@ -45,11 +61,15 @@ const MAX_SEGMENT_SECONDS: f64 = 3600.0;
 /// Attempts per resource before the failure propagates (live segments are
 /// skipped instead, since the window moves on without them).
 const RESOURCE_ATTEMPTS: u32 = 3;
-/// Live refreshes with no window progress before the lane reads as dead.
-const STALE_REFRESHES: u32 = 40;
-/// RFC 8216 §6.3.3: join no closer than three target durations from the
-/// live edge, expressed in whole segments.
-const LIVE_EDGE_SEGMENTS: usize = 3;
+/// Target durations of reloading with no window progress before the lane
+/// reads as dead, whatever the reload cadence.
+const STALE_TARGET_DURATIONS: u32 = 20;
+/// `HOLD-BACK` defaults to three target durations (RFC 8216bis
+/// §4.4.3.8); a playlist missing the `PART-HOLD-BACK` it requires gets
+/// three part targets.
+const HOLD_BACK_TARGETS: i64 = 3;
+/// Floor on the wait between reloads of a low-latency playlist.
+const MIN_PART_RELOAD: Duration = Duration::from_millis(100);
 
 /// `#EXTM3U` leads the playlist (BOM/whitespace tolerated). The router's
 /// sniff for HLS lanes.
@@ -167,6 +187,39 @@ pub struct PlaylistSegment {
     pub duration: MediaTime,
     pub discontinuity: bool,
     pub map_url: Option<String>,
+    /// Its partial segments, when the playlist's parts are in use.
+    pub parts: Vec<PlaylistPart>,
+}
+
+/// One Low-Latency HLS partial segment (`EXT-X-PART`).
+#[derive(Debug, Clone)]
+pub struct PlaylistPart {
+    pub url: String,
+    pub duration: MediaTime,
+    /// `INDEPENDENT=YES`, or the in-progress segment's first part: a
+    /// decoder can start here.
+    pub independent: bool,
+    /// `GAP=YES`: the server has no media for it.
+    pub gap: bool,
+}
+
+/// The segment still being written at the end of a low-latency
+/// playlist: its parts so far, and no URI of its own yet.
+#[derive(Debug, Clone, Default)]
+pub struct InProgressSegment {
+    pub parts: Vec<PlaylistPart>,
+    pub discontinuity: bool,
+    pub map_url: Option<String>,
+}
+
+/// Low-Latency HLS as a live playlist declares it: parts listed, and
+/// reloads that can block until the next part exists.
+#[derive(Debug, Clone)]
+pub struct LowLatency {
+    pub part_target: MediaTime,
+    /// How far behind the end a client joins when riding parts.
+    pub part_hold_back: MediaTime,
+    pub in_progress: InProgressSegment,
 }
 
 /// One parsed media-playlist window.
@@ -176,6 +229,185 @@ pub struct PlaylistWindow {
     pub first_sequence: u64,
     pub segments: Vec<PlaylistSegment>,
     pub ended: bool,
+    /// `CAN-BLOCK-RELOAD=YES`: a reload may ask the server to hold it
+    /// until the next media exists.
+    pub can_block_reload: bool,
+    /// `HOLD-BACK`: how far behind the end a client joins on whole
+    /// segments.
+    pub hold_back: Option<MediaTime>,
+    /// `EXT-X-START` `TIME-OFFSET`; negative counts back from the end.
+    pub start_offset: Option<MediaTime>,
+    pub low_latency: Option<LowLatency>,
+    /// Why a playlist that lists parts is played on whole segments.
+    pub low_latency_declined: Option<&'static str>,
+}
+
+impl PlaylistWindow {
+    /// The in-progress segment's sequence number: one past the last
+    /// complete segment.
+    fn in_progress_sequence(&self) -> u64 {
+        self.first_sequence + self.segments.len() as u64
+    }
+
+    /// How far the playlist reaches, for telling a refresh that brought
+    /// new media from one that did not.
+    fn reach(&self) -> (u64, usize) {
+        let parts = self
+            .low_latency
+            .as_ref()
+            .map_or(0, |ll| ll.in_progress.parts.len());
+        (self.in_progress_sequence(), parts)
+    }
+}
+
+/// Seconds as a playlist states them, refused past the per-segment cap.
+fn stated_seconds(value: &str, what: &'static str) -> Result<MediaTime, DemuxError> {
+    let seconds: f64 = value
+        .trim()
+        .parse()
+        .map_err(|_| DemuxError::Parse(format!("bad {what}: {value:?}")))?;
+    if !seconds.is_finite() || !(0.0..=MAX_SEGMENT_SECONDS).contains(&seconds) {
+        return Err(DemuxError::Cap(what));
+    }
+    Ok(MediaTime::from_micros((seconds * 1e6) as i64))
+}
+
+/// `KEY=value` pairs of an attribute list, quotes removed. A quoted
+/// value may hold commas.
+fn attributes(list: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    let mut rest = list;
+    while !rest.is_empty() {
+        let Some(eq) = rest.find('=') else { break };
+        let key = rest[..eq].trim();
+        let after = &rest[eq + 1..];
+        let (value, next) = if let Some(quoted) = after.strip_prefix('"') {
+            match quoted.find('"') {
+                Some(end) => (&quoted[..end], &quoted[end + 1..]),
+                None => (quoted, ""),
+            }
+        } else {
+            match after.find(',') {
+                Some(end) => (&after[..end], &after[end..]),
+                None => (after, ""),
+            }
+        };
+        out.push((key, value));
+        rest = next.trim_start_matches([',', ' ']);
+    }
+    out
+}
+
+/// The Low-Latency HLS tags, which `m3u8-rs` does not model: it files
+/// them as unknown and drops whatever follows the last segment URI, which
+/// is where the in-progress segment's parts sit. Read line by line, with
+/// parts grouped by the segment URI that closes them.
+#[derive(Default)]
+struct LowLatencyTags {
+    can_block_reload: bool,
+    hold_back: Option<MediaTime>,
+    part_hold_back: Option<MediaTime>,
+    part_target: Option<MediaTime>,
+    /// One entry per segment URI, then the in-progress segment's.
+    parts: Vec<Vec<PlaylistPart>>,
+    in_progress_discontinuity: bool,
+    in_progress_map: Option<String>,
+    byte_range_parts: bool,
+    /// A part or map tag that could not be read; the playlist plays on
+    /// whole segments rather than failing.
+    malformed: bool,
+}
+
+fn scan_low_latency(text: &str, base_url: &str) -> LowLatencyTags {
+    let mut tags = LowLatencyTags::default();
+    let mut current = Vec::new();
+    let mut total_parts = 0usize;
+    let mut discontinuity = false;
+    let mut map: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !line.starts_with('#') {
+            tags.parts.push(std::mem::take(&mut current));
+            discontinuity = false;
+            continue;
+        }
+        if let Some(list) = line.strip_prefix("#EXT-X-SERVER-CONTROL:") {
+            for (key, value) in attributes(list) {
+                match key {
+                    "CAN-BLOCK-RELOAD" => tags.can_block_reload = value == "YES",
+                    "HOLD-BACK" => tags.hold_back = stated_seconds(value, "HOLD-BACK").ok(),
+                    "PART-HOLD-BACK" => {
+                        tags.part_hold_back = stated_seconds(value, "PART-HOLD-BACK").ok();
+                    }
+                    _ => {}
+                }
+            }
+        } else if let Some(list) = line.strip_prefix("#EXT-X-PART-INF:") {
+            for (key, value) in attributes(list) {
+                if key == "PART-TARGET" {
+                    tags.part_target = stated_seconds(value, "PART-TARGET").ok();
+                }
+            }
+        } else if let Some(list) = line.strip_prefix("#EXT-X-PART:") {
+            total_parts += 1;
+            if total_parts > MAX_PARTS {
+                tags.malformed = true;
+                continue;
+            }
+            let mut uri = None;
+            let mut duration = None;
+            let mut independent = false;
+            let mut gap = false;
+            for (key, value) in attributes(list) {
+                match key {
+                    "URI" => uri = Some(value),
+                    "DURATION" => duration = stated_seconds(value, "part duration").ok(),
+                    "INDEPENDENT" => independent = value == "YES",
+                    "GAP" => gap = value == "YES",
+                    "BYTERANGE" => tags.byte_range_parts = true,
+                    _ => {}
+                }
+            }
+            let (Some(Ok(url)), Some(duration)) = (uri.map(|uri| resolve(base_url, uri)), duration)
+            else {
+                tags.malformed = true;
+                continue;
+            };
+            current.push(PlaylistPart {
+                url,
+                duration,
+                independent,
+                gap,
+            });
+        } else if line == "#EXT-X-DISCONTINUITY" {
+            discontinuity = true;
+        } else if let Some(list) = line.strip_prefix("#EXT-X-MAP:") {
+            for (key, value) in attributes(list) {
+                match key {
+                    // The in-progress segment's map comes only from here.
+                    "URI" => match resolve(base_url, value) {
+                        Ok(url) => map = Some(url),
+                        Err(_) => tags.malformed = true,
+                    },
+                    "BYTERANGE" => tags.byte_range_parts = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    // The in-progress segment's parts are listed from its first, which
+    // starts where the segment does. A complete segment may have lost its
+    // leading parts; there only a stated INDEPENDENT counts.
+    if let Some(first) = current.first_mut() {
+        first.independent = true;
+    }
+    tags.parts.push(current);
+    tags.in_progress_discontinuity = discontinuity;
+    tags.in_progress_map = map;
+    tags
 }
 
 /// A parsed playlist of either kind; also the fuzz target's surface.
@@ -245,16 +477,72 @@ pub fn parse_playlist(bytes: &[u8], base_url: &str) -> Result<ParsedPlaylist, De
                     duration: MediaTime::from_micros((duration * 1e6) as i64),
                     discontinuity: segment.discontinuity,
                     map_url: current_map.clone(),
+                    parts: Vec::new(),
                 });
             }
-            Ok(ParsedPlaylist::Media(Box::new(PlaylistWindow {
+
+            let tags = match std::str::from_utf8(bytes) {
+                Ok(text) => scan_low_latency(text, base_url),
+                Err(_) => LowLatencyTags::default(),
+            };
+            let start_offset = media
+                .start
+                .as_ref()
+                .map(|start| start.time_offset)
+                .filter(|offset| offset.is_finite() && offset.abs() <= MAX_SEGMENT_SECONDS * 24.0)
+                .map(|offset| MediaTime::from_micros((offset * 1e6) as i64));
+            let mut window = PlaylistWindow {
                 target_duration: MediaTime::from_secs(
                     media.target_duration.clamp(1, MAX_SEGMENT_SECONDS as u64) as i64,
                 ),
                 first_sequence: media.media_sequence,
                 segments,
                 ended: media.end_list,
-            })))
+                can_block_reload: tags.can_block_reload,
+                hold_back: tags.hold_back,
+                start_offset,
+                low_latency: None,
+                low_latency_declined: None,
+            };
+
+            let lists_parts = tags.parts.iter().any(|parts| !parts.is_empty());
+            let declined = if !lists_parts {
+                None
+            } else if !tags.can_block_reload {
+                Some("parts listed without CAN-BLOCK-RELOAD")
+            } else if tags.part_target.is_none() {
+                Some("parts listed without a readable PART-TARGET")
+            } else if tags.malformed {
+                Some("a low-latency tag could not be read")
+            } else if tags.byte_range_parts {
+                Some("byte-range parts")
+            } else if tags.parts.len() != window.segments.len() + 1 {
+                Some("parts could not be matched to their segments")
+            } else {
+                None
+            };
+            window.low_latency_declined = declined;
+            // Parts stay on the segments once the playlist ends: a
+            // segment joined part way through is finished on them.
+            if let (true, None, Some(part_target)) = (lists_parts, declined, tags.part_target) {
+                let mut parts = tags.parts;
+                let in_progress = parts.pop().unwrap_or_default();
+                for (segment, parts) in window.segments.iter_mut().zip(parts) {
+                    segment.parts = parts;
+                }
+                window.low_latency = (!window.ended).then(|| LowLatency {
+                    part_target,
+                    part_hold_back: tags.part_hold_back.unwrap_or(MediaTime::from_micros(
+                        part_target.as_micros() * HOLD_BACK_TARGETS,
+                    )),
+                    in_progress: InProgressSegment {
+                        parts: in_progress,
+                        discontinuity: tags.in_progress_discontinuity,
+                        map_url: tags.in_progress_map,
+                    },
+                });
+            }
+            Ok(ParsedPlaylist::Media(Box::new(window)))
         }
     }
 }
@@ -278,14 +566,111 @@ enum DiscontinuityKind {
     Jump,
 }
 
+/// Where the scheduler reads next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cursor {
+    sequence: u64,
+    /// `None` reads the whole segment, `Some(n)` its part `n`.
+    part: Option<usize>,
+}
+
+impl Cursor {
+    fn segment(sequence: u64) -> Self {
+        Self {
+            sequence,
+            part: None,
+        }
+    }
+}
+
+/// What the cursor points at in the current window.
+enum Located {
+    Fetch {
+        url: String,
+        map_url: Option<String>,
+        stated: bool,
+        then: Cursor,
+    },
+    /// Nothing to fetch here; move on. `jump` names a skip that breaks
+    /// continuity.
+    Advance { then: Cursor, jump: Option<String> },
+    /// Not in the window yet.
+    Missing,
+}
+
+/// `resync` passes over parts a decoder cannot start from.
+fn part_located(
+    part: &PlaylistPart,
+    index: usize,
+    sequence: u64,
+    discontinuity: bool,
+    map_url: Option<String>,
+    resync: bool,
+) -> Located {
+    let next = Cursor {
+        sequence,
+        part: Some(index + 1),
+    };
+    if part.gap {
+        return Located::Advance {
+            then: next,
+            jump: Some(format!(
+                "part {index} of sequence {sequence} is a gap; skipping to its next independent part"
+            )),
+        };
+    }
+    if resync && !part.independent {
+        return Located::Advance {
+            then: next,
+            jump: None,
+        };
+    }
+    Located::Fetch {
+        url: part.url.clone(),
+        map_url,
+        stated: index == 0 && discontinuity,
+        then: Cursor {
+            sequence,
+            part: Some(index + 1),
+        },
+    }
+}
+
+/// Where each listed part starts within its segment. A complete segment's
+/// parts end where it does, which places them even when its leading parts
+/// are no longer listed; an in-progress segment's parts start at its own
+/// start.
+fn part_starts(parts: &[PlaylistPart], complete: Option<MediaTime>) -> Vec<MediaTime> {
+    let listed = parts
+        .iter()
+        .fold(MediaTime::ZERO, |sum, part| sum + part.duration);
+    let mut at = complete.map_or(MediaTime::ZERO, |duration| {
+        (duration - listed).max(MediaTime::ZERO)
+    });
+    parts
+        .iter()
+        .map(|part| {
+            let start = at;
+            at += part.duration;
+            start
+        })
+        .collect()
+}
+
 /// The scheduler: playlist window cursor + refresh cadence + fetch policy.
 struct Scheduler {
     fetcher: Box<dyn SegmentFetcher>,
     playlist_url: String,
     window: PlaylistWindow,
     live: bool,
-    next_sequence: u64,
+    cursor: Cursor,
     pending_jump: bool,
+    /// Set after a lost part: the parts after it are passed over until one
+    /// a decoder can start from.
+    resync: bool,
+    /// Set once the server refuses a blocking reload: the lane reloads
+    /// plainly from then on.
+    blocking_refused: bool,
     notes: Vec<String>,
 }
 
@@ -312,29 +697,95 @@ impl Scheduler {
         self.window.segments.get(index)
     }
 
-    /// Blocking: the next segment to demux, `None` at a VOD end. Live
-    /// windows refresh (with waits) until the cursor's segment appears,
-    /// the playlist ends, or the lane reads as dead.
+    /// A complete segment is read whole unless the cursor joined it part
+    /// way through; parts are read only from the segment still being
+    /// written, or to finish one begun on parts.
+    fn locate(&self) -> Located {
+        let Cursor { sequence, part } = self.cursor;
+        if let Some(segment) = self.segment_at(sequence) {
+            let next = Cursor::segment(sequence + 1);
+            return match part {
+                None => Located::Fetch {
+                    url: segment.url.clone(),
+                    map_url: segment.map_url.clone(),
+                    stated: segment.discontinuity,
+                    then: next,
+                },
+                Some(index) => match segment.parts.get(index) {
+                    Some(p) => part_located(
+                        p,
+                        index,
+                        sequence,
+                        segment.discontinuity,
+                        segment.map_url.clone(),
+                        self.resync,
+                    ),
+                    None if index == 0 => Located::Fetch {
+                        url: segment.url.clone(),
+                        map_url: segment.map_url.clone(),
+                        stated: segment.discontinuity,
+                        then: next,
+                    },
+                    None if index == segment.parts.len() => Located::Advance {
+                        then: next,
+                        jump: None,
+                    },
+                    None => Located::Advance {
+                        then: next,
+                        jump: Some(format!(
+                            "parts of sequence {sequence} left the playlist; skipping to {}",
+                            sequence + 1
+                        )),
+                    },
+                },
+            };
+        }
+        if let Some(ll) = &self.window.low_latency
+            && sequence == self.window.in_progress_sequence()
+        {
+            let index = part.unwrap_or(0);
+            if let Some(p) = ll.in_progress.parts.get(index) {
+                return part_located(
+                    p,
+                    index,
+                    sequence,
+                    ll.in_progress.discontinuity,
+                    ll.in_progress.map_url.clone(),
+                    self.resync,
+                );
+            }
+        }
+        Located::Missing
+    }
+
+    /// Blocking: the next segment or part to demux, `None` at a VOD end.
+    /// Live windows refresh until the cursor's media appears, the
+    /// playlist ends, or the lane reads as dead.
     fn next_segment(&mut self) -> Result<Option<FetchedSegment>, DemuxError> {
         loop {
             // Fell out of the window: jump to the live join point and say so.
-            if self.live && self.next_sequence < self.window.first_sequence {
-                let jump_to = self.live_join_sequence();
-                let from = self.next_sequence;
+            if self.live && self.cursor.sequence < self.window.first_sequence {
+                let (jump_to, _) = self.live_join();
+                let from = self.cursor.sequence;
                 push_note(&mut self.notes, || {
-                    format!("window advanced past sequence {from}; jumping to {jump_to}")
+                    format!(
+                        "window advanced past sequence {from}; jumping to {}",
+                        jump_to.sequence
+                    )
                 });
-                self.next_sequence = jump_to;
+                self.cursor = jump_to;
                 self.pending_jump = true;
             }
 
-            if let Some(segment) = self.segment_at(self.next_sequence) {
-                let stated = segment.discontinuity;
-                let url = segment.url.clone();
-                let map_url = segment.map_url.clone();
-                match self.fetch_with_retries(&url, SEGMENT_CAP) {
+            match self.locate() {
+                Located::Fetch {
+                    url,
+                    map_url,
+                    stated,
+                    then,
+                } => match self.fetch_with_retries(&url, SEGMENT_CAP) {
                     Ok(data) => {
-                        self.next_sequence += 1;
+                        self.cursor = then;
                         let discontinuity = if stated {
                             DiscontinuityKind::Stated
                         } else if self.pending_jump {
@@ -343,57 +794,276 @@ impl Scheduler {
                             DiscontinuityKind::None
                         };
                         self.pending_jump = false;
+                        self.resync = false;
                         return Ok(Some(FetchedSegment {
                             data,
                             discontinuity,
                             map_url,
                         }));
                     }
-                    // A dead live segment is a gap to skip, not a session
-                    // failure; VOD has no window racing away, so it fails.
+                    // A dead live segment or part is a gap to skip, not a
+                    // session failure; VOD has no window racing away, so it
+                    // fails.
                     Err(e) if self.live => {
-                        let sequence = self.next_sequence;
-                        push_note(&mut self.notes, || {
-                            format!("segment {sequence} unfetchable ({e}); skipping")
+                        let Cursor { sequence, part } = self.cursor;
+                        push_note(&mut self.notes, || match part {
+                            None => format!("segment {sequence} unfetchable ({e}); skipping"),
+                            Some(index) => format!(
+                                "part {index} of sequence {sequence} unfetchable ({e}); skipping to its next independent part"
+                            ),
                         });
-                        self.next_sequence += 1;
+                        self.cursor = match part {
+                            None => Cursor::segment(sequence + 1),
+                            Some(index) => Cursor {
+                                sequence,
+                                part: Some(index + 1),
+                            },
+                        };
                         self.pending_jump = true;
+                        self.resync = true;
                         continue;
                     }
                     Err(e) => return Err(e),
+                },
+                Located::Advance { then, jump } => {
+                    if let Some(note) = jump {
+                        push_note(&mut self.notes, || note);
+                        self.pending_jump = true;
+                        self.resync = true;
+                    }
+                    self.cursor = then;
                 }
-            } else if self.window.ended {
-                return Ok(None);
-            } else if self.live {
-                self.refresh_until_progress()?;
-            } else {
+                Located::Missing if self.window.ended => return Ok(None),
+                Located::Missing if self.live => self.refresh_until_progress()?,
                 // A VOD playlist that neither carries the cursor nor has
                 // ended is malformed.
-                return Err(DemuxError::Parse(
-                    "playlist window ended without EXT-X-ENDLIST".into(),
-                ));
+                Located::Missing => {
+                    return Err(DemuxError::Parse(
+                        "playlist window ended without EXT-X-ENDLIST".into(),
+                    ));
+                }
             }
         }
     }
 
-    fn live_join_sequence(&self) -> u64 {
-        let backoff = self.window.segments.len().min(LIVE_EDGE_SEGMENTS);
-        self.window.first_sequence + (self.window.segments.len() - backoff) as u64
+    /// Where a live session starts, and how far that is behind the end
+    /// (RFC 8216bis §6.3.3): the playlist's `EXT-X-START`, else its hold
+    /// back behind the end (`PART-HOLD-BACK` when riding parts,
+    /// `HOLD-BACK` otherwise, three target durations when unstated),
+    /// snapped back to the nearest point a decoder can start from.
+    fn live_join(&self) -> (Cursor, MediaTime) {
+        let window = &self.window;
+        let low_latency = window.low_latency.as_ref();
+        let mut points: Vec<(MediaTime, Cursor)> = Vec::new();
+        let mut at = MediaTime::ZERO;
+        for (offset, segment) in window.segments.iter().enumerate() {
+            let sequence = window.first_sequence + offset as u64;
+            points.push((at, Cursor::segment(sequence)));
+            if low_latency.is_some() {
+                let starts = part_starts(&segment.parts, Some(segment.duration));
+                for (index, (part, start)) in segment.parts.iter().zip(starts).enumerate() {
+                    // A part at the segment's own start is the segment.
+                    if start > MediaTime::ZERO && part.independent && !part.gap {
+                        points.push((
+                            at + start,
+                            Cursor {
+                                sequence,
+                                part: Some(index),
+                            },
+                        ));
+                    }
+                }
+            }
+            at += segment.duration;
+        }
+        if let Some(ll) = low_latency {
+            let sequence = window.in_progress_sequence();
+            for (index, part) in ll.in_progress.parts.iter().enumerate() {
+                if part.independent && !part.gap {
+                    points.push((
+                        at,
+                        Cursor {
+                            sequence,
+                            part: Some(index),
+                        },
+                    ));
+                }
+                at += part.duration;
+            }
+        }
+        let end = at;
+        let target = match (window.start_offset, low_latency) {
+            (Some(offset), _) if offset < MediaTime::ZERO => end + offset,
+            (Some(offset), _) => offset,
+            (None, Some(ll)) => end - ll.part_hold_back,
+            (None, None) => {
+                end - window.hold_back.unwrap_or(MediaTime::from_micros(
+                    window.target_duration.as_micros() * HOLD_BACK_TARGETS,
+                ))
+            }
+        }
+        .clamp(MediaTime::ZERO, end);
+        let (start, cursor) = points
+            .iter()
+            .rev()
+            .find(|(start, _)| *start <= target)
+            .or(points.first())
+            .copied()
+            .unwrap_or((
+                MediaTime::ZERO,
+                Cursor::segment(window.in_progress_sequence()),
+            ));
+        (cursor, end - start)
     }
 
-    /// Refresh the playlist until the cursor's segment is visible or the
-    /// playlist ends. RFC 8216 cadence: half a target duration between
-    /// attempts; a window that stops advancing for `STALE_REFRESHES`
-    /// attempts is a dead lane.
+    /// The playlist URL with the blocking-reload directives (RFC 8216bis
+    /// §6.2.5.2) for the media the cursor waits on, when the server takes
+    /// them.
+    fn blocking_reload_url(&self) -> Option<String> {
+        if !self.window.can_block_reload || self.blocking_refused {
+            return None;
+        }
+        let mut url = url::Url::parse(&self.playlist_url).ok()?;
+        // A drive path parses with a one-letter scheme.
+        if !is_fetchable_scheme(url.scheme()) {
+            return None;
+        }
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("_HLS_msn", &self.cursor.sequence.to_string());
+            if self.window.low_latency.is_some() {
+                query.append_pair("_HLS_part", &self.cursor.part.unwrap_or(0).to_string());
+            }
+        }
+        Some(url.into())
+    }
+
+    /// The parts listed for `sequence` and, for a complete segment, its
+    /// duration.
+    fn parts_of(&self, sequence: u64) -> Option<(&[PlaylistPart], Option<MediaTime>)> {
+        if let Some(segment) = self.segment_at(sequence) {
+            return Some((&segment.parts, Some(segment.duration)));
+        }
+        let ll = self.window.low_latency.as_ref()?;
+        (sequence == self.window.in_progress_sequence()).then_some((&ll.in_progress.parts, None))
+    }
+
+    /// Where the part cursor sits within its segment, in media time.
+    fn cursor_offset(&self) -> Option<(u64, MediaTime)> {
+        let index = self.cursor.part?;
+        let (parts, complete) = self.parts_of(self.cursor.sequence)?;
+        let starts = part_starts(parts, complete);
+        let at = match starts.get(index) {
+            Some(start) => *start,
+            None if index == parts.len() => starts
+                .last()
+                .zip(parts.last())
+                .map_or(MediaTime::ZERO, |(start, part)| *start + part.duration),
+            None => return None,
+        };
+        Some((self.cursor.sequence, at))
+    }
+
+    /// After a reload, put the part cursor back on the part that starts
+    /// where it was. A server removes old parts, leading ones first, and a
+    /// list position does not survive that. A cursor on a complete
+    /// segment it has taken nothing from reads the segment whole; one
+    /// whose next part is no longer listed jumps to the next segment.
+    fn remap_cursor(&mut self, offset: Option<(u64, MediaTime)>) {
+        let Some((sequence, at)) = offset else { return };
+        if self.cursor.sequence != sequence {
+            return;
+        }
+        let Some((parts, complete)) = self.parts_of(sequence) else {
+            return;
+        };
+        if at == MediaTime::ZERO && complete.is_some() {
+            self.cursor.part = None;
+            return;
+        }
+        let starts = part_starts(parts, complete);
+        let tolerance = parts
+            .iter()
+            .map(|part| part.duration.as_micros() / 2)
+            .min()
+            .map_or(MediaTime::ZERO, MediaTime::from_micros);
+        let end = starts
+            .last()
+            .zip(parts.last())
+            .map(|(start, part)| *start + part.duration);
+        let found = starts
+            .iter()
+            .position(|start| (*start - at).abs() <= tolerance)
+            .or_else(|| {
+                end.filter(|end| (*end - at).abs() <= tolerance)
+                    .map(|_| parts.len())
+            });
+        match found {
+            Some(index) => self.cursor.part = Some(index),
+            None => {
+                push_note(&mut self.notes, || {
+                    format!(
+                        "parts of sequence {sequence} left the playlist; skipping to {}",
+                        sequence + 1
+                    )
+                });
+                self.cursor = Cursor::segment(sequence + 1);
+                self.pending_jump = true;
+                self.resync = true;
+            }
+        }
+    }
+
+    /// Between reloads that are not held by the server: half a target
+    /// duration (RFC 8216 cadence), or a part target when riding parts.
+    fn reload_interval(&self) -> Duration {
+        match &self.window.low_latency {
+            Some(ll) => {
+                Duration::from_micros(ll.part_target.as_micros().max(0) as u64).max(MIN_PART_RELOAD)
+            }
+            None => Duration::from_micros((self.window.target_duration.as_micros() / 2) as u64)
+                .max(Duration::from_millis(500)),
+        }
+    }
+
+    /// Refresh the playlist until the cursor's media is visible or the
+    /// playlist ends. A server that can block holds the reload until the
+    /// media exists, and it goes out at once; otherwise, or after a reload
+    /// that brought nothing, it waits the reload interval first. A window
+    /// that stops advancing for `STALE_TARGET_DURATIONS` is a dead lane.
     fn refresh_until_progress(&mut self) -> Result<(), DemuxError> {
-        let mut stale = 0u32;
+        let mut stalled_since: Option<Duration> = None;
+        let stale_limit =
+            Duration::from_micros(self.window.target_duration.as_micros().max(0) as u64)
+                * STALE_TARGET_DURATIONS;
+        let mut wait_first = !self.window.can_block_reload;
         loop {
-            let wait = Duration::from_micros((self.window.target_duration.as_micros() / 2) as u64)
-                .max(Duration::from_millis(500));
-            self.fetcher.wait(wait);
+            let started = self.fetcher.now();
+            let before = self.window.reach();
+            let interval = self.reload_interval();
+            let blocking = self.blocking_reload_url();
+            if wait_first || blocking.is_none() {
+                self.fetcher.wait(interval);
+            }
 
             let url = self.playlist_url.clone();
-            let bytes = self.fetch_with_retries(&url, PLAYLIST_CAP)?;
+            let bytes = match blocking {
+                Some(blocking) => match self.fetcher.fetch(&blocking, PLAYLIST_CAP) {
+                    Ok(bytes) => bytes,
+                    // Any failed blocking reload (a server past its limit
+                    // answers 503) falls back to plain reloads for the rest
+                    // of the session.
+                    Err(e) => {
+                        push_note(&mut self.notes, || {
+                            format!("blocking reload failed ({e}); reloading without it")
+                        });
+                        self.blocking_refused = true;
+                        self.fetcher.wait(interval);
+                        self.fetch_with_retries(&url, PLAYLIST_CAP)?
+                    }
+                },
+                None => self.fetch_with_retries(&url, PLAYLIST_CAP)?,
+            };
             let window = match parse_playlist(&bytes, &url)? {
                 ParsedPlaylist::Media(window) => *window,
                 ParsedPlaylist::Master(_) => {
@@ -403,20 +1073,25 @@ impl Scheduler {
                 }
             };
 
-            let progressed = window.first_sequence + window.segments.len() as u64
-                > self.window.first_sequence + self.window.segments.len() as u64
-                || window.ended;
+            let progressed = window.reach() > before || window.ended;
+            let offset = self.cursor_offset();
             self.window = window;
+            self.remap_cursor(offset);
             if self.window.ended
-                || self.segment_at(self.next_sequence).is_some()
-                || self.next_sequence < self.window.first_sequence
+                || !matches!(self.locate(), Located::Missing)
+                || self.cursor.sequence < self.window.first_sequence
             {
                 return Ok(());
             }
-            stale = if progressed { 0 } else { stale + 1 };
-            if stale >= STALE_REFRESHES {
-                return Err(DemuxError::Source("live playlist stopped advancing".into()));
+            if progressed {
+                stalled_since = None;
+            } else {
+                let since = *stalled_since.get_or_insert(started);
+                if self.fetcher.now().saturating_sub(since) >= stale_limit {
+                    return Err(DemuxError::Source("live playlist stopped advancing".into()));
+                }
             }
+            wait_first = !progressed;
         }
     }
 }
@@ -639,20 +1314,37 @@ impl HlsDemuxer {
         } else {
             None
         };
+        let first_sequence = window.first_sequence;
         let mut scheduler = Scheduler {
             fetcher,
             playlist_url: url,
             window,
             live,
-            next_sequence: 0,
+            cursor: Cursor::segment(first_sequence),
             pending_jump: false,
+            resync: false,
+            blocking_refused: false,
             notes,
         };
-        scheduler.next_sequence = if live {
-            scheduler.live_join_sequence()
-        } else {
-            scheduler.window.first_sequence
-        };
+        if live {
+            let (join, behind) = scheduler.live_join();
+            scheduler.cursor = join;
+            if let Some(why) = scheduler.window.low_latency_declined {
+                push_note(&mut scheduler.notes, || {
+                    format!("low-latency parts not used ({why}); playing whole segments")
+                });
+            }
+            if scheduler.window.low_latency.is_some() {
+                push_note(&mut scheduler.notes, || {
+                    let part = join.part.unwrap_or(0);
+                    format!(
+                        "low-latency HLS: joining sequence {} part {part}, {} ms behind the end",
+                        join.sequence,
+                        behind.as_millis()
+                    )
+                });
+            }
+        }
 
         Ok(Self {
             scheduler: Arc::new(Mutex::new(scheduler)),
@@ -843,7 +1535,7 @@ impl Demuxer for HlsDemuxer {
             }
             cumulative += segment.duration;
         }
-        scheduler.next_sequence = scheduler.window.first_sequence + index as u64;
+        scheduler.cursor = Cursor::segment(scheduler.window.first_sequence + index as u64);
         scheduler.pending_jump = false;
         drop(scheduler);
 
