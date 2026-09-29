@@ -235,8 +235,9 @@ if (player.DurationSeconds > 0)
 ```
 
 Live sources cannot be seeked. A video seek shows the requested frame,
-decoding from the keyframe before it, unless that keyframe is more than 12
-seconds back, when it shows the keyframe. MP4, Matroska and HLS seek by index.
+decoding from the keyframe before it, unless that keyframe is more than 720
+frames back at the video's frame rate (or 12 seconds, if that is longer), when
+it shows the keyframe. MP4, Matroska and HLS seek by index.
 WAV lands on the exact sample and FLAC on a frame. MP3, Ogg Opus and raw AAC
 estimate their position.
 

@@ -40,7 +40,7 @@ unity_time,frame,frame_dt_ms,state,position_us,duration_us,banked_ms,decoded,dec
 | `out_playing` | Any bound output playing | 1 while playing |
 | `out_consumed_delta` | Frames the first output mixed this Unity frame | `out_consumed` advances at `dsp_rate`; lower is audible break-up |
 | `out_peak`, `out_rms` | Level of the first output's last block | Non-zero for anything but silence |
-| `out_latency_us` | Estimated delay from pull to speaker | The device's buffering plus a block; used for A/V compensation on Android |
+| `out_latency_us` | Estimated delay from pull to speaker | The device's buffering plus a block; used for A/V compensation |
 | `av_offset_us` | Frame time minus the audio playhead, µs; `-2147483648` when unknown | On rows where `presented_delta` > 0: median within a few ms, nothing later than 40 ms plus a refresh. Audio pull blocks (about 21 ms at 48 kHz) widen the reading by up to that much |
 
 ## Grading a run
