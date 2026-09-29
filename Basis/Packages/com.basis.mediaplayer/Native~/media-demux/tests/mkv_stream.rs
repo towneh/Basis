@@ -98,10 +98,9 @@ fn empty_cluster() -> Vec<u8> {
 
 /// A Matroska file naming `tracks` audio tracks whose codec id maps to
 /// nothing, so each one is a refusal, behind one playable video track.
-/// Video rather than audio for the playable one: a file the demuxer can
-/// make nothing of is refused outright and a refused open hands back no
-/// refusals to drain, but an audio track that binds sends every later audio track to
-/// the catch-all arm instead of the one that names the codec id.
+/// The playable track is video because a file with nothing playable fails
+/// to open, leaving no refusals to drain, and a bound audio track would
+/// send every later audio track to the catch-all arm as a note.
 fn mkv_with_unmapped_audio_tracks(tracks: u64) -> Vec<u8> {
     // VP9 needs no codec private data.
     let mut track_list = track_entry(1, 1, "V_VP9", &[]);

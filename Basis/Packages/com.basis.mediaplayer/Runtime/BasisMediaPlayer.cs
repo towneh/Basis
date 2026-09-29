@@ -100,8 +100,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     bool _open;
     bool _abiChecked;
 
-    // URL consent. The request id tells a prompt's answer from one another
-    // open or a close has already replaced. _approvedUrl is the last URL
+    // URL consent. The request id tells a prompt's answer apart from one that
+    // a later open or a close has already replaced. _approvedUrl is the last URL
     // accepted or trusted on this player, so a resolver handing it straight
     // back to Open is not asked twice for one action.
     bool _urlApprovalPending;
@@ -201,6 +201,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
     public long BankedMilliseconds { get; private set; }
     public ulong FramesDecoded { get; private set; }
     public ulong FramesPresented { get; private set; }
+    /// <summary>The output texture, or null until the first frame is
+    /// presented (or cover art is shown).</summary>
     public Texture Texture => _textureShown ? _texture : null;
 
     /// <summary>Cover art the container carried, decoded, or null. Audio-only
@@ -833,9 +835,9 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         string askedFor = !string.IsNullOrEmpty(media.SourceUrl) ? media.SourceUrl : url;
         string askedForAudio = audioUrl;
         // All of this lands after the open, which clears what the previous
-        // source left behind. No consent prompt: only a resolver builds a
-        // BasisResolvedMedia, and it did so for a URL the user already
-        // answered for.
+        // source left behind. No consent prompt: a resolver calls this for a
+        // URL the user already answered for, and the prop sandbox refuses it
+        // to world scripts.
         OpenStreams(media.Url, media.AudioUrl);
         url = askedFor;
         audioUrl = askedForAudio;
@@ -1125,8 +1127,8 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         // exists. The open path clears them only after `bm_session_open`
         // succeeds, so without this a close, or an open that fails before that
         // point, would leave the previous session's values for the diagnostics
-        // recorder to write into its capture for an idle player. `Open` closes
-        // first, so this covers it too. A moderation-blocked open returns
+        // recorder to write into its capture for an idle player. `OpenStreams`
+        // closes first, so this covers it too. A moderation-blocked open returns
         // before `Close` and deliberately leaves a still-playing session's
         // readings alone.
         System.Threading.Volatile.Write(ref _engineChannels, 0);

@@ -216,9 +216,9 @@ struct QueuedEvent {
 /// One track's span this generation, internal timeline. Live tracks can
 /// sit apart at arrival (a relay may open a join with a cached keyframe
 /// stamped seconds before the live frames after it), so how far behind the
-/// edge release sits is read from the lead track: the one stamped furthest
-/// behind, which sets the pace by releasing as it arrives. A track stamped
-/// ahead of the lead waits on the schedule for it.
+/// edge release sits is read from the lead track: the lowest newest stamp
+/// among tracks still arriving. A track stamped ahead of the lead waits on
+/// the schedule for it.
 #[derive(Debug, Clone, Copy)]
 struct TrackSpan {
     track: TrackId,
@@ -282,9 +282,9 @@ pub struct Bank {
     /// is due at `anchor + rel`.
     anchor: Option<MediaTime>,
     /// The schedule's offset behind the live edge. Tracks the lead track's
-    /// banked span upwards after the anchor and is what decay returns; see
-    /// [`Bank::set_downstream_parked`] for why decay is not always free
-    /// to run.
+    /// banked span, less the cushion, upwards after the anchor and is what
+    /// decay returns; see [`Bank::set_downstream_parked`] for why decay is
+    /// not always free to run.
     lag: MediaTime,
     hold: Hold,
     last_decay: Option<MediaTime>,
@@ -471,10 +471,10 @@ impl Bank {
     /// hold-lift on a priming join, so the arrived span is the depth the
     /// viewer joins with. An explicitly configured depth therefore holds
     /// for lag plus cushion, or the join would silently shed the cushion.
-    /// Auto holds to the estimator's lag only: it joins fast and grows on
-    /// evidence, and adding the cushion would cost every Auto live join
-    /// about 500 ms (the seed bucket's upper edge puts a cold target_lag a
-    /// hair above zero). A zero target lifts immediately.
+    /// Auto holds to the estimator's lag only, so it joins fast and grows on
+    /// evidence: a cold Auto target sits a hair above zero, and adding the
+    /// cushion would cost every Auto live join about 500 ms. A zero target
+    /// lifts immediately.
     fn hold_target(&self) -> MediaTime {
         let target = self.target_lag();
         if self.priming()
@@ -635,18 +635,13 @@ impl Bank {
                 // whether or not the lag cap let the schedule absorb it.
                 self.stall_total += shift;
             }
-            // Media arriving ahead of the schedule deepens the bank with no
-            // anchor shift. That happens at the join: the anchor is fixed
-            // part-way through the source's opening burst and the rest of
-            // the burst lands behind it. `lag` is the schedule's distance
-            // from the edge, so it follows the lead track's banked span
-            // upwards, less the cushion. Within the cushion a high banked
-            // span is arrival jitter (the same dead zone the debt bound
-            // keeps the other way), and tracking it would let each early
-            // burst ratchet the schedule earlier until arrivals read late.
-            // Downwards `lag` is left alone: a delivery stall drains the
-            // bank while the schedule stays put, and the estimator needs
-            // `lag` to hold so the stall reads as a delay.
+            // Media arriving ahead of the schedule (the rest of a join's
+            // opening burst) deepens the bank with no anchor shift, so `lag`
+            // follows the lead track's banked span upwards, less the
+            // cushion: within the cushion a high span is arrival jitter,
+            // and tracking it would ratchet the schedule earlier with each
+            // early burst. Downwards `lag` is left alone, so a delivery
+            // stall reads to the estimator as a delay.
             let surplus = (self.lead_banked() - self.cfg.decoder_cushion).max(MediaTime::ZERO);
             self.lag = self.lag.max(surplus).min(self.cfg.lag_cap);
         }
@@ -775,8 +770,8 @@ impl Bank {
     /// its drain begins. On a live source a track whose next AU is not yet
     /// due is skipped the same way, so a track stamped ahead of the others
     /// waits on the schedule without holding them. The caps measure from
-    /// the laggard; lag and decay from the lead track (see
-    /// [`TrackSpan`]).
+    /// the earliest unreleased point still queued, lag and decay from the
+    /// lead track (see [`TrackSpan`]).
     pub fn pop_due_gated(
         &mut self,
         wall: MediaTime,
@@ -889,14 +884,13 @@ impl Bank {
 
     /// The engine's presentation signal, ending a priming join: the first
     /// frame is reaching the viewer at `wall`, so fix the 1x schedule
-    /// presentation-relative. The phase sits at the whole released span,
-    /// so the schedule resumes 1x from wherever release actually reached
-    /// and never pauses: released-ahead media is in-flight depth held by
-    /// the decode channel, the frame pool and the audio ring, and the
-    /// remaining `arrived − released` is the bank's own lag. Any anchor
-    /// later than this would pause the schedule, and since one anchor
-    /// governs both tracks the pause would starve the audio ring as well as
-    /// the frame pool. No-op outside a priming join.
+    /// presentation-relative, phased at the point the lead track's release
+    /// has reached, so the schedule resumes 1x without pausing.
+    /// Released-ahead media is in-flight depth held downstream; what the
+    /// lead track still has banked is the lag. A later anchor would pause
+    /// the schedule, and since one anchor governs every track it would
+    /// starve the audio ring as well as the frame pool. No-op outside a
+    /// priming join.
     ///
     /// The Auto estimator is unaffected: it observes `behind + lag`, and
     /// moving the anchor earlier grows `behind` by exactly what it takes
@@ -906,8 +900,6 @@ impl Bank {
             return;
         };
         self.hold = Hold::Released;
-        // On a live source the lead track's release carries on at 1x; a
-        // track stamped ahead of it releases later on the same schedule.
         // The lead may be stamped before the origin (the first AU pushed),
         // so its position can be negative.
         let sched_now = match (self.lead_span(), self.base_dts) {

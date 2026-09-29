@@ -725,7 +725,7 @@ fn a_zero_length_read_keeps_the_chunk_it_is_holding() {
     // loopback and the first read leaves a remainder inside it. A larger
     // body would depend on where the transport split it. The server never
     // writes again, so a source that dropped the chunk waits out the
-    // request timeout rather than quietly refetching.
+    // request timeout rather than refetching unnoticed.
     const SERVED: usize = 32;
     let (base, _requested) = start_stalling_server(4 * 1024 * 1024, Some(SERVED));
     let mut source = open(&format!("{base}/media")).expect("open");

@@ -3,17 +3,17 @@
 //! costs a couple of range requests, never a full download); sample payloads
 //! are then range-read on demand as the engine pulls.
 //!
-//! A fragmented file that carries a segment index is opened from the index
-//! alone: `ftyp`, `moov` and the index are all that is read before the
-//! first picture, and a movie fragment is parsed when playback or a seek
-//! reaches it. What the demuxer holds is then a fragment's worth of sample
-//! references whatever the file's length, and a twelve-hour video costs the
-//! same to open as a three-minute one.
+//! A fragmented file with an index (a `sidx`, or the `mfra` at its end) is
+//! opened from the index alone: `ftyp`, `moov` and the index are all that
+//! is read before the first picture, and a movie fragment is parsed when
+//! playback or a seek reaches it. What the demuxer holds is then a
+//! fragment's worth of sample references whatever the file's length, and a
+//! twelve-hour video costs the same to open as a three-minute one.
 //!
 //! One video track and one audio track (the one asked for, else the first)
 //! are interleaved in decode order. Remaining tracks are reported via
-//! [`Mp4Demuxer::take_notes`] so the engine can surface them as diagnostics
-//! rather than dropping them silently.
+//! [`Mp4Demuxer::take_notes`], and tracks nothing here can play via
+//! [`Mp4Demuxer::take_refusals`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
@@ -1270,12 +1270,6 @@ fn stated_duration(mp4: &re_mp4::Mp4, fragments: Option<&Fragments>) -> Option<M
         })
 }
 
-/// A duration the container states, in microseconds, or `None` where it
-/// states that it does not know one. All ones is the stated marker for
-/// an unknown duration (8.2.2.3) in either width, and a span no file has
-/// is the same claim made carelessly. Reporting no duration is honest:
-/// a fabricated one reaches the seek bar, and a saturated zero reads as
-/// live to every `duration <= 0` test.
 /// A sample entry's four-character code, as a viewer would quote it.
 fn sample_entry(contents: &re_mp4::StsdBoxContent) -> String {
     let code = match contents {
@@ -1337,6 +1331,12 @@ fn edit_start(trak: &re_mp4::TrakBox, movie_timescale: u64, timescale: u64) -> E
     start
 }
 
+/// A duration the container states, in microseconds, or `None` where it
+/// states that it does not know one. All ones is the stated marker for
+/// an unknown duration (8.2.2.3) in either width, and a span no file has
+/// is the same claim made carelessly. Reporting no duration is honest:
+/// a fabricated one reaches the seek bar, and a saturated zero reads as
+/// live to every `duration <= 0` test.
 fn stated_span(value: u64, timescale: u64) -> Option<MediaTime> {
     if timescale == 0 || value == u64::from(u32::MAX) || value == u64::MAX {
         return None;

@@ -31,8 +31,7 @@ struct Delivery {
 /// multi-second episodes, separated by quiet phases of uniform cadence.
 /// Within an episode callbacks alternate ~14/28 ms (double-buffer bursts)
 /// and every 15th slot is missed outright (a ~42 ms gap, ~320 ms period),
-/// with the next pull catching up. The episode boundaries are where the
-/// raw ladder moves the clock.
+/// with the next pull catching up.
 fn quest_delivery_schedule(duration_us: i64) -> Vec<Delivery> {
     const SLOT_US: i64 = 21_333;
     const JITTER_US: i64 = 7_000;
@@ -86,8 +85,8 @@ fn measured_playhead(deliveries: &[Delivery], rate: i64, wall_us: i64) -> Option
 
 /// Run a schedule, observing every 4 ms (the audio thread's cadence).
 /// Returns the clock's post-settle wander (how far `now(wall) - wall` moved
-/// over the measured window, which is how far the jitter dragged frame
-/// due-times), the snap count and the number of slews started.
+/// over the measured window), the snap count and the number of slews
+/// started.
 fn run_pattern(
     c: &mut MediaClock,
     deliveries: &[Delivery],
@@ -125,11 +124,9 @@ fn run_pattern(
     (hi - lo, snaps, slews)
 }
 
-/// Smoothed ladder on the Quest trace: once converged onto the playhead's
-/// standing offset, episode onsets and callback jitter move the clock (and
-/// every frame's due time with it) by only a couple of ms across the whole
-/// run. That is under half a 72 Hz vsync (6.9 ms), so presentation holds
-/// its cadence through the episodes.
+/// Smoothed ladder on the Quest trace: once settled, the jitter moves the
+/// clock (and every frame's due time) by under 3 ms, less than half a
+/// 72 Hz vsync (6.9 ms), so presentation holds its cadence.
 #[test]
 fn smoothing_holds_due_times_through_quest_callback_jitter() {
     let mut c = clock(true);
@@ -188,8 +185,8 @@ fn smoothing_holds_the_clock_through_the_windows_pull_jitter() {
     assert!(wander < 3_000, "clock wandered {wander} µs against 1x");
 }
 
-/// Without smoothing the same trace keeps starting slews, the 2% hunting
-/// seen in the Editor. Pinned so the comparison stays visible.
+/// Without smoothing the same trace keeps starting slews. Pinned so the
+/// comparison stays visible.
 #[test]
 fn without_smoothing_the_windows_pull_jitter_hunts() {
     let mut c = clock(false);
@@ -215,11 +212,9 @@ fn without_the_release_band_the_clock_parks_at_the_edge() {
     assert!(slews > 0, "expected slews at the band edge, saw none");
 }
 
-/// The start the Editor traced: the clock runs ~100 ms before the first
-/// pull, so the master's first reading is 100 ms behind it and the fast
-/// window closes the gap. The catch-up must stop at the target, not be
-/// carried past it by the average, and must not be slower than on the raw
-/// ladder.
+/// A start with the master's first reading 100 ms behind the clock: the
+/// fast window closes the gap within 500 ms, and the average must not carry
+/// the catch-up past its target.
 #[test]
 fn a_start_up_catch_up_is_not_carried_past_its_target() {
     let mut c = clock(true);
@@ -248,8 +243,8 @@ fn a_start_up_catch_up_is_not_carried_past_its_target() {
     );
 }
 
-/// A genuine standing offset still converges through the smoothing: slew
-/// engages, closes to the dead band, and stays quiet.
+/// A genuine standing offset still converges through the smoothing and
+/// then stays inside the dead band.
 #[test]
 fn smoothing_converges_on_genuine_offset() {
     let mut c = clock(true);

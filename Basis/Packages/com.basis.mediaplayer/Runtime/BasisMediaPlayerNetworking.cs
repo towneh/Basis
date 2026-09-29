@@ -1089,11 +1089,10 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
                 // Resolved CDN URLs are per-client and expiring, so a page URL
                 // (YouTube/Twitch/…) goes through the router and this client resolves
-                // it itself. Both that and
-                // the engine's own open are asynchronous, and the session starts playing
-                // as soon as it is up, so the owner's position/pause snapshot is stashed
-                // and applied once playback is actually running (aged by the elapsed
-                // time), after which the heartbeat refines it.
+                // it itself. Both that and the engine's own open are asynchronous, and
+                // the session starts playing as soon as it is up, so the owner's
+                // position/pause snapshot is stashed and applied once the session leaves
+                // Opening (aged by the elapsed time), after which the heartbeat refines it.
                 pendingRemoteState = state;
                 pendingRemotePositionTicks = positionTicks;
                 pendingRemoteStashedAt = Time.realtimeSinceStartup;
@@ -1147,9 +1146,9 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
         BmState state = mediaPlayer.State;
         bool loadStarted = mediaPlayer.LoadGeneration != pendingRemoteLoadGeneration;
-        // Buffering is the window before the first frame is shown and the clock starts, so a
-        // seek and pause sent then take effect before anything at 0 is seen or heard; the
-        // engine holds the pause across the seek.
+        // Buffering is not settling: it is the window before the first frame is shown and the
+        // clock starts, so a seek and pause sent then take effect before anything at 0 is
+        // seen or heard. The engine holds the pause across the seek.
         bool settling = state == BmState.Idle || state == BmState.Opening;
         // A resolve that fails reports Error without ever opening, and that releases the
         // stash too.
@@ -1266,9 +1265,9 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
     /// <summary>Start playing, whichever state the session is in: resume a paused
     /// one, and re-open the synced URL when there is no session left to resume.</summary>
-    // approved: the open is the owner's choice arriving over the network, which nobody
-    // here is asked about. The local user's own Play on an idle player is asked, unless
-    // the URL was already approved on this player.
+    /// <param name="approved">The open is the owner's choice arriving over the network,
+    /// which nobody here is asked about. The local user's own Play on an idle player is
+    /// asked, unless the URL was already approved on this player.</param>
     private void StartOrResumeLocal(bool approved)
     {
         switch (mediaPlayer.State)
@@ -1394,8 +1393,9 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
     {
         // currentSyncedUrl is the URL we share. When SetUrl drove this load it's the
         // input/page URL peers must resolve themselves, so keep it: the resolved CDN URL
-        // is per-client and expiring and works for no one else. When the load bypassed SetUrl (a world script opening the player
-        // directly), adopt what it opened so we don't keep broadcasting a stale URL.
+        // is per-client and expiring and works for no one else. When the load bypassed
+        // SetUrl (a world script opening the player directly), adopt what it opened so we
+        // don't keep broadcasting a stale URL.
         if (!syncedUrlFromSetUrl)
         {
             currentSyncedUrl = ResolveShareableUrl();

@@ -1,5 +1,5 @@
-//! Table-driven receive rows over injectable schedules — no sleeps, no
-//! sockets; `now` is handed in per call.
+//! Table-driven receive rows over injectable schedules: no sleeps, no
+//! sockets, and `now` handed in per call.
 
 use std::num::NonZeroU32;
 

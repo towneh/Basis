@@ -16,7 +16,8 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    # Public-domain dedication, within the permissive bar. Pulled in by rav1d's to_method.
+    # Public-domain dedication, within the permissive bar. Pulled in by
+    # rav1d's to_method.
     "CC0-1.0",
     # Data-only permissive licence (no copyleft on code): webpki-roots'
     # CCADB trust-anchor bundle, the Android https root store.
@@ -27,7 +28,7 @@ allow = [
 yanked = "deny"
 ignore = [
     # audiopus_sys wraps a vendored libopus for the `opus` crate. The
-    # unmaintained part is the wrapper's build script; libopus itself is
+    # wrapper is unmaintained but only builds and links libopus, which is
     # current and watched. Revisit if the opus crate gains a maintained
     # -sys or the pure-Rust decoder matures.
     "RUSTSEC-2026-0150",

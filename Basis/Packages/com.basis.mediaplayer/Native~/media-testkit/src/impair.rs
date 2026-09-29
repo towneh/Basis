@@ -1,12 +1,13 @@
 //! The deterministic impairment source: seeded delay/gap schedules
 //! wrapped around any [`ByteSource`]. A wrapped source stalls its reads
-//! inside each gap window and
-//! delivers normally between them; composition with [`PacedSource`] turns
-//! a local file into a 1x live edge with a recorded impairment on top.
+//! inside each gap window and delivers normally between them; composition
+//! with [`PacedSource`] turns a local file into a 1x live edge with a
+//! recorded impairment on top.
 //!
 //! Time comes through [`WallClock`] so unit tests replay schedules
-//! virtually; the real engine wires [`RealClock`] and the stalls happen on
-//! the demux thread exactly where a slow network would put them.
+//! virtually; `bm-probe impair` wires [`RealClock`] into a real session, so
+//! the stalls happen on the demux thread where a slow network would put
+//! them.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

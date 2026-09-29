@@ -93,9 +93,9 @@ impl WhepDemuxer {
         let endpoint = signalling_url(url).map_err(whep_err)?;
         let limits = IoLimits::default();
 
-        // The advertised candidate uses the interface that routes to the
-        // signalling host, since the media peer is normally the same box
-        // or at least the same route.
+        // The signalling host's address also picks the interface the host
+        // candidate advertises, since the media peer is normally on the
+        // same route (see `bind_media_socket`).
         //
         // A missing host is refused rather than defaulted to "": the
         // scheme screen should make it unreachable, and resolving "" would

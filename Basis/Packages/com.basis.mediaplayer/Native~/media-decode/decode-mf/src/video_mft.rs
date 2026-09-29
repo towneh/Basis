@@ -257,9 +257,7 @@ impl VideoMft {
             if let Ok(buf2d) = buffer.cast::<IMF2DBuffer>() {
                 let mut scanline0 = std::ptr::null_mut();
                 let mut pitch = 0i32;
-                // Lock2DSize also reports the mapping's start and length,
-                // which bound the copy below. Lock2D is the fallback for a
-                // buffer without `IMF2DBuffer2` and leaves only the stride.
+                // Lock2D is the fallback for a buffer without `IMF2DBuffer2`.
                 let sized = buf2d.cast::<IMF2DBuffer2>().ok();
                 let mut start = std::ptr::null_mut();
                 let mut len = 0u32;

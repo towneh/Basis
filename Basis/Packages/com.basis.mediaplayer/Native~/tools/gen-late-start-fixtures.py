@@ -5,8 +5,8 @@
     fixtures/h264-aac-late-audio.mp4   sound 0.5 s after the picture, primed
     fixtures/aac-late-start.m4a        the same sound alone, 0.5 s in
 
-Both are three seconds of H.264 (320x180, 24 fps, two B-frames) and
-stereo AAC. A late track opens its edit list with an empty edit
+The first two are three seconds of H.264 (320x180, 24 fps, two B-frames)
+and stereo AAC. A late track opens its edit list with an empty edit
 (`media_time` -1) as long as the gap; a reader that ignores it plays the
 track early by the gap.
 

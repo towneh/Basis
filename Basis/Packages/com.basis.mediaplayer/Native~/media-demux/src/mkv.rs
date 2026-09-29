@@ -1,8 +1,8 @@
 //! Matroska/WebM demuxer: `matroska-demuxer` walks the EBML;
 //! this wrapper maps tracks onto the codec table, converts stored
-//! H.264 to Annex B, and serves the pull model. Codecs without a decode
-//! adapter still announce: refusal is the decode layer's typed call, not a
-//! demux failure.
+//! H.264 to Annex B, and serves the pull model. A codec the table maps is
+//! announced even without a decode adapter, and the decode layer refuses
+//! it; a codec the table cannot map is refused here, with its reason.
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -35,9 +35,8 @@ struct SourceIo {
     eof_reads: u32,
     /// Two-block read cache: the EBML walk issues thousands of tiny reads
     /// and revisits regions across SeekHead/Cues jumps; over a ranged HTTP
-    /// source every position jump otherwise reopens the connection, a TLS
-    /// round trip each (measured at ~5 s of open time on a remote WebM).
-    /// Two blocks cover the walk-here-jump-there pattern.
+    /// source a jump backwards or far ahead costs a fresh request and a TLS
+    /// round trip. Two blocks cover the walk-here-jump-there pattern.
     cache: [(u64, Vec<u8>); 2],
 }
 

@@ -158,8 +158,8 @@ mod tests {
         let p = Playable::default();
         p.announced(TrackKind::Video);
         assert_eq!(p.refused(TrackKind::Video, "no video"), None);
-        assert_eq!(p.settled(Leg::Video), None);
         // The audio leg has not settled, so its audio may yet come.
+        assert_eq!(p.settled(Leg::Video), None);
         assert_eq!(p.settled(Leg::Audio).as_deref(), Some("no video"));
     }
 

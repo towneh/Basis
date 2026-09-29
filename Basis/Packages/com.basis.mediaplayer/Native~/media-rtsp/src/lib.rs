@@ -46,8 +46,8 @@ pub use udp::UdpPeerAllowed;
 /// Public with the shared emit path below: the WHEP lane runs the same
 /// session-task → demux-thread shape.
 pub const CHANNEL_DEPTH: usize = 512;
-/// How long the aligner waits for sender reports before falling back to
-/// join-skew alignment.
+/// How long the aligner waits for sender reports before aligning without
+/// them, from the PLAY `rtptime` or the first frames.
 pub const ALIGN_WAIT: Duration = Duration::from_secs(2);
 /// How long the aligner still waits for sender reports once every
 /// stream's first frame is in and the PLAY response's `rtptime` starts
@@ -152,9 +152,9 @@ impl RtspDemuxer {
     /// waits. `rtsp://` negotiates UDP first and falls back to
     /// TCP-interleaved; `rtspt://` pins TCP-interleaved. `servers` are the
     /// addresses to dial, tried in order, resolved from the URL's host and
-    /// vetted by the caller; the host is never looked up again. `udp_peer_allowed` vets
-    /// the UDP peer address from the SETUP response before any packet is
-    /// sent to it.
+    /// vetted by the caller; the host is never looked up again.
+    /// `udp_peer_allowed` vets the UDP peer address from the SETUP response
+    /// before any packet is sent to it.
     pub fn open(
         url: &str,
         servers: Vec<SocketAddr>,
@@ -564,8 +564,8 @@ async fn run_session(
     let mut align = [StreamAlign::default(); MAX_STREAMS];
     let mut buffered: VecDeque<PendingFrame> = VecDeque::new();
     let mut aligning = true;
-    // Cleared once alignment comes from sender reports. Until then a
-    // report arriving after the start realigns video once all are in.
+    // Cleared once every stream has a sender report. If that happens after
+    // the start has flushed, video is realigned to them once.
     let mut late_reports = true;
     let align_deadline = tokio::time::Instant::now() + ALIGN_WAIT;
     let mut flush_at = align_deadline;
@@ -688,8 +688,9 @@ pub async fn send_event(
         .map_err(|_| "engine hung up".into())
 }
 
-/// Compute per-stream offsets from the collected sender reports and flush
-/// the buffered frames in arrival order.
+/// Compute per-stream offsets from the collected sender reports, or from
+/// the first frames when the streams' start times disagree, and flush the
+/// buffered frames in arrival order.
 pub async fn flush_aligned(
     buffered: &mut VecDeque<PendingFrame>,
     align: &mut [StreamAlign; MAX_STREAMS],
@@ -703,8 +704,7 @@ pub async fn flush_aligned(
         .collect();
     if ntp_zeroes.len() == needed.len() && !ntp_zeroes.is_empty() {
         // Common origin: the earliest stream start carries offset 0,
-        // later streams positive offsets. Without full reports, offsets
-        // stay zero — join-skew alignment.
+        // later streams positive offsets.
         let min_ntp = ntp_zeroes
             .iter()
             .map(|&(_, ntp)| ntp)

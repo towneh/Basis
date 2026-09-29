@@ -43,8 +43,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open a file or URL and report its container, codecs and the time to
-    /// the first frame.
+    /// Open a file or URL and report its container and codecs, and with
+    /// `--decode` the time to the first frame.
     Probe {
         /// A local file or an http(s) URL, in any container the engine reads.
         url: String,

@@ -6,7 +6,7 @@ Low-rate encodes (a still picture over music, a slideshow) space their
 keyframes by frame count, so a few hundred frames can span tens of seconds.
 A seek into such a file lands on a keyframe far behind its target, yet
 decoding forward to the target is cheap because there are few frames in the
-way. This file puts the only keyframe at 0 s, 80 frames before the end.
+way. This file has 80 frames and puts the only keyframe at 0 s.
 
 Needs ffmpeg + ffprobe on PATH. Run from Native~ (the fixture path is
 relative to it):

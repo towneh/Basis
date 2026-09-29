@@ -179,9 +179,9 @@ fn a_refused_fragment_does_not_survive_into_the_next_access_unit() {
 
     // The very next packet carries the marker bit and the fragment's own
     // timestamp, which is what an unreset state machine appends to and
-    // emits. It must not carry the rejected prefix,
-    // and because a prefix was dropped the unit completing at this marker is
-    // not trustworthy either.
+    // emits. It must not carry the rejected prefix, and because a prefix
+    // was dropped the unit completing at this marker is not trustworthy
+    // either.
     seq += 1;
     let after = feed(&mut d, packet(seq, 1024, true, 0, b"tail"));
     for au in &after {

@@ -38,7 +38,7 @@ use media_demux::{ByteSource, DemuxError, DemuxLimits, DemuxOptions, SourceError
 use media_diag::{EventCode, SessionDiag, Stage, diag_log, diag_warn};
 use media_io::{AllowAllGate, FileSource, HttpSource, IoError, IoLimits, PublicAddressGate};
 
-/// Decode-channel depths. The audio side stays shallow: its decoders and
+// Decode-channel depths. The audio side stays shallow: its decoders and
 // the ring drain fast, so depth is only latency. The video side must take
 // the whole startup burst without the release thread blocking on it. A
 // video decoder with a shallow input queue (the MF AV1 extension accepts
@@ -692,8 +692,9 @@ impl Drop for Session {
 /// Seek, from a session handle or the sync ladder. A paused or ended
 /// session resumes into buffering at the new position; the demux thread
 /// parks the clock and the video thread restarts it at the first
-/// post-seek frame. A paused session resumes only to land the seek, and
-/// pauses again once the new position is showing. A failed or closing
+/// post-seek frame (the audio thread, on a source with no video). A paused
+/// session resumes only to land the seek, and pauses again once the new
+/// position is showing. A failed or closing
 /// session has no demux thread left to take the seek, and stays as it is.
 pub(crate) fn seek_px(px: &PipelineShared, to: MediaTime) {
     let _transport = px.transport.lock().expect("transport lock");

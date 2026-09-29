@@ -238,14 +238,11 @@ fn slew_wall_clamps_to_the_cap_and_ignores_audio_master() {
     assert_eq!(audio.rate_ppm(), 0, "audio master ignores slew_wall");
 }
 
-/// Convergence from an error the size of a bad live join (690 ms). At the 2%
-/// cap alone that needs ~34.5 s to close.
-///
-/// The bound is 5 s rather than 1: the fast window is 1.2 s at 50% of wall
-/// rate, so it absorbs ~600 ms and leaves ~90 ms to clear at the steady cap.
-/// A join error this large is for the presentation origin to avoid, not for
-/// the fast window to swallow. The companion row covers the error size a
-/// well-placed origin leaves.
+/// Convergence from an error the size of a bad live join (690 ms), which the
+/// 2% cap alone needs ~34.5 s to close. The bound is 5 s: the fast window
+/// (1.2 s at 50% of wall rate) absorbs ~600 ms and the steady cap clears the
+/// last ~90 ms. The companion row covers the error a well-placed
+/// presentation origin leaves.
 #[test]
 fn a_join_sized_error_converges_far_faster_than_the_cap_alone() {
     let at = converge_from(MediaTime::from_millis(690));
@@ -297,12 +294,10 @@ fn converge_from(offset: MediaTime) -> MediaTime {
 /// decrease while the rate is still non-zero: a fixed-rate law never has one.
 #[test]
 fn the_rate_falls_as_the_error_closes() {
-    // The ceiling itself steps down when the fast window expires, and a
-    // fixed-rate law pinned to the ceiling also shows a fall there. Only
-    // decreases observed under one ceiling discriminate the two, so the
-    // error starts inside the proportional region (below
-    // `fast_slew_cap_ppm * slew_tau`) and the walk stays inside the fast
-    // window.
+    // A fixed-rate law also falls when the fast window expires and the
+    // ceiling steps down, so the error starts inside the proportional region
+    // (below `fast_slew_cap_ppm * slew_tau`) and the walk stays inside the
+    // fast window.
     let cfg = ClockConfig::default();
     let mut c = clock_at_zero();
     let mut wall = MediaTime::ZERO;

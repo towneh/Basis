@@ -117,7 +117,6 @@ impl SwAv1Decoder {
                 pic.stride[0], pic.stride[1]
             )));
         };
-        // Sizes the destination the unsafe block below writes through.
         let mut data = vec![0u8; packed_nv12_len("AV1 picture", width, height)?];
         // SAFETY: the picture's planes are valid for its stated geometry
         // until dav1d_picture_unref; the strides are checked forwards and

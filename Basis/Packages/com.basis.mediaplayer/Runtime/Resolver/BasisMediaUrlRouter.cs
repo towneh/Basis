@@ -137,9 +137,9 @@ public static class BasisMediaUrlRouter
     }
 
     // Containers the engine demuxes from a plain byte stream. No .mpd: there is no
-    // DASH demuxer, so a raw manifest goes through a resolver. No .wav: no LPCM
-    // adapter. .opus but not .ogg: .opus is Opus by convention, while .ogg is a
-    // generic container that may carry codecs the engine does not decode.
+    // DASH demuxer, so a raw manifest goes through a resolver. .opus but not .ogg:
+    // .opus is Opus by convention, while .ogg is a generic container that may carry
+    // codecs the engine does not decode.
     private static readonly string[] DirectExtensions =
     {
         ".mp4", ".m4v", ".m4a", ".m4s",

@@ -8,12 +8,11 @@
 //! hands back after [`PRESENT_LIVENESS`] without one.
 //!
 //! The render thread reads session time from a lock-free clock mirror: a
-//! single `clock_now − wall` offset atomic, written under the clock lock
-//! at every `set_playing` site, refreshed each decode-thread tick and
+//! single `clock_now − wall` offset atomic, written beside every
+//! `set_playing` call, refreshed each 4 ms decode-thread tick and
 //! `i64::MIN` while the clock is parked. One atomic cannot tear, and
-//! staleness costs at most the slew cap over one refresh interval
-//! (~0.2 ms). The pool take is a try-lock, so contention with a
-//! decode-side publish costs a re-present, never a wait.
+//! staleness costs at most the slew cap over one tick (under 0.1 ms at the
+//! normal 2% cap).
 
 use std::sync::atomic::{AtomicI64, Ordering};
 

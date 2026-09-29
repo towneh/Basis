@@ -1,14 +1,12 @@
 //! The sample data of the movie fragments whose samples are queued.
 //!
-//! A fragment keeps each track's samples in one run, and the demuxer
-//! serves them in decode order, which alternates between the runs. Read a
-//! sample at a time from a ranged source, that is a request per cache
-//! block of the longest run, none of which can grow. Held here instead,
-//! each run is read in file order: the shorter runs when the fragment is
-//! queued, the longest as its samples are served, on the one request, so
-//! the first sample waits for its own bytes rather than the fragment's.
-//! Most fragments are small enough to wait for whole, and those are one
-//! run, read in one request when queued. A run goes once every sample
+//! A fragment keeps each track's samples in one run, and decode order
+//! alternates between the runs, so reading a sample at a time from a ranged
+//! source costs a request per cache block. Held here, each run is read in
+//! file order instead: the shorter runs when the fragment is queued, the
+//! longest on one request as its samples are served, so the first sample
+//! waits for its own bytes rather than the fragment's. A small fragment is
+//! one run, read whole when queued. A run is let go once every sample
 //! queued in it has been served.
 
 use std::collections::VecDeque;

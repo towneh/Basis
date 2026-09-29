@@ -313,10 +313,7 @@ unsafe fn create_instance(
             // The core query needs 1.1 and the KHR one needs its instance
             // extension. A loader will return a pointer for a name the
             // instance never supported, and calling it is undefined, so
-            // only names whose precondition holds are recorded. Both are
-            // kept because the application's requested version says
-            // nothing about what a given physical device's driver
-            // implements. With neither, the features go unprobed.
+            // only names whose precondition holds are recorded.
             let core = (api >= vk::API_VERSION_1_1).then_some(c"vkGetPhysicalDeviceFeatures2");
             let khr = (0..ci.enabled_extension_count as usize)
                 .any(|i| {
@@ -371,9 +368,8 @@ unsafe fn ycbcr_probe(
     }
     // Ordered by what this physical device implements rather than the
     // instance version, since a 1.1 instance can be handed a device from a
-    // 1.0 driver. `vkGetPhysicalDeviceProperties` is core 1.0, so it can
-    // always be asked. A 1.0 device still gets the core name tried after
-    // the KHR one.
+    // 1.0 driver. A 1.0 device still gets the core name tried after the
+    // KHR one.
     // SAFETY: the loader's own resolver, called with its own handles.
     let device_is_1_1 = unsafe {
         real_gipa(instance, c"vkGetPhysicalDeviceProperties".as_ptr()).is_some_and(|f| {
@@ -547,12 +543,9 @@ unsafe fn create_device(
         // Only where the driver advertises it: asking for a feature the
         // device lacks fails the app's own device creation.
         //
-        // The in-place arm writes into Unity's own structures. Where the
-        // caller has a features struct it is the only place the bit can
-        // go, and this hook cannot generically copy a chain of arbitrary
-        // types. The write is idempotent and only turns the feature on,
-        // so a chain Unity reuses for a later create carries the same
-        // request.
+        // The in-place arm writes into Unity's own structures, since this
+        // hook cannot copy a chain of arbitrary types. The write is
+        // idempotent and only turns the feature on.
         let mut our_ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default();
         let mut local_ci = *ci;
         let probe = ycbcr_probe(real_gipa, instance, features2, physical_device);

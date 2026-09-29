@@ -125,14 +125,10 @@ fn resolve(base: &str, rel: &str) -> Result<String, DemuxError> {
             // syntax of the platform it was compiled for: a Unix build
             // reads `C:\dir\clip.ts` as one ordinary filename and would
             // accept a playlist written to attack a Windows client, so the
-            // same rule applies on every host.
-            // This is defence in depth. A drive-shaped string parses as a
-            // URL whose scheme is the drive letter, so `c:\dir\clip.ts` and
-            // `C:/Windows/win.ini` are refused by the unfetchable-scheme
-            // arm above. Only strings `Url::parse` rejects outright reach
-            // this line, and none of those is drive-shaped (checked, not
-            // assumed). If that arm is reworked, this check becomes the one
-            // that matters.
+            // same rule applies on every host. A drive-shaped string
+            // already parses as a URL with a one-letter scheme and is
+            // refused above, so the drive check is defence in depth for
+            // that arm.
             if rel.contains('\\') || has_drive_prefix(rel) {
                 return Err(DemuxError::Parse(format!(
                     "playlist URI outside the playlist's directory: {rel:?}"

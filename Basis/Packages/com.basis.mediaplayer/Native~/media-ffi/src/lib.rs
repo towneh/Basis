@@ -33,10 +33,10 @@ mod host_log;
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-// `stable_texture` compiles under test on every host, so the import it
-// needs cannot be Android-only.
 #[cfg(windows)]
 use std::sync::atomic::AtomicI64;
+// `stable_texture` compiles under test on every host, so the import it
+// needs cannot be Android-only.
 #[cfg(any(target_os = "android", test))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -100,8 +100,7 @@ pub struct BmSnapshot {
     /// Events the session's log refused because its cap was already full,
     /// cumulative. Non-zero means the drained sequence has holes and must
     /// not be treated as complete. Saturates rather than wrapping, since
-    /// the engine counts in `u64`. A plugin built before this field existed
-    /// writes 0 here, which reads as "nothing lost".
+    /// the engine counts in `u64`.
     pub events_dropped: u32,
 }
 
@@ -234,9 +233,9 @@ struct Descriptor {
     url: String,
     /// A separate audio-only source played against `url`, which is then
     /// treated as video-only. Adaptive ladders serve everything above
-    /// their muxed fallback rung this way. Both legs are cuts of the same content,
-    /// so their timelines already agree. On-demand HTTP(S) and local
-    /// files only. Absent = one source carrying everything.
+    /// their muxed fallback rung this way. Both legs are cuts of the same
+    /// content, so their timelines already agree. On-demand HTTP(S) and
+    /// local files only. Absent = one source carrying everything.
     #[serde(default)]
     audio_url: Option<String>,
     #[serde(default)]
@@ -381,11 +380,10 @@ impl Consumer {
 
 /// How many times one shared handle's consumer open is attempted before
 /// the slot gives up on it. A failure here is typically the handle
-/// racing a presenter rebuild, which the next attempt sees through.
-/// Giving up on the first failure would leave a session that never
-/// presents again, since a new handle is only published when the
-/// presenter is rebuilt. The bound stops a dead handle calling `open`
-/// once per render event for the rest of the session.
+/// racing a presenter rebuild, which the next attempt sees through, and a
+/// new handle is only published when the presenter is rebuilt. The bound
+/// stops a dead handle calling `open` once per render event for the rest
+/// of the session.
 #[cfg(windows)]
 const MAX_CONSUMER_OPENS: u32 = 8;
 

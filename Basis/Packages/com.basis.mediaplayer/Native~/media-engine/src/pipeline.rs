@@ -323,13 +323,10 @@ pub(crate) const NO_GENERATION: u64 = u64::MAX;
 /// gate. The clock's start cannot answer that: when audio starts the clock,
 /// the video thread never reaches its clock-start branch.
 ///
-/// The written value is the answer, which makes this race-free. Checking a
-/// frame's generation and then setting a separate flag is check-then-act: a
-/// render event in flight can pass the check, a seek can advance the
-/// generation, and the stale write then lands as though the new timeline
-/// had presented. Recording *which* timeline presented makes a stale write
-/// self-identifying, since [`presented_this_generation`] does not match it.
-/// Nothing needs clearing at a flush either.
+/// Recording *which* timeline presented, not a flag, keeps this race-free:
+/// a render event that raced a seek writes a retired generation, which
+/// [`presented_this_generation`] does not match, and nothing needs clearing
+/// at a flush.
 pub(crate) fn note_presented(px: &PipelineShared, generation: u64) {
     px.presented_generation.store(generation, Ordering::Relaxed);
 }
@@ -348,14 +345,12 @@ fn buffering_ends(presented: u64, current: u64, pause_wanted: bool) -> bool {
 }
 
 /// Whether the audio pull may serve the ring: in Playing, or in Buffering
-/// once the clock runs, since a start anchors the clock an output latency
-/// before the first picture and that picture is not due until the clock
-/// covers the latency, so sound pulled from the start is heard as it
-/// shows. Never while the clock is parked, and in either state only for
-/// the timeline in force: not with a seek queued (the clock still runs on
-/// the timeline being left, and a present in flight can publish Playing
-/// on it), not before the ring is this timeline's, and not with a pause
-/// waiting on the landing. Split out as above.
+/// once the clock runs (a start anchors the clock an output latency before
+/// the first picture, so sound pulled from then is heard as it shows).
+/// Never while the clock is parked, and only for the timeline in force: not
+/// with a seek queued (the clock still runs on the timeline being left),
+/// not before the ring is this timeline's, and not with a pause waiting on
+/// the landing. Split out as above.
 pub(crate) fn audio_serves(
     state: u32,
     clock_playing: bool,
@@ -484,19 +479,16 @@ pub struct PipelineShared {
     /// holds sound.
     ///
     /// It carries the generation, not a bare flag, because the two decode
-    /// threads observe a seek independently. A flag set before the seek would
-    /// still be true while the video thread races into the new generation,
-    /// and clearing it at the advance only moves the race, since the audio
-    /// thread can publish for the generation it is leaving a moment later. A
-    /// stale generation simply fails to match. `u64::MAX` = nothing
-    /// published.
+    /// threads observe a seek independently and the audio thread can publish
+    /// for the generation it is leaving after the advance. A stale generation
+    /// simply fails to match. `u64::MAX` = nothing published.
     pub audio_tail_out: std::sync::atomic::AtomicU64,
     /// Lock-free mirror of whether the clock is playing, for the audio pull
     /// path: the ring serves silence while the clock is parked (startup,
     /// seeks), so post-seek audio never plays against a parked clock.
-    /// Written under the clock lock at every `set_playing` site. The `State`
-    /// gate alone is not enough, since a present in flight can race a seek
-    /// back to Playing.
+    /// Written beside every `set_playing` call. The `State` gate alone is
+    /// not enough, since a present in flight can race a seek back to
+    /// Playing.
     pub clock_playing: std::sync::atomic::AtomicBool,
     /// The generation whose ring the audio consumer slot holds, or
     /// [`NO_GENERATION`]. Stored after each install, so a pull that reads
@@ -776,11 +768,10 @@ pub struct SplitLegs {
     /// offers its first dts. Container timelines start anywhere (an
     /// arbitrary 33-bit clock on MPEG-TS, a `baseMediaDecodeTime` on fMP4,
     /// the first cluster timestamp on Matroska), and the two legs need not
-    /// agree on where zero is or where a landed seek sits. The cap therefore
-    /// meters how far each leg has come from its own baseline, not absolute
-    /// dts, which would read an origin disagreement as one leg being a
-    /// whole timeline ahead. A seek moves both baselines: each leg clears
-    /// its own as its demuxer moves.
+    /// agree on where zero is or where a landed seek sits, so the cap meters
+    /// how far each leg has come from its own baseline, not absolute dts. A
+    /// seek moves both baselines: each leg clears its own as its demuxer
+    /// moves.
     origin_us: [std::sync::atomic::AtomicI64; 2],
 }
 
@@ -789,12 +780,12 @@ const UNSET: i64 = i64::MIN;
 
 /// How far ahead of the other leg a leg may bank before it waits.
 ///
-/// Deliberately tight. The Bank releases its queue in arrival order on a
-/// dts-derived schedule, so an event that arrives early but is due late
-/// sits at the head and holds up everything behind it, including the
-/// other leg's frames that are due now. Keeping the legs within a fraction
-/// of a second keeps arrival order close to timeline order and bounds that
-/// wait well inside the decoder's cushion. It must also stay well under
+/// Deliberately tight. On an on-demand source the Bank releases its queue
+/// in arrival order on a dts-derived schedule, so an event that arrives
+/// early but is due late sits at the head and holds up everything behind
+/// it, including the other leg's frames that are due now. Keeping the legs
+/// within a fraction of a second keeps arrival order close to timeline
+/// order and bounds that wait well inside the decoder's cushion. It must also stay well under
 /// the Bank's read-ahead depth, or one leg fills the Bank before the cap
 /// applies and the other cannot get in.
 const SPLIT_LEAD_CAP_US: i64 = 100_000;
@@ -1736,16 +1727,12 @@ pub fn run_demux_leg(
                 split.note_origin(leg, dts_us);
                 // Two separately muxed sources need not agree on where their
                 // timelines start, and the Bank measures what it holds as one
-                // span from the first event either leg pushed to the newest,
-                // so a gap between the origins counts as held media. Past the
-                // cushion that alone makes the Bank read as full from the
-                // trailing leg's first access unit. Both legs then park,
-                // release cannot advance because the clock waits on a video
-                // frame the decoder never gets input for, and the session
-                // sits in Buffering until closed. Refuse the pair instead.
-                // Only before the first seek: a landed seek re-latches both
-                // baselines wherever each demuxer stopped, which says nothing
-                // about where either container begins.
+                // span across both legs, so a gap between the origins counts
+                // as held media. Past the cushion the Bank reads as full from
+                // the trailing leg's first access unit and the session would
+                // sit in Buffering until closed, so the pair is refused. Only
+                // before the first seek: a landed seek re-latches both
+                // baselines wherever each demuxer stopped.
                 if px.shared.generation.load(Ordering::Relaxed) == 0
                     && let Some(gap_us) = split.origin_gap_us()
                     && gap_us > decoder_cushion_us
@@ -2288,9 +2275,9 @@ pub fn run_video(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             let clock = px.clock.lock().expect("clock lock");
             (clock.now(wall), clock.is_playing())
         };
-        // Refresh the render thread's clock mirror every tick. Slew moves
-        // the offset slowly, so a mirror up to 4 ms stale costs at most
-        // 0.2 ms of selection error.
+        // Refresh the render thread's clock mirror every tick. At the
+        // normal 2% slew cap a mirror one 4 ms tick stale is under 0.1 ms
+        // out.
         px.present.mirror_clock(wall, now, playing);
         // While a render consumer is live, the render event owns frame
         // selection. This thread presents only for consumers that issue no
@@ -2895,9 +2882,8 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             px.shared.av_offset_us.store(
                 av_offset_us(
                     playhead,
-                    // Per generation: `Present.out_count` survives a flush,
-                    // so after a seek or reconnect it would pair the old
-                    // video position with the new audio playhead.
+                    // Per generation, so after a seek the old video position
+                    // is never paired with the new audio playhead.
                     presented_this_generation(
                         px.presented_generation.load(Ordering::Relaxed),
                         px.shared.generation.load(Ordering::Relaxed),
@@ -3107,16 +3093,12 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
                         // The flush arm installs a fresh ring only where
                         // there is a decoder to size it from, so a producer
                         // left over from the previous format would outlive
-                        // its timeline and the end-of-stream check would read
-                        // drain state off a ring that no longer matches.
+                        // its timeline.
                         producer = None;
                         // The consumer half goes too, as in the flush arm's
                         // no-decoder case. Left installed it would serve the
-                        // retired format's tail and keep writing a playhead
-                        // for a muted track, while the drain check, seeing no
-                        // producer, reads the track as finished and declares
-                        // an end over samples still reachable from the pull
-                        // path.
+                        // retired format's tail while the drain check, seeing
+                        // no producer, reads the track as finished.
                         *px.audio_consumer.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     }
                 }
@@ -3514,9 +3496,8 @@ mod tests {
         assert_eq!(steps.step(), Some(at(40)), "the track changed pace");
     }
 
-    /// The bound is 720 frames of the track's own rate, so a low-rate file
-    /// decodes forward much further than a 60 fps one, which keeps the
-    /// twelve seconds it always had.
+    /// The bound is 720 frames of the track's own rate and never under 12 s,
+    /// so a low-rate file decodes forward much further than a 60 fps one.
     #[test]
     fn the_bound_counts_frames() {
         let at = MediaTime::from_millis;
@@ -3558,9 +3539,8 @@ mod tests {
     }
 
     /// The offset is a difference between two terms of the same generation,
-    /// or unknown. A cumulative "has anything ever presented" gate would let
-    /// the window after a flush export the old video position against the
-    /// new audio playhead, which reads as a measurement.
+    /// or unknown, so the window after a flush never exports the old video
+    /// position against the new audio playhead as a measurement.
     #[test]
     fn the_av_offset_is_unknown_until_this_generation_presents() {
         let ph = Some(MediaTime::from_millis(1_000));
@@ -3578,8 +3558,7 @@ mod tests {
     /// A render event in flight across a flush still carries a lease from
     /// the retired timeline. The recorded value is the generation that
     /// presented, so such a write names the old timeline and the gate does
-    /// not match it. A check-then-set would let it through whenever the
-    /// seek landed between the two steps.
+    /// not match it.
     #[test]
     fn the_gate_answers_only_for_the_timeline_in_force() {
         assert!(

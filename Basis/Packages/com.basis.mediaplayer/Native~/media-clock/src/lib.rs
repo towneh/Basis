@@ -154,11 +154,10 @@ pub const SMOOTHING_INTERVAL: MediaTime = MediaTime::from_millis(30);
 pub struct ClockConfig {
     pub dead_band: MediaTime,
     /// Once a slew has started, it runs until the error is inside this,
-    /// not merely back inside `dead_band`. The cap is reached at an error of
-    /// `slew_tau` × cap (5 ms at the defaults), so a slew released at the dead
-    /// band's edge never reaches its proportional range: the clock parks at
-    /// the edge, where a few ms of residual jitter starts the next slew.
-    /// Clamped to `dead_band`.
+    /// not merely back inside `dead_band`. The correction is only
+    /// proportional below `slew_tau` × cap (5 ms at the defaults); a slew
+    /// released at the dead band's edge would park the clock there, where a
+    /// few ms of jitter starts the next slew. Clamped to `dead_band`.
     pub release_band: MediaTime,
     pub snap_threshold: MediaTime,
     pub slew_cap_ppm: i64,
@@ -176,16 +175,14 @@ pub struct ClockConfig {
     /// How long `fast_slew_cap_ppm` stays in force.
     pub fast_window: MediaTime,
     /// Smooth the master position before the dead-band/slew rungs act on
-    /// it. The audio playhead is timed from the host's pulls, and hosts pull
-    /// on their own scheduling grid with missed slots (Unity on Windows:
-    /// ±25 ms; Android: ±40 ms), which is wider than the dead band. The
-    /// playhead advances at 1x in wall time, so its offset from the wall
-    /// clock is steady apart from that jitter: the smoothed master is the
-    /// wall clock plus the mean of the last `SMOOTHING_SAMPLES` offsets,
-    /// sampled at least `SMOOTHING_INTERVAL` apart (Media3's
-    /// `AudioTrackPositionTracker` scheme). The clock's own corrections do
-    /// not enter the average, so a catch-up is not carried past its target.
-    /// The snap rung always acts on the raw position.
+    /// it. The audio playhead is timed from the host's pulls, whose jitter
+    /// (Unity on Windows ±25 ms, Android ±40 ms) is wider than the dead band.
+    /// The smoothed master is the wall clock plus the mean of the last
+    /// `SMOOTHING_SAMPLES` playhead-minus-wall offsets, sampled at least
+    /// `SMOOTHING_INTERVAL` apart (Media3's `AudioTrackPositionTracker`
+    /// scheme). The clock's own corrections do not enter the average, so a
+    /// catch-up is not carried past its target. The snap rung always acts on
+    /// the raw position.
     pub smooth_master: bool,
 }
 
@@ -225,7 +222,7 @@ pub struct MediaClock {
     anchor_wall: MediaTime,
     /// Media position at the segment origin.
     anchor_media: MediaTime,
-    /// Rate offset from 1x in ppm, clamped to ±slew_cap_ppm.
+    /// Rate offset from 1x in ppm, clamped to the ceiling in force (`cap_ppm`).
     rate_ppm: i64,
     master: Master,
     playing: bool,
@@ -320,11 +317,9 @@ impl MediaClock {
 
     /// Feed a master position report (the audio playhead). Applies the
     /// ladder: dead band → nothing (a running slew ends at `release_band`),
-    /// slew band → rate offset capped at `slew_cap_ppm`, beyond
-    /// `snap_threshold` → snap.
-    /// With `smooth_master` set, the dead-band/slew rungs act on the
-    /// smoothed master position; the snap rung always acts on the raw
-    /// position and clears the average.
+    /// slew band → rate offset capped at the ceiling in force (`cap_ppm`),
+    /// beyond `snap_threshold` → snap. With `smooth_master` set, only the
+    /// snap rung sees the raw position.
     pub fn observe_master(&mut self, wall: MediaTime, master_pos: MediaTime) -> Correction {
         if self.master != Master::Audio || !self.playing {
             return Correction::None;

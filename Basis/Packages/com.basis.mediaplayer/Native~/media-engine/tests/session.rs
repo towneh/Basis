@@ -89,7 +89,7 @@ fn audio_only_plays_out_the_tail() {
 /// The A/V twin of `audio_only_plays_out_the_tail`. A session with both
 /// kinds of track must not declare Ended when the last *picture* is
 /// presented while the audio ring still holds sound: `read_audio` serves
-/// nothing outside Playing, so the rest would be unreachable.
+/// nothing once the session has ended, so the rest would be unreachable.
 ///
 /// Asserted as an invariant rather than a frame total, because a total
 /// cannot separate this from the serve-side lateness trim, which discards
@@ -1053,13 +1053,11 @@ fn seek_after_ended_revives_the_session() {
 /// fixture released, banked at zero, the pool still presenting the tail).
 /// The demux thread parks the clock and advances the generation, but until
 /// the video thread processes the Flush, stale pre-seek frames sit in the
-/// pool. Restarting the parked clock from one would resume the old
-/// timeline, race the state back to Playing, let the audio ring free-run
-/// through the settle, and end in a backwards snap to the audio master
-/// once the landed frames arrive. On Quest the OMX drain stretches this
-/// window to seconds. Expected: the clock stays parked until the new
-/// generation's first frame, so the settle has no master snap and the
-/// tail plays out at 1x.
+/// pool, and restarting the parked clock from one would resume the old
+/// timeline and end in a backwards snap to the audio master. On Quest the
+/// OMX drain stretches this window to seconds. The clock must stay parked
+/// until the new generation's first frame, so the settle has no master
+/// snap and the tail plays out at 1x.
 #[test]
 fn seek_during_eos_drain_settles_without_a_snap() {
     let mut session = Session::open(OpenRequest::new(fixture_path()));

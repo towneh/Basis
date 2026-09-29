@@ -131,10 +131,9 @@ fn flac_71_fixture_decodes_eight_channels() {
     assert!(peak > 0.05 && peak <= 1.0, "peak {peak} out of range");
 }
 
-/// An AU holding more frames than any real one is refused rather than
-/// decoded: its size says nothing about what it decodes to. The whole
-/// 6 s fixture in one AU is past the ceiling; its first frame alone is
-/// accepted.
+/// An AU decoding to more sample frames than any real one is refused: its
+/// size says nothing about what it decodes to. The whole 6 s fixture in one
+/// AU is past the ceiling; its first frame alone is accepted.
 #[test]
 fn flac_refuses_an_au_decoding_past_the_ceiling() {
     let demuxed = demux("sine-48k-stereo.flac");

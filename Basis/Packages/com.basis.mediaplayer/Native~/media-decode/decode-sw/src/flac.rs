@@ -1,9 +1,9 @@
 //! FLAC decode on claxon, in-process. The platform route is avoided
 //! because the Media Foundation FLAC MFT hangs.
 //!
-//! Each submitted AU is one complete FLAC frame (Matroska stores frames;
-//! the raw-file demuxer emits whole frames), decoded synchronously into a
-//! small output queue. FLAC has no codec latency, so drain is a no-op.
+//! Each submitted AU holds whole FLAC frames, normally one (Matroska
+//! stores frames; the raw-file demuxer emits whole frames), decoded
+//! synchronously into a small output queue. FLAC has no codec latency, so drain is a no-op.
 
 use std::collections::VecDeque;
 use std::io::Cursor;
@@ -13,7 +13,7 @@ use media_decode::{AudioDecoder, DecodeError, PcmChunk, SubmitOutcome};
 
 /// Decoded chunks the queue holds before `submit` pushes back; the release
 /// schedule bounds arrivals well below this in practice. An AU with more
-/// frames than it holds is refused; one that fits only once the queue
+/// FLAC frames than it holds is refused; one that fits only once the queue
 /// drains is pushed back.
 const READY_CAP: usize = 64;
 /// Sample frames one AU may decode to: four blocks of the largest size

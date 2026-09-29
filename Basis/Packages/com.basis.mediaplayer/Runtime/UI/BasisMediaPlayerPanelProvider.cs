@@ -444,6 +444,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             // visibly becomes "https://youtube.com/…" rather than being silently rewritten.
             string normalized = BasisMediaUrlRouter.NormalizeUrl(u);
             if (normalized != u) _urlField.SetValueWithoutNotify(normalized);
+            // The user typed it, so there is nothing to ask them about.
             if (_activeNetworking != null) _ = _activeNetworking.SetApprovedUrl(normalized);
             else _activePlayer.OpenApprovedUrl(normalized);
         };
@@ -1055,8 +1056,8 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             else _activePlayer.Seek(targetS);
             // Hold the handle at the target until the reported position lands,
             // instead of tweening back to the old playhead and forward again.
-            // The time limit only covers a seek event the engine's log
-            // dropped.
+            // The time limit covers a seek whose answer never arrives, such
+            // as a dropped event.
             _seekAwaitPosS = targetS;
             _seekAwaitUs = (long)(targetS * 1_000_000.0);
             _seekAwaitActedOn = _activePlayer.SeeksActedOn;
@@ -1068,15 +1069,14 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         double posS = _activePlayer.PositionSeconds;
         if (_seekAwaitUntil > 0f)
         {
-            // The engine's seek event names the target it answered, landed or
-            // refused, so neither an earlier seek of a chain nor the old
-            // playhead passing near the target is taken for this seek's
-            // landing. Once answered, the seek has landed when the position
-            // is at the target, or, for a seek refused or landed on a
-            // keyframe it would not decode forward from, when Buffering is
-            // over. That second test needs the answer from an earlier
-            // refresh, so a state read before the event was drained does not
-            // count.
+            // The engine's seek event names the target it answered (landed or
+            // refused), so neither an earlier seek of a chain nor the old
+            // playhead passing near the target reads as this seek landing.
+            // Once answered, it has landed when the position reaches the
+            // target or, for a refusal or a landing short of it, once
+            // Buffering is over. That second test needs the answer from an
+            // earlier refresh, so a state read before the event was drained
+            // does not count.
             bool answered = _activePlayer.SeekAnsweredSince(_seekAwaitActedOn, _seekAwaitUs, SeekAnswerWithinUs);
             bool landed = answered
                 && (System.Math.Abs(posS - _seekAwaitPosS) <= SeekLandedWithinSeconds

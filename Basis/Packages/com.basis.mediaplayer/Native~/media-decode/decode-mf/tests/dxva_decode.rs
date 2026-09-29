@@ -5,8 +5,9 @@
 //! skip loudly where this machine's GPU has no profile for the codec.
 //!
 //! Also covered: the sizeless-HEVC refusal (before the MFT is configured),
-//! the opaque payload's slice exposure, AV1 config-OBU carriage, and
-//! flush/restart through `reset`.
+//! the opaque payload's slice exposure, AV1 config-OBU carriage,
+//! flush/restart through `reset`, and H.264 low-latency decode for live
+//! sources.
 
 #![cfg(windows)]
 

@@ -596,8 +596,8 @@ fn video_only_fixture_still_demuxes() {
 
 /// Open a fixture spread out with its `mfra` as the only index, and hold
 /// the open to that index: the walk it falls back to yields the same
-/// stream, so a row comparing streams alone would pass without it. A
-/// refusal is noted, and the walk reads a cache block per fragment.
+/// stream, so a row comparing streams alone would pass without it. The
+/// open must note no refusal of the `mfra` and fetch less than a walk.
 fn open_by_mfra(name: &str) -> (Mp4Demuxer, common::Counters) {
     let source = common::inflate_mfra(&fixture(name));
     let counters = source.counters();
@@ -698,16 +698,14 @@ fn an_mfra_that_misses_the_fragments_is_not_used() {
     assert_eq!(access_units(&mut demux), access_units(&mut walked));
 }
 
-/// A real file's fragment holds more media than one cache block: here a
-/// megabyte of video, then its audio. Read in decode order, the samples
-/// alternate between the two runs, so each read lands away from the last
-/// and the video run is fetched a block at a time, a request and a round
-/// trip each over HTTP, which a 6 Mbit/s file from far away cannot keep
-/// up with. A fragment this size is read whole instead: its header, then
-/// its data in one read. The first fragment's header came in with the
-/// open's read past `moov`, so draining costs its data, then the second
-/// fragment's header and data. A fragment too large to read whole is read
-/// a run per track, which the rows in `mp4_runs` cover.
+/// A fragment larger than a cache block (here a megabyte of video, then
+/// its audio) is served in decode order, which alternates between its two
+/// runs; fetched a block at a time, that is a request and a round trip per
+/// block over HTTP. A fragment this size is read whole instead: its
+/// header, then its data in one read. The first fragment's header came in
+/// with the open's read past `moov`, so draining costs its data, then the
+/// second fragment's header and data. Fragments too large to read whole
+/// are covered by the rows in `mp4_runs`.
 #[test]
 fn a_fragment_is_read_in_one_pass() {
     const READS: u64 = 1 + (1 + 1);

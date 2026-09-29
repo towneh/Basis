@@ -143,8 +143,8 @@ pub fn strip_inert_sbr(asc: &[u8]) -> &[u8] {
         if bits.u(5)? != 2 || bits.u(4)? == RATE_ESCAPE || bits.u(4)? == 0 {
             return None;
         }
-        // Only a byte-aligned core can be cut off cleanly.
         bits.ga_specific()?;
+        // Only a byte-aligned core can be cut off cleanly.
         if bits.pos != 16 {
             return None;
         }

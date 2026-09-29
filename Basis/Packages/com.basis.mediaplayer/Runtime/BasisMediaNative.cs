@@ -58,8 +58,9 @@ public static class BasisMediaNative
     /// <summary>
     /// Drain the engine's process-wide free-text log, oldest first; returns
     /// the count written. No handle: most of what it carries is said before
-    /// the first session opens or after the last one closes. Records beyond <paramref name="capacity"/> stay
-    /// queued, so call again until a call comes back short.
+    /// the first session opens or after the last one closes. Records beyond
+    /// <paramref name="capacity"/> stay queued, so call again until a call
+    /// comes back short.
     /// <paramref name="evicted"/> may be null; it receives the running count
     /// of lines the ring dropped to make room, which describes holes at the
     /// start of what follows rather than the end.

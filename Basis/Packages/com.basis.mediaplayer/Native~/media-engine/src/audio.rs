@@ -706,8 +706,9 @@ mod tests {
         );
     }
 
-    /// With a sink latency reported mid-play, the clock slews back by that
-    /// offset (within the dead band) and settles there.
+    /// A sink latency that shifts the master mid-play while the clock itself
+    /// is not moved is slewed out, never snapped, and the clock settles
+    /// within the dead band of the shifted master.
     #[test]
     fn ladder_inherits_the_latency_offset() {
         use media_clock::{ClockConfig, Correction, Generation, Master, MediaClock};
