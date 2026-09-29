@@ -5,6 +5,20 @@ prefabs. None has an automated test. The engine's tests are in
 [`Native~/TESTING.md`](Native~/TESTING.md), and
 [`Native~/DIAGNOSTICS.md`](Native~/DIAGNOSTICS.md) explains the captures.
 
+| Your change affects | Run |
+| --- | --- |
+| Shared playback, ownership or resync (`BasisMediaPlayerNetworking`) | [Shared playback](#shared-playback) |
+| The panel, transport, seeking or status (`BasisMediaPlayer`, `Runtime/UI/`) | [Media Players panel](#media-players-panel) |
+| The prefabs, outputs or audio components (`Runtime/Audio/`, `Runtime/Rendering/`) | [Prefabs and components](#prefabs-and-components) |
+| `UserDataReceived` | [SEI user data](#sei-user-data) |
+| Which routes open a URL, the prompt, or the resolvers (`Runtime/Resolver/`) | [URL consent](#url-consent) |
+| How engine events and log lines reach the Console | [Console diagnostics](#console-diagnostics) |
+| Texture handling or the native plugin | [Direct3D 11 and 12](#direct3d-11-and-12) |
+
+When the pull request is ready, report the rows as the engine guide's
+[Reporting in a pull request](Native~/TESTING.md#reporting-in-a-pull-request)
+describes.
+
 | What | How |
 | --- | --- |
 | Engine gate: format, lint, tests, audits, ffprobe conformance | `Native~/tools/ci.ps1` (Windows), `Native~/tools/ci.sh` (Linux); each step is described in [`Native~/TESTING.md`](Native~/TESTING.md#running-the-tests) |

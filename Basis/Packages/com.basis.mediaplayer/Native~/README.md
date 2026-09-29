@@ -49,4 +49,30 @@ to `Linux/x86_64/`. Each needs librist staged first (see
 [`TESTING.md`](TESTING.md) covers prerequisites and testing, and
 [`DIAGNOSTICS.md`](DIAGNOSTICS.md) the captures. Fuzz targets are in `fuzz/`.
 
+## Terms
+
+The code, the tests and the captures use these names:
+
+| Term | Meaning |
+| --- | --- |
+| Access unit (AU) | One frame's worth of compressed data, as the demuxer hands it on |
+| Bank | The buffer between demux and decode (`media-bank`). It holds access units and releases them to the decoders on a real-time schedule |
+| Release | The Bank handing access units to the decoders |
+| Anchor | The wall-clock moment the release schedule counts from. A join or a seek sets it; a stall can move it later |
+| Lag, target lag | On a live source, how far behind the live edge the Bank holds release, and how far it aims to |
+| Auto | The buffer depth setting that sizes the target lag from what the connection has delivered |
+| Decay, surplus | Surplus is lag beyond the target. Decay gives it back, slowly enough to present smoothly |
+| Priming | Access units released early so a decoder has output ready when presentation starts. For audio, also the encoder delay at the start of an AAC or Opus track, which is not played |
+| Liveness | Whether a source is played as live or on-demand |
+| Generation | Each open and each seek starts a new one; anything still carrying an older generation is dropped |
+| Clock, master | The clock (`media-clock`) is a session's one source of position. With audio it follows the audio playhead, the master; without, the wall clock |
+| Playhead | How far the host's pull has got through the decoded audio |
+| Audio ring | Decoded audio waiting for the host to pull it |
+| Ladder, slew, snap | How the clock follows the master: no correction within a 20 ms dead band, a slew (running up to 2% fast or slow) beyond it, a snap (a jump) past 700 ms |
+| Release band | The 5 ms a running slew closes to before it stops |
+| Route | The decoder a track takes: hardware (DXVA, MediaCodec) or software |
+| Pool drop | A decoded frame that fell due but was never shown, because a newer frame was also due or it was more than 40 ms late |
+| Address gate | The check that refuses private, loopback and other unsafe addresses, made for every resolved address and every redirect |
+| Split source | Video and audio from two URLs played as one session |
+
 Licensed MIT OR Apache-2.0, at your option.

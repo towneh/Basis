@@ -2,8 +2,9 @@
 
 How to run and add the engine's tests, and what each test checks. The managed
 side has its own guide at [`../TESTING.md`](../TESTING.md), and
-[`DIAGNOSTICS.md`](DIAGNOSTICS.md) explains the captures. Run the rows for any
-area you change.
+[`DIAGNOSTICS.md`](DIAGNOSTICS.md) explains the captures.
+[Which rows to run](#which-rows-to-run) says which rows a change needs, and
+[`README.md`](README.md#terms) explains the terms the rows use.
 
 ## Prerequisites
 
@@ -55,6 +56,17 @@ tool is missing.
 `-Fuzz` (`--fuzz` on Linux) also builds the fuzz targets, which needs nightly
 Rust on Linux or WSL (see [`fuzz/`](fuzz/README.md)).
 
+GitHub runs the same gate on every push and pull request that touches the
+package (`.github/workflows/media-engine.yml`), on Windows and Linux, with a
+separate Android build. Its runners have no GPU. The session tests take the
+software decode route there, and the hardware decode tests find no decoder,
+return early and pass. They print `SKIPPED:`, but `cargo test` hides the output
+of a test that passes, so the log does not show it. A green check on a pull
+request says nothing about the **CI, Windows** rows that need hardware decode;
+run the gate on a Windows machine with a GPU for those.
+`cargo test -p decode-mf --test dxva_decode -- --nocapture` shows which of
+those tests skipped on the machine it runs on.
+
 On Windows, `cargo vet` rewrites the files in `supply-chain/` with Windows line
 endings. `git diff` shows no change, and `git checkout -- supply-chain` puts
 them back.
@@ -80,6 +92,37 @@ with `--release` for timing):
 | `caps` | Prints what this machine can play |
 | `conformance fixtures` | Compares each fixture's demuxed stream with ffprobe |
 | `impair <src> --profile <name>` | Replays a recorded network profile and grades the buffering |
+
+## Which rows to run
+
+Run the gate for any change under `Native~`, then the rows for what the change
+touches:
+
+| You changed | Run |
+| --- | --- |
+| `media-demux`, `media-bitstream` | [Demux and containers](#demux-and-containers) |
+| `media-hls` | [Demux and containers](#demux-and-containers), and the HLS rows in [Transports and sources](#transports-and-sources) |
+| `media-io`, `media-rtp`, `media-rtsp`, `media-whep`, `media-rist` | [Transports and sources](#transports-and-sources) |
+| `media-decode` or its adapters | [Decode](#decode); for `decode-mediacodec`, also [Android devices](#android-devices) |
+| `media-clock`, `media-present`, or the audio path in `media-engine` | [Present, audio output and clock](#present-audio-output-and-clock) |
+| `media-bank`, or release and pacing in `media-engine` | [Buffering, pacing and resilience](#buffering-pacing-and-resilience) |
+| Sessions, seeks or state in `media-engine` | [Foundations, lifecycle and hostile input](#foundations-lifecycle-and-hostile-input); for shared-playback sync, also [Shared playback and sync](#shared-playback-and-sync) |
+| `media-ffi` | The ABI rows in [Foundations, lifecycle and hostile input](#foundations-lifecycle-and-hostile-input) and the drain rows in [Harness and instrumentation](#harness-and-instrumentation) |
+| `media-diag`, `bm-probe`, or a capture column | [Harness and instrumentation](#harness-and-instrumentation), and update [`DIAGNOSTICS.md`](DIAGNOSTICS.md) |
+| Code for one platform | Android: [Android devices](#android-devices). Linux: [Platforms](#platforms) |
+| The managed package (`Runtime/`, `Editor/`, the prefabs) | [`../TESTING.md`](../TESTING.md) |
+
+A change that crosses areas takes the rows of each. **By hand** and **Device
+(Quest)** rows in those sections apply as much as the automated ones.
+
+## Reporting in a pull request
+
+The pull request template asks you to tick **Tested** and the platforms you
+tested on. Under **Notes**, say the gate passed and name the other rows you
+ran. Name any row that applies to the change but you could not run, with the
+reason: no headset for a **Device (Quest)** row, no GPU for a row that needs
+hardware decode, or no source of the kind a by-hand row needs. That tells a
+reviewer which rows are still open.
 
 ## Layout
 

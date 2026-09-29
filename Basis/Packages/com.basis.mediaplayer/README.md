@@ -273,7 +273,8 @@ Advanced.
    while it runs.
 4. **Captures:** `BasisMediaPlayerDiagnostics` beside the player writes a
    per-frame CSV to the persistent data folder, and **Engine capture** records
-   the engine's side. `Native~/DIAGNOSTICS.md` explains the columns.
+   the engine's side. [`Native~/DIAGNOSTICS.md`](Native~/DIAGNOSTICS.md)
+   explains the columns.
 
 ## Extending the player
 
@@ -371,3 +372,6 @@ cargo build --release -p media-ffi --features rist
 
 [`Native~/README.md`](Native~/README.md) describes the engine, and
 [`Native~/TESTING.md`](Native~/TESTING.md) covers prerequisites and testing.
+[`TESTING.md`](TESTING.md) has the checks for the Unity side, and
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) the licences of what the
+package includes.
