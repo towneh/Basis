@@ -28,7 +28,7 @@ namespace Basis.Tests.UI
         [TearDown]
         public void TearDown()
         {
-            BasisLocalization.SetLanguage(_originalLanguage);
+            BasisLocalization.LoadLanguage(_originalLanguage);
             for (int Index = 0; Index < _roots.Count; Index++)
             {
                 if (_roots[Index]) Object.DestroyImmediate(_roots[Index]);
@@ -79,7 +79,7 @@ namespace Basis.Tests.UI
         public void AssignLocalizedEntries_ResolvesDisplayFromTheGivenKeysAgainstRealLocalizationData()
         {
             PanelDropdown dropdown = BuildDropdown();
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
 
             // Exactly the shape of this session's Dominant Hand fix.
             dropdown.AssignLocalizedEntries(
@@ -99,7 +99,7 @@ namespace Basis.Tests.UI
         public void AssignLocalizedEntries_TooltipAutoDerivesFromKeyPlusDotTooltipSuffix()
         {
             PanelDropdown dropdown = BuildDropdown();
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
 
             // Exactly the shape of this session's Library Sort/Filter fix: the tooltip key already
             // existed in en.json before the label key did, and must still resolve via the same
@@ -115,7 +115,7 @@ namespace Basis.Tests.UI
         public void AssignLocalizedEntries_ExplicitTooltipKeysOverrideTheDerivedOne()
         {
             PanelDropdown dropdown = BuildDropdown();
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
 
             dropdown.AssignLocalizedEntries(
                 new List<string> { "on" },
@@ -133,11 +133,11 @@ namespace Basis.Tests.UI
             // its display text at whatever language was active the first time it was built.
             PanelDropdown dropdown = BuildDropdown();
 
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             dropdown.AssignLocalizedEntries(new List<string> { "Name" }, new List<string> { "library.sort.name" });
             string english = dropdown.DropdownComponent.options[0].text;
 
-            BasisLocalization.SetLanguage("ja");
+            BasisLocalization.LoadLanguage("ja");
             dropdown.AssignLocalizedEntries(new List<string> { "Name" }, new List<string> { "library.sort.name" });
             string japanese = dropdown.DropdownComponent.options[0].text;
 
@@ -155,11 +155,11 @@ namespace Basis.Tests.UI
             List<string> rawNames = new List<string> { "All", "Local", "Networked" };
             List<string> keys = new List<string> { "library.filter.all", "library.filter.local", "library.filter.networked" };
 
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             dropdown.AssignLocalizedEntries(rawNames, keys);
             dropdown.SetValueWithoutNotify("Local");
 
-            BasisLocalization.SetLanguage("ja");
+            BasisLocalization.LoadLanguage("ja");
             dropdown.AssignLocalizedEntries(rawNames, keys);
 
             Assert.That(dropdown.Entries, Is.EqualTo(rawNames));

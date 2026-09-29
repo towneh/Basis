@@ -463,10 +463,10 @@ namespace Basis.BasisUI
             if (_leftHand != null && _rightHand != null)
             {
                 if (device == _leftHand)
-                    _leftPressed = (trigger >= 0.9f);
+                    _leftPressed = (trigger >= BasisTriggerPressure.Calibrationtrigger);
 
                 if (device == _rightHand)
-                    _rightPressed = (trigger >= 0.9f);
+                    _rightPressed = (trigger >= BasisTriggerPressure.Calibrationtrigger);
 
                 if (_leftPressed && _rightPressed)
                     OnTriggersConfirmed();
@@ -475,7 +475,7 @@ namespace Basis.BasisUI
             }
 
             // Fallback: any device trigger pressed
-            if (trigger >= 0.9f)
+            if (trigger >= BasisTriggerPressure.Calibrationtrigger)
             {
                 OnTriggersConfirmed();
             }

@@ -238,6 +238,7 @@ public static class BasisDebug
             LogTag.AuthoredMotion => "#BA55D3", // Medium Orchid
             LogTag.Rendering => "#ADFF2F",    // Green Yellow
             LogTag.TrackerObjects => "#F4A460", // Sandy Brown
+            LogTag.Language => "#5ff5d9", // Near Moon
             _ => "#FFFFFF"                    // Default White
         };
     }
@@ -290,6 +291,7 @@ public static class BasisDebug
         AuthoredMotion,
         Rendering,
         TrackerObjects,
+        Language,
     }
 
     public enum MessageType

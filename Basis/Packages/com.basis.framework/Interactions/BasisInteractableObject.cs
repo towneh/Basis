@@ -114,11 +114,11 @@ namespace Basis.Scripts.BasisSdk.Interactions
             {
                 case BasisInputKey.Trigger:
                     // Fire when main trigger is fully pressed
-                    return state.Trigger >= 0.9f;
+                    return state.Trigger >= BasisTriggerPressure.InteractableObjectIsTriggered;
 
                 case BasisInputKey.SecondaryTrigger:
                     // Fire when secondary trigger is fully pressed
-                    return state.SecondaryTrigger >= 0.9f;
+                    return state.SecondaryTrigger >= BasisTriggerPressure.InteractableObjectIsSecondaryTriggered;
 
                 case BasisInputKey.Primary2DAxis:
                     // Axis has state if it's non-zero (already deadzoned in BasisInputState)
@@ -568,7 +568,7 @@ namespace Basis.Scripts.BasisSdk.Interactions
             return input.CurrentInputState.GripButton ||
                 input.TryGetRole(out var role) &&
                 role == Basis.Scripts.TransformBinders.BoneControl.BasisBoneTrackedRole.CenterEye &&
-                input.CurrentInputState.Trigger == 1;
+                input.CurrentInputState.Trigger >= BasisTriggerPressure.InteractableObject;
         }
 
         /// <summary>

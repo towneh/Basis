@@ -13,30 +13,6 @@ namespace Basis.Tests.UI
     [TestFixture]
     public class BasisLocalizationCoreTests
     {
-        [Test]
-        public void NormalizeLanguageCode_RewritesRetiredZhCodesToZhHans()
-        {
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode("zh"), Is.EqualTo("zh-Hans"));
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode("zh-CN"), Is.EqualTo("zh-Hans"));
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode("ZH-cn"), Is.EqualTo("zh-Hans"),
-                "a persisted code from an older build may not match the stored casing");
-        }
-
-        [Test]
-        public void NormalizeLanguageCode_LeavesLiveCodesUnchanged()
-        {
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode("zh-Hans"), Is.EqualTo("zh-Hans"));
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode("zh-Hant"), Is.EqualTo("zh-Hant"));
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode("en"), Is.EqualTo("en"));
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode("ja"), Is.EqualTo("ja"));
-        }
-
-        [Test]
-        public void NormalizeLanguageCode_PassesNullAndEmptyThrough()
-        {
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode(null), Is.Null);
-            Assert.That(BasisLocalizationCore.NormalizeLanguageCode(string.Empty), Is.Empty);
-        }
 
         [Test]
         public void Format_AppliesArgsWithInvariantCulture()

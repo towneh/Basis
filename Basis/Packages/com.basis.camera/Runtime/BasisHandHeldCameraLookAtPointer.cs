@@ -9,7 +9,7 @@ using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
 public partial class BasisHandHeldCamera
 {
-    private const float LookAtPointerRange = 250f, LookAtPointerTriggerThreshold = 0.9f;
+    private const float LookAtPointerRange = 250f;
     private const float LookAtPointerReticleSize = 0.09f, LookAtPointerSubjectPadding = 0.05f;
     private static readonly Color LookAtPointerReticleColor = new Color(1f, 0.78f, 0.2f, 1f);
     private readonly Dictionary<BasisInput, bool> lookAtTriggerPrev = new Dictionary<BasisInput, bool>();
@@ -43,7 +43,7 @@ public partial class BasisHandHeldCamera
         for (int Index = 0; Index < inputs.Count; Index++)
         {
             BasisInput input = inputs[Index];
-            if (input != null) lookAtTriggerPrev[input] = input.CurrentInputState.Trigger >= LookAtPointerTriggerThreshold;
+            if (input != null) lookAtTriggerPrev[input] = input.CurrentInputState.Trigger >= BasisTriggerPressure.LookAtPointerTriggerThreshold;
         }
     }
     private void TickLookAtPointer()
@@ -99,7 +99,7 @@ public partial class BasisHandHeldCamera
             if (input == null) continue;
             if (input.TryGetRole(out BasisBoneTrackedRole role) && role == BasisBoneTrackedRole.CenterEye) continue;
 
-            bool down = input.CurrentInputState.Trigger >= LookAtPointerTriggerThreshold;
+            bool down = input.CurrentInputState.Trigger >= BasisTriggerPressure.LookAtPointerTriggerThreshold;
             lookAtTriggerPrev.TryGetValue(input, out bool wasDown);
             lookAtTriggerPrev[input] = down;
 

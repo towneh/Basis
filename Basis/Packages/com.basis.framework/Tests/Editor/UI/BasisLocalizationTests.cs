@@ -33,7 +33,7 @@ namespace Basis.Tests.UI
         [TearDown]
         public void TearDown()
         {
-            BasisLocalization.SetLanguage(_originalLanguage);
+            BasisLocalization.LoadLanguage(_originalLanguage);
             BasisLocalization.TrackMissingKeys = _originalTrackMissingKeys;
             BasisLocalization.ClearMissingKeys();
         }
@@ -41,7 +41,7 @@ namespace Basis.Tests.UI
         [Test]
         public void Get_OnAKnownKeyReturnsNonEmptyText()
         {
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             Assert.That(BasisLocalization.Get("settings.title"), Is.Not.Empty.And.Not.EqualTo("settings.title"));
         }
 
@@ -89,7 +89,7 @@ namespace Basis.Tests.UI
             BasisLocalization.OnLanguageChanged += handler;
             try
             {
-                BasisLocalization.SetLanguage("ja");
+                BasisLocalization.LoadLanguage("ja");
                 Assert.That(BasisLocalization.CurrentLanguage, Is.EqualTo("ja"));
                 Assert.That(fired, Is.True);
             }
@@ -105,10 +105,10 @@ namespace Basis.Tests.UI
             // This is the exact mechanism the provider-title bug (menu.provider.mirror etc.) relied
             // on being true: a live Get() call must return DIFFERENT text after SetLanguage, not
             // whatever text was captured the first time something read it.
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             string english = BasisLocalization.Get("settings.title");
 
-            BasisLocalization.SetLanguage("ja");
+            BasisLocalization.LoadLanguage("ja");
             string japanese = BasisLocalization.Get("settings.title");
 
             Assert.That(japanese, Is.Not.EqualTo(english),
@@ -123,7 +123,7 @@ namespace Basis.Tests.UI
             // not a bug, so it must be expected rather than left to auto-fail the test.
             LogAssert.Expect(LogType.Error, new Regex("Language table not loaded for code"));
 
-            BasisLocalization.SetLanguage("not-a-real-language-code");
+            BasisLocalization.LoadLanguage("not-a-real-language-code");
             Assert.That(BasisLocalization.CurrentLanguage, Is.EqualTo("en"));
         }
 
@@ -174,7 +174,7 @@ namespace Basis.Tests.UI
         [Test]
         public void NewProviderTitleKeys_ResolveInEnglish([ValueSource(nameof(NewProviderTitleKeys))] string key)
         {
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             Assert.That(BasisLocalization.Get(key), Is.Not.EqualTo(key),
                 $"'{key}' fell through to the raw key — it is missing from en.json");
         }
@@ -182,7 +182,7 @@ namespace Basis.Tests.UI
         [Test]
         public void NewDropdownAndDialogKeys_ResolveInEnglish([ValueSource(nameof(NewDropdownAndDialogKeys))] string key)
         {
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             Assert.That(BasisLocalization.Get(key), Is.Not.EqualTo(key),
                 $"'{key}' fell through to the raw key — it is missing from en.json");
         }
@@ -195,7 +195,7 @@ namespace Basis.Tests.UI
             // Falling back to English for a missing translation is a lesser bug than the raw-key
             // case above, but still worth catching — a language file that never got this batch's
             // insert would silently show English instead of failing loudly.
-            BasisLocalization.SetLanguage(language);
+            BasisLocalization.LoadLanguage(language);
             Assert.That(BasisLocalization.Get(key), Is.Not.EqualTo(key),
                 $"'{key}' fell through to the raw key under '{language}'");
         }
@@ -205,7 +205,7 @@ namespace Basis.Tests.UI
             [ValueSource(nameof(NewDropdownAndDialogKeys))] string key,
             [ValueSource(nameof(SpotCheckLanguages))] string language)
         {
-            BasisLocalization.SetLanguage(language);
+            BasisLocalization.LoadLanguage(language);
             Assert.That(BasisLocalization.Get(key), Is.Not.EqualTo(key),
                 $"'{key}' fell through to the raw key under '{language}'");
         }
@@ -217,12 +217,12 @@ namespace Basis.Tests.UI
             // Full sentences, unlike single-word labels, essentially never coincide with English by
             // accident (a "Local"/"Avatar"-style loanword might legitimately match) — a safe place
             // to assert on TRANSLATED, not merely PRESENT.
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             string englishAddTitle = BasisLocalization.Get("settings.admin.confirm.addDefaultLibrary.title");
             string englishAddBody = BasisLocalization.Get("settings.admin.confirm.addDefaultLibrary.body");
             string englishRemoveBody = BasisLocalization.Get("settings.admin.confirm.removeDefaultLibrary.body");
 
-            BasisLocalization.SetLanguage(language);
+            BasisLocalization.LoadLanguage(language);
             Assert.That(BasisLocalization.Get("settings.admin.confirm.addDefaultLibrary.title"), Is.Not.EqualTo(englishAddTitle));
             Assert.That(BasisLocalization.Get("settings.admin.confirm.addDefaultLibrary.body"), Is.Not.EqualTo(englishAddBody));
             Assert.That(BasisLocalization.Get("settings.admin.confirm.removeDefaultLibrary.body"), Is.Not.EqualTo(englishRemoveBody));
@@ -232,7 +232,7 @@ namespace Basis.Tests.UI
         public void AdminConfirmDialogBodies_KeepTheirFormatPlaceholderInEveryLanguage(
             [ValueSource(nameof(SpotCheckLanguages))] string language)
         {
-            BasisLocalization.SetLanguage(language);
+            BasisLocalization.LoadLanguage(language);
             Assert.That(BasisLocalization.Get("settings.admin.confirm.addDefaultLibrary.body"), Does.Contain("{0}"));
             Assert.That(BasisLocalization.Get("settings.admin.confirm.removeDefaultLibrary.body"), Does.Contain("{0}"));
         }

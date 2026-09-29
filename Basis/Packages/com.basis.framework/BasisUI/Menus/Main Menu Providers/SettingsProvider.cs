@@ -865,44 +865,56 @@ namespace Basis.BasisUI
             PanelDropdown dropdownLanguage = PanelDropdown.CreateNewEntry(container);
             dropdownLanguage.Descriptor.SetTitle(BasisLocalization.Get("settings.general.language.title"));
             dropdownLanguage.Descriptor.SetTooltip(BasisLocalization.Get("settings.general.language.title.tooltip"));
-
             var languages = BasisLocalization.Available;
-            var codes = new List<string>(languages.Count);
-            var displayNames = new List<string>(languages.Count);
+            int LanguageCount = languages.Count;
+            var codes = new List<string>(LanguageCount);
+            var displayNames = new List<string>(LanguageCount);
             int currentIndex = 0;
-            for (int i = 0; i < languages.Count; i++)
+            for (int i = 0; i < LanguageCount; i++)
             {
                 codes.Add(languages[i].Code);
                 displayNames.Add(languages[i].NativeName);
                 if (languages[i].Code == BasisLocalization.CurrentLanguage)
                 {
+
                     currentIndex = i;
                 }
             }
 
             dropdownLanguage.AssignEntries(codes, displayNames);
-            if (codes.Count > 0)
+            int CodesCount = codes.Count;
+            if (CodesCount > 0)
             {
                 dropdownLanguage.SetValueWithoutNotify(codes[currentIndex]);
             }
+            dropdownLanguage.AssignBinding(BasisSettingsDefaults.Language);
 
-            dropdownLanguage.OnValueChanged += (selected) =>
+            dropdownLanguage.OnValueChanged += OnLanguageChanged;
+
+            PanelSectionToggleHelpers.FinalizeBoxedSectionFromIndex(languageToggle, container, languageStart, false,_ => tabDescriptor?.ForceRebuild());
+        }
+        public static void OnLanguageChanged(string selected)
+        {
+            var languages = BasisLocalization.Available;
+            int LanguageCount = languages.Count;
+            var codes = new List<string>(LanguageCount);
+            for (int i = 0; i < LanguageCount; i++)
             {
-                for (int i = 0; i < codes.Count; i++)
+                codes.Add(languages[i].Code);
+            }
+            int CodesCount = codes.Count;
+            for (int Index = 0; Index < CodesCount; Index++)
+            {
+                if (codes[Index] == selected)
                 {
-                    if (codes[i] == selected)
-                    {
-                        BasisSettingsDefaults.Language.SetValue(codes[i]);
-                        BasisLocalization.SetLanguage(codes[i]);
-                        BasisMainMenu.Close();
-                        OpenToTab("settings.tab.general");
-                        return;
-                    }
+                   // BasisSettingsDefaults.Language.SetValue(codes[Index]);
+                    BasisLocalization.LoadLanguage(codes[Index]);
+                    BasisMainMenu.Close();
+                    OpenToTab("settings.tab.general");
+                    return;
                 }
-            };
-
-            PanelSectionToggleHelpers.FinalizeBoxedSectionFromIndex(languageToggle, container, languageStart, false,
-                _ => tabDescriptor?.ForceRebuild());
+            }
+            BasisDebug.LogError($"Unable To Set that langauge! Missing Code Index ID {selected}");
         }
 
         private static void BuildNetworkingSection(RectTransform container, PanelElementDescriptor tabDescriptor = null)

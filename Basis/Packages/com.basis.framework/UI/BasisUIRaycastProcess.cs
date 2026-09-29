@@ -24,8 +24,8 @@ namespace Basis.Scripts.UI
         private static bool IsTriggerDown(BasisInput input, bool wasDown)
         {
             float trigger = input.CurrentInputState.Trigger;
-            float press = BasisSettingsDefaults.UIClickPressThreshold.RawValue;
-            float release = Mathf.Min(BasisSettingsDefaults.UIClickReleaseThreshold.RawValue, press);
+            float press = BasisTriggerPressure.UIClickPressThreshold;
+            float release = Mathf.Min(BasisTriggerPressure.UIClickReleaseThreshold, press);
             return wasDown ? trigger >= release : trigger >= press;
         }
 

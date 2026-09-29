@@ -140,20 +140,20 @@ public sealed partial class BasisGlobalIlluminationPass
         /// traceable geometry. The screen space backend has no such condition - the depth buffer always
         /// exists - so in that mode this is only the material check.
         /// </summary>
-        public bool CanRender(BasisGlobalIlluminationSettings settings, Camera camera, int frame)
+        public bool CanRender(BasisGlobalIlluminationSettings settings, Camera camera,Vector3 Position, int frame)
         {
             if (material == null || rayStagesMaterial == null) { return false; }
             if (!settings.SpecularActive()) { return false; }
             if (ScreenSpaceReflections(settings, rayTracingAvailable)) { return owner != null; }
-            return CanRenderRayTraced(settings, camera, frame);
+            return CanRenderRayTraced(settings, camera, Position, frame);
         }
 
-        private bool CanRenderRayTraced(BasisGlobalIlluminationSettings settings, Camera camera, int frame)
+        private bool CanRenderRayTraced(BasisGlobalIlluminationSettings settings, Camera camera,Vector3 Position, int frame)
         {
             if (!rayTracingAvailable) { return false; }
             BasisGlobalIlluminationRayTracer tracer = BasisGlobalIlluminationRayTracer.GetOrCreate(rayTraceShader, rayTraceCompute, rayComputeFallback);
             if (tracer == null) { return false; }
-            return tracer.Refresh(settings.ResolvedSceneSettings(), settings.ResolvedLightSettings(), camera, frame, Time.unscaledTime);
+            return tracer.Refresh(settings.ResolvedSceneSettings(), settings.ResolvedLightSettings(), camera, Position, frame, Time.unscaledTime);
         }
 
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -169,17 +169,22 @@ public sealed partial class BasisGlobalIlluminationPass
 
             Camera camera = cameraData.camera;
             int frame = Time.renderedFrameCount;
+            int framecount = Time.frameCount;
             bool screenSpace = ScreenSpaceReflections(settings, rayTracingAvailable);
             if (screenSpace && owner == null) { return; }
-            if (!screenSpace && !CanRenderRayTraced(settings, camera, frame)) { return; }
+            if (!screenSpace && !CanRenderRayTraced(settings, camera, camera.transform.position, frame)) { return; }
 
-            if (invocationFrame != Time.frameCount) { invocationFrame = Time.frameCount; invocationCount = 0; }
+            if (invocationFrame != framecount)
+            {
+                invocationFrame = framecount;
+                invocationCount = 0;
+            }
+
             invocationCount++;
 
             // The keyword follows the handle, not the setting, exactly as the diffuse pass's does: a
             // camera type URP renders no normals prepass for still resolves to an invalid handle.
-            TextureHandle normals = screenSpace && UseNormalsTexture && resourceData.cameraNormalsTexture.IsValid()
-                ? resourceData.cameraNormalsTexture : TextureHandle.nullHandle;
+            TextureHandle normals = screenSpace && UseNormalsTexture && resourceData.cameraNormalsTexture.IsValid() ? resourceData.cameraNormalsTexture : TextureHandle.nullHandle;
 
             RenderTextureDescriptor descriptor = cameraData.cameraTargetDescriptor;
             int divisor = settings.ResolvedResolutionDivisor();
@@ -239,13 +244,11 @@ public sealed partial class BasisGlobalIlluminationPass
 
             if (screenSpace)
             {
-                RecordScreenSpaceReflection(renderGraph, resourceData, settings, history, traced, normals,
-                    tracedWidth, tracedHeight, divisor, descriptor, frame, sky, out tracedDepth, out hitDistance);
+                RecordScreenSpaceReflection(renderGraph, resourceData, settings, history, traced, normals,tracedWidth, tracedHeight, divisor, descriptor, frame, sky, out tracedDepth, out hitDistance);
             }
             else
             {
-                RecordRayTracedReflection(renderGraph, resourceData, cameraData, settings, camera, traced,
-                    tracedWidth, tracedHeight, divisor, descriptor, frame, sky);
+                RecordRayTracedReflection(renderGraph, resourceData, cameraData, settings, camera, traced,tracedWidth, tracedHeight, divisor, descriptor, frame, sky);
             }
 
             TextureHandle denoiseSource = traced;

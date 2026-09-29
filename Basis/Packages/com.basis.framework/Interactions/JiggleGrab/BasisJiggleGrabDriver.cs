@@ -24,8 +24,6 @@ namespace Basis.Scripts.BasisSdk.Interactions
         // How far a hand may point to grab a chain it is not touching.
         public const float GrabRayLength = 3f;
         // Analog triggers rarely report a clean 1, so the press is a threshold rather than equality.
-        public const float GrabTriggerThreshold = 0.5f;
-        // Ceiling on how much a larger target avatar may widen the pick radius.
         public const float MaxTargetScaleRadiusMultiplier = 2f;
         // A chain this much further than the pick radius still counts as being against the hand, and
         // is taken in preference to anything the hand merely points at.
@@ -1325,7 +1323,7 @@ namespace Basis.Scripts.BasisSdk.Interactions
             {
                 return false;
             }
-            bool triggerHeld = input.CurrentInputState.Trigger >= GrabTriggerThreshold;
+            bool triggerHeld = input.CurrentInputState.Trigger >= BasisTriggerPressure.TriggerDownJiggleThreshold;
             if (input.TryGetRole(out BasisBoneTrackedRole role) && role == BasisBoneTrackedRole.CenterEye)
             {
                 return triggerHeld;

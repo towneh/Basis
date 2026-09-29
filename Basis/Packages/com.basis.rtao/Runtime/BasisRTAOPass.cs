@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -183,7 +183,7 @@ namespace Basis.Rendering.RTAO
                 return;
 
             lastReportedBackend = resolved;
-
+            /*
             switch (resolved)
             {
                 case BasisRTAOBackend.Hardware:
@@ -203,6 +203,7 @@ namespace Basis.Rendering.RTAO
                     Debug.LogWarning("[BasisRTAO] No usable backend; ambient occlusion is not running.");
                     break;
             }
+            */
         }
 
         public bool EnsureReady()

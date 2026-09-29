@@ -67,15 +67,23 @@ public readonly struct BasisGlobalIlluminationRayViewers
     /// </summary>
     public float DistanceSquared(Vector3 point)
     {
-        if (positions == null) { return (point - single).sqrMagnitude; }
-
-        float nearest = float.MaxValue;
-        for (int index = 0; index < positions.Count; index++)
+        if (positions != null)
         {
-            float distance = (point - positions[index]).sqrMagnitude;
-            if (distance < nearest) { nearest = distance; }
+            float nearest = float.MaxValue;
+            int count = positions.Count;
+            for (int index = 0; index < count; index++)
+            {
+                float distance = (point - positions[index]).sqrMagnitude;
+                if (distance >= nearest)
+                {
+                    continue;
+                }
+                nearest = distance;
+            }
+            return nearest;
         }
-        return nearest;
+
+        return (point - single).sqrMagnitude;
     }
 }
 
@@ -122,10 +130,12 @@ public sealed class BasisGlobalIlluminationRayViewerSet
     public int Count => viewers.Count;
 
     /// <summary>Records that this camera is drawing the effect, and where it is drawing it from.</summary>
-    public void Submit(Camera camera, int frame)
+    public void Submit(Camera camera,Vector3 Position, int frame)
     {
-        if (camera == null) { return; }
-        viewers[camera.GetEntityId()] = new Viewer(camera, camera.transform.position, frame);
+        if (camera != null)
+        {
+            viewers[camera.GetEntityId()] = new Viewer(camera, Position, frame);
+        }
     }
 
     /// <summary>
@@ -137,7 +147,10 @@ public sealed class BasisGlobalIlluminationRayViewerSet
     {
         pruneScratch.Clear();
         resolved.Clear();
-        if (camera != null) { resolved.Add(camera.transform.position); }
+        if (camera != null)
+        {
+            resolved.Add(camera.transform.position);
+        }
 
         EntityId current = camera != null ? camera.GetEntityId() : default;
         foreach (KeyValuePair<EntityId, Viewer> entry in viewers)

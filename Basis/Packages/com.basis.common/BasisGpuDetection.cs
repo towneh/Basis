@@ -141,7 +141,7 @@ namespace Basis.Scripts.Common
             }
 
             summary = $"{(deviceName.Length == 0 ? "unnamed GPU" : deviceName)} [{vendor}, id 0x{vendorId:X4}, {api}, shader level {shaderLevel}, {graphicsMemory} MB] on {facts.ProcessorType} -> {(mobileGpu ? "mobile" : "desktop")} class{(forced ? " (forced)" : string.Empty)}";
-            BasisDebug.Log($"Graphics hardware: {summary}", BasisDebug.LogTag.Rendering);
+           // BasisDebug.Log($"Graphics hardware: {summary}", BasisDebug.LogTag.Rendering);
         }
 
         /// <summary>

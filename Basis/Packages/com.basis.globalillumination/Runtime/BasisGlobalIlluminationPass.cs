@@ -309,6 +309,7 @@ public sealed partial class BasisGlobalIlluminationPass : ScriptableRenderPass
         invocationCount++;
 
         Camera camera = cameraData.camera;
+        Vector3 CameraPosition = camera.transform.position;
         RenderTextureDescriptor descriptor = cameraData.cameraTargetDescriptor;
         int divisor = settings.ResolvedResolutionDivisor();
         int tracedWidth = Mathf.Max(1, descriptor.width / divisor);
@@ -356,7 +357,7 @@ public sealed partial class BasisGlobalIlluminationPass : ScriptableRenderPass
         // The ray traced mode replaces the screen space gather and nothing else: the temporal filter, the
         // bilateral blur and the composite downstream read the same traced texture either way. A GPU or a
         // scene that cannot serve the trace falls back to the screen space gather rather than to nothing.
-        bool rayTraced = settings.IsRayTraced() && PrepareRayTracing(settings, camera, frame);
+        bool rayTraced = settings.IsRayTraced() && PrepareRayTracing(settings, camera, CameraPosition, frame);
 
         // Both modes share the composite, so both get the lightmap receive mask - it only exists at all in
         // a scene that actually baked something. The keyword is set after the pass is recorded, from the
@@ -562,7 +563,7 @@ public sealed partial class BasisGlobalIlluminationPass : ScriptableRenderPass
     /// run - no ray tracing on this GPU, the context failed to come up, or the scene holds no traceable
     /// geometry yet - and the caller then renders the screen space gather instead.
     /// </summary>
-    private bool PrepareRayTracing(BasisGlobalIlluminationSettings settings, Camera camera, int frame)
+    private bool PrepareRayTracing(BasisGlobalIlluminationSettings settings, Camera camera,Vector3 Position, int frame)
     {
         if (camera == null) { return false; }
         if (!RayTracingAvailable || rayStagesMaterial == null)
@@ -579,7 +580,7 @@ public sealed partial class BasisGlobalIlluminationPass : ScriptableRenderPass
         }
 
         loggedRayTracingFallback = false;
-        return tracer.Refresh(settings.ResolvedSceneSettings(), settings.ResolvedLightSettings(), camera, frame, Time.unscaledTime);
+        return tracer.Refresh(settings.ResolvedSceneSettings(), settings.ResolvedLightSettings(), camera, Position, frame, Time.unscaledTime);
     }
 
     /// <summary>Why the ray traced mode cannot run, phrased as something a player or an author can act on.</summary>

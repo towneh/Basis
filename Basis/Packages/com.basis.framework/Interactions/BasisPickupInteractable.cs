@@ -1403,7 +1403,7 @@ namespace Basis.Scripts.BasisSdk.Interactions
         {
             return input.TryGetRole(out var role) &&
                 role == BasisBoneTrackedRole.CenterEye &&
-                input.CurrentInputState.SecondaryTrigger > 0.8f;
+                input.CurrentInputState.SecondaryTrigger > BasisTriggerPressure.IsHoldDropTriggeredThreshold;
         }
 
         private IEnumerator MoveAfterDelayCoroutine() {

@@ -92,16 +92,15 @@ public sealed class BasisGlobalIlluminationRayTracer : IDisposable
     /// registers itself here before the refresh it triggers, so the worst case for any camera after that
     /// first frame is nothing at all.
     /// </summary>
-    public void SubmitViewer(Camera camera, int frame)
+    public void SubmitViewer(Camera camera,Vector3 Position, int frame)
     {
-        viewers.Submit(camera, frame);
+        viewers.Submit(camera, Position, frame);
     }
 
     /// <summary>Refreshes the scene once per frame no matter how many cameras ask for it.</summary>
-    public bool Refresh(in BasisGlobalIlluminationRaySceneSettings sceneSettings, in BasisGlobalIlluminationRayLightSettings lightSettings,
-        Camera camera, int frame, float time)
+    public bool Refresh(in BasisGlobalIlluminationRaySceneSettings sceneSettings, in BasisGlobalIlluminationRayLightSettings lightSettings,Camera camera,Vector3 Position, int frame, float time)
     {
-        SubmitViewer(camera, frame);
+        SubmitViewer(camera, Position, frame);
         if (frame == lastRefreshFrame) { return Ready; }
         lastRefreshFrame = frame;
 

@@ -25,13 +25,13 @@ namespace Basis.Tests.Camera
         [TearDown]
         public void TearDown()
         {
-            BasisLocalization.SetLanguage(_originalLanguage);
+            BasisLocalization.LoadLanguage(_originalLanguage);
         }
 
         [Test]
         public void StaticTitle_ResolvesThroughLocalizationRatherThanBeingAFrozenLiteral()
         {
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             Assert.That(BasisHandHeldCameraPanelProvider.StaticTitle,
                 Is.EqualTo(BasisLocalization.Get(BasisHandHeldCameraPanelProvider.StaticTitleKey)));
         }
@@ -39,10 +39,10 @@ namespace Basis.Tests.Camera
         [Test]
         public void StaticTitle_ChangesLiveWhenTheLanguageChanges()
         {
-            BasisLocalization.SetLanguage("en");
+            BasisLocalization.LoadLanguage("en");
             string english = BasisHandHeldCameraPanelProvider.StaticTitle;
 
-            BasisLocalization.SetLanguage("ja");
+            BasisLocalization.LoadLanguage("ja");
             string japanese = BasisHandHeldCameraPanelProvider.StaticTitle;
 
             Assert.That(japanese, Is.Not.EqualTo(english),

@@ -30,11 +30,6 @@ public class BasisDepthOfFieldInteractorVR : MonoBehaviour
     public RectTransform previewRect;
 
     /// <summary>
-    /// Trigger threshold required to count as an interaction (0..1).
-    /// </summary>
-    public float interactThreshold = 0.9f;
-
-    /// <summary>
     /// Execution order priority when subscribing to <see cref="BasisLocalPlayer.AfterSimulateOnLate"/>.
     /// </summary>
     private const int UpdateOrder = 210; // After PlayerInteract (201)
@@ -100,7 +95,7 @@ public class BasisDepthOfFieldInteractorVR : MonoBehaviour
             if (input == null) continue;
             if (IsDesktopCenterEye(input)) continue;
 
-            bool nowDown = input.CurrentInputState.Trigger >= interactThreshold;
+            bool nowDown = input.CurrentInputState.Trigger >= BasisTriggerPressure.DepthOfFieldThreshold;
             triggerPrevDown.TryGetValue(input, out bool wasDown);
             triggerPrevDown[input] = nowDown;
 

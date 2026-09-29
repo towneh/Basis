@@ -5,7 +5,6 @@ using Basis.Scripts.Common;
 using Basis.Scripts.Device_Management;
 using Basis.Scripts.Device_Management.Devices;
 using Basis.Scripts.TransformBinders.BoneControl;
-using Basis.Scripts.BasisCharacterController;
 using UnityEngine;
 
 namespace Basis.Scripts.Drivers
@@ -51,7 +50,6 @@ namespace Basis.Scripts.Drivers
 
         private const float MinHeight = 0.1f;
         private const float MaxHeight = 5f;
-        private const float TriggerThreshold = 0.5f;
 
         private static bool _grabbing;
         private static bool _capLeft;
@@ -752,8 +750,8 @@ namespace Basis.Scripts.Drivers
         {
             switch (inputMode)
             {
-                case InputTrigger: return state.Trigger >= TriggerThreshold;
-                case InputSecondaryTrigger: return state.SecondaryTrigger >= TriggerThreshold;
+                case InputTrigger: return state.Trigger >= BasisTriggerPressure.PlaySpaceTriggerThreshold;
+                case InputSecondaryTrigger: return state.SecondaryTrigger >= BasisTriggerPressure.PlaySpaceTriggerThreshold;
                 case InputPrimary: return state.PrimaryButtonGetState;
                 case InputSecondary: return state.SecondaryButtonGetState;
                 case InputJoystick: return state.Primary2DAxisClick;

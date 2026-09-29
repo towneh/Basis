@@ -177,6 +177,7 @@ namespace Basis.Scripts.BasisSdk.Interactions
             // and when it is being removed (e.g., OpenXR eye tracking detected late).
             RemoveInput(input.UniqueDeviceIdentifier);
         }
+        // Ceiling on how much a larger target avatar may widen the pick radius.
 
         // Simulate after IK update
         [BurstCompile]
@@ -209,7 +210,7 @@ namespace Basis.Scripts.BasisSdk.Interactions
                 bool gripPressedAgain = gripDown && !interactInput.wasGripDown;
                 interactInput.wasGripDown = gripDown;
 
-                bool triggerDown = interactInput.input.CurrentInputState.Trigger >= BasisJiggleGrabDriver.GrabTriggerThreshold;
+                bool triggerDown = interactInput.input.CurrentInputState.Trigger >= BasisTriggerPressure.TriggerDownThreshold;
                 bool triggerPressedAgain = triggerDown && !interactInput.wasTriggerDown;
                 interactInput.wasTriggerDown = triggerDown;
                 bool desktopEye = IsDesktopCenterEye(interactInput.input);

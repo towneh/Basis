@@ -256,16 +256,13 @@ namespace Basis.Scripts.Device_Management
             try
             {
                 BasisSettingsSystem.Initialize();
-                // Localization must initialize before BasisSettingsDefaults so that
-                // auto-detection can see an empty settings dict on first run — any
-                // earlier binding constructor would write "en" as a default and
-                // defeat the HasSaveData("language") check.
-                Basis.BasisUI.BasisLocalization.Initialize();
-                Basis.BasisUI.BasisTMPFontFallbacks.RefreshJapanesePriority();
+
                 using (BasisSettingsSystem.Batch())
                 {
                     BasisSettingsDefaults.LoadAll();
                 }
+                Basis.BasisUI.BasisLocalization.Initialize();
+                Basis.BasisUI.BasisTMPFontFallbacks.RefreshJapanesePriority();
                 // First thing after the settings land: a renderer swap can only happen by
                 // relaunching, so it has to be decided before anything is built to throw away.
                 Basis.Scripts.Rendering.BasisGraphicsApiSelection.ApplyStartupSetting();
@@ -872,7 +869,7 @@ namespace Basis.Scripts.Device_Management
             var inst = Instance;
             if (inst == null)
             {
-                BasisDebug.LogError("Missing Device Manager", BasisDebug.LogTag.Device);
+             //   BasisDebug.LogError("Missing Device Manager", BasisDebug.LogTag.Device);
                 return;
             }
 

@@ -90,7 +90,7 @@ namespace Basis.Scripts.BasisSdk.Interactions
         {
             BasisInputState state = input.CurrentInputState;
             if (state.GripButton) return true;
-            if (state.Trigger >= 0.9f) return true;
+            if (state.Trigger >= BasisTriggerPressure.SnapInteractableThreshold) return true;
             return false;
         }
 

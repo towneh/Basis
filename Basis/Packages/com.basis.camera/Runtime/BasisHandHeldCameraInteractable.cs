@@ -46,7 +46,7 @@ public abstract partial class BasisHandHeldCameraInteractable : BasisPickupInter
     /// <summary>Position smoothing factor while flying.</summary>
     public float flyMovementSmoothing = 12f;
 
-    public const float MinFlySpeed = 0.25f, MaxFlySpeed = 20f, FlyPitchTriggerThreshold = 0.5f;
+    public const float MinFlySpeed = 0.25f, MaxFlySpeed = 20f;
 
     public void SetFlySpeed(float metresPerSecond) => flySpeed = Mathf.Clamp(metresPerSecond, MinFlySpeed, MaxFlySpeed);
     public const float MinFlyClimbSpeed = 0.25f, MaxFlyClimbSpeed = 8f, MinFlyFastMultiplier = 1f, MaxFlyFastMultiplier = 10f;
@@ -2082,7 +2082,7 @@ public abstract partial class BasisHandHeldCameraInteractable : BasisPickupInter
             if (planar.magnitude > 1f)
                 planar.Normalize();
 
-            float climb = TryGetFlyTurnInput(out BasisInputState turnState) && turnState.Trigger < FlyPitchTriggerThreshold
+            float climb = TryGetFlyTurnInput(out BasisInputState turnState) && turnState.Trigger <= BasisTriggerPressure.FlyPitchTriggerThreshold
                 ? turnState.Primary2DAxisDeadZoned.y
                 : 0f;
 
@@ -2274,7 +2274,7 @@ public abstract partial class BasisHandHeldCameraInteractable : BasisPickupInter
             else if (TryGetFlyTurnInput(out BasisInputState turnState))
             {
                 Vector2 stick = turnState.Primary2DAxisDeadZoned;
-                float pitchInput = turnState.Trigger >= FlyPitchTriggerThreshold ? stick.y : 0f;
+                float pitchInput = turnState.Trigger >= BasisTriggerPressure.FlyPitchTriggerThreshold ? stick.y : 0f;
                 if (Mathf.Abs(stick.x) >= 0.01f || Mathf.Abs(pitchInput) >= 0.01f)
                 {
                     stickFraction += new Vector2(stick.x, pitchInput);

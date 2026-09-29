@@ -1,5 +1,6 @@
-using System.Collections.Generic;
 using NUnit.Framework;
+using System.Collections.Generic;
+using System.Security.Cryptography.Xml;
 using UnityEngine;
 
 namespace Basis.Tests.GlobalIllumination
@@ -181,8 +182,8 @@ namespace Basis.Tests.GlobalIllumination
             Camera player = CameraAt(Player);
             Camera handheld = CameraAt(FlownCamera);
 
-            set.Submit(player, 0);
-            set.Submit(handheld, 0);
+            set.Submit(player, player.transform.position, 0);
+            set.Submit(handheld,handheld.transform.position, 0);
 
             BasisGlobalIlluminationRayViewers viewers = set.Resolve(player, 0);
             Assert.AreEqual(2, viewers.Count, "the handheld camera was not in the set the structure is built for");
@@ -194,7 +195,7 @@ namespace Basis.Tests.GlobalIllumination
         {
             BasisGlobalIlluminationRayViewerSet set = new BasisGlobalIlluminationRayViewerSet();
             Camera player = CameraAt(Player);
-            set.Submit(player, 0);
+            set.Submit(player, player.transform.position, 0);
             Assert.AreEqual(1, set.Resolve(player, 0).Count);
         }
 
@@ -207,8 +208,8 @@ namespace Basis.Tests.GlobalIllumination
             Camera player = CameraAt(Player);
             Camera handheld = CameraAt(FlownCamera);
 
-            set.Submit(handheld, 0);
-            set.Submit(player, 1);
+            set.Submit(handheld, handheld.transform.position, 0);
+            set.Submit(player, player.transform.position, 1);
             Assert.AreEqual(2, set.Resolve(player, 1).Count,
                 "a camera that rendered last frame was dropped, so the structure is rebuilt without it every frame");
         }
@@ -221,10 +222,10 @@ namespace Basis.Tests.GlobalIllumination
             Camera handheld = CameraAt(FlownCamera);
 
             // 10Hz on a 90Hz headset: one render in nine.
-            set.Submit(handheld, 0);
+            set.Submit(handheld, handheld.transform.position, 0);
             for (int frame = 1; frame < 9; frame++)
             {
-                set.Submit(player, frame);
+                set.Submit(player, player.transform.position, frame);
                 Assert.AreEqual(2, set.Resolve(player, frame).Count,
                     "the handheld camera fell out of the set between its own renders at frame " + frame +
                     ", so what it can see enters and leaves the trace at its render rate");
@@ -238,9 +239,9 @@ namespace Basis.Tests.GlobalIllumination
             Camera player = CameraAt(Player);
             Camera handheld = CameraAt(FlownCamera);
 
-            set.Submit(handheld, 0);
+            set.Submit(handheld, handheld.transform.position, 0);
             int frame = BasisGlobalIlluminationRayViewerSet.MaxAge + 1;
-            set.Submit(player, frame);
+            set.Submit(player, player.transform.position, frame);
             Assert.AreEqual(1, set.Resolve(player, frame).Count,
                 "a camera that stopped rendering kept the structure paying for what it used to see");
             Assert.AreEqual(1, set.Count, "the stale entry was not pruned");
@@ -253,8 +254,8 @@ namespace Basis.Tests.GlobalIllumination
             Camera player = CameraAt(Player);
             Camera handheld = CameraAt(FlownCamera);
 
-            set.Submit(handheld, 0);
-            set.Submit(player, 0);
+            set.Submit(handheld, handheld.transform.position, 0);
+            set.Submit(player, player.transform.position, 0);
             Object.DestroyImmediate(handheld.gameObject);
 
             Assert.AreEqual(1, set.Resolve(player, 1).Count,
