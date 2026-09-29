@@ -44,7 +44,6 @@ to `Linux/x86_64/`. Each needs librist staged first (see
 | `tools/stage-android-plugin.ps1` | Builds the Android plugin and copies it into the package |
 | `tools/build-librist.ps1`, `build-librist.sh`, `build-librist-android.sh` | Build the librist library for Windows, Linux and Android |
 | `tools/gen-*.py` | Generate the test fixtures in `fixtures/` |
-| `tools/live-ts-server.py` | Serve a fixture as a live MPEG-TS stream, for tests by hand |
 
 [`TESTING.md`](TESTING.md) covers prerequisites and testing, and
 [`DIAGNOSTICS.md`](DIAGNOSTICS.md) the captures. Fuzz targets are in `fuzz/`.

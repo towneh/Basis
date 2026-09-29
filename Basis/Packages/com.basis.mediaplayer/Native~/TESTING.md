@@ -158,7 +158,8 @@ reviewer which rows are still open.
 
 Some by-hand rows need a network source of a given kind: a live RTSP stream, a
 WHEP endpoint, a RIST sender, or files over HTTPS with byte ranges. Any source
-of that kind works. `tools/live-ts-server.py` serves live MPEG-TS locally,
+of that kind works. ffmpeg serves live MPEG-TS over HTTP (`ffmpeg -re -i
+<file.ts> -c copy -f mpegts -listen 1 http://127.0.0.1:<port>/live`),
 mediamtx serves RTSP, WHEP and HLS (Low-Latency by default, plain with
 `hlsVariant: mpegts`), and any static server with range requests serves
 files.
@@ -284,7 +285,7 @@ connection. Set **Liveness** to Live for those.
 | Headless playback, TS file | A local MPEG-TS file plays likewise, with the container sniffed and stream ids read from the programme map table. | `cargo run -p bm-probe -- play fixtures/h264-aac-640x360-30fps.ts --duration 5` | By hand |
 | Auto liveness costs one connection | A live URL on Auto liveness opens one connection, the live lane adopting the liveness probe's response as its stream. | `cargo test -p media-engine --test reconnect` | CI, Windows |
 | Headless playback, HTTP | A file served over local HTTP plays through media-io, with range requests and a pinned connection. | serve `fixtures/` locally, then `cargo run -p bm-probe -- play http://127.0.0.1:<port>/h264-aac-640x360-30fps.mp4 --duration 5 --allow-local` | By hand |
-| Headless playback, HTTP-TS live | A live HTTP TS stream given `--live` plays sequentially with per-read stall detection and the Bank in live lag mode. | `python tools/live-ts-server.py <file.ts> <duration_s> <port>`, then `cargo run -p bm-probe -- play http://127.0.0.1:<port>/live --live --allow-local --duration 12` | By hand |
+| Headless playback, HTTP-TS live | A live HTTP TS stream given `--live` plays sequentially with per-read stall detection and the Bank in live lag mode. | `ffmpeg -re -i fixtures/h264-aac-320x180-30s.ts -c copy -f mpegts -listen 1 http://127.0.0.1:<port>/live`, then `cargo run -p bm-probe -- play http://127.0.0.1:<port>/live --live --allow-local --duration 12` | By hand |
 | Live-source unit rows | The live source streams sequentially, re-reads its head cache, reports typed stall errors, cancels its connect, re-vets redirects and applies the address gate. | `cargo test -p media-io --test live_source` | CI |
 | On-demand source cancellation | Closing a session cancels an on-demand HTTP open or read against a quiet server within about 200 ms. | `cargo test -p media-io --test http_source` | CI |
 | One connection per sequential open | A 200 answer to the range probe becomes the stream; a quiet body gives a typed error within the read timeout. | `cargo test -p media-io --test http_source` | CI |
