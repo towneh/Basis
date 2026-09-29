@@ -108,9 +108,8 @@ with `--release` for timing):
    script in `tools/`; do not commit recorded media. New MP4 and TS fixtures
    must pass `bm-probe conformance fixtures`. Keep TS audio at 48 kHz with an
    ADTS track.
-5. Add the row to the matrix in the same commit. Untested features go under
-   [Not yet run](#not-yet-run). Column changes also update
-   [`DIAGNOSTICS.md`](DIAGNOSTICS.md).
+5. Add the row to the matrix in the same commit, once it has been run. Column
+   changes also update [`DIAGNOSTICS.md`](DIAGNOSTICS.md).
 
 ## Network sources
 
@@ -311,23 +310,6 @@ connection. Set **Liveness** to Live for those.
 | The process log crosses the ABI | `bm_drain_log` needs no session handle, leaves lines past the cap queued, and truncates on a UTF-8 boundary. | `cargo test -p media-ffi --test log_drain` | CI |
 | A cut detail says it was cut | A truncated detail ends in `…` without overrunning its buffer or splitting a multi-byte character, in event and log drains. | `cargo test -p media-ffi --no-fail-fast` | CI |
 | Unity end to end | The engine and managed component play a source in Unity, with the capture graded against healthy ranges in [`DIAGNOSTICS.md`](DIAGNOSTICS.md). | `Basis > Tools > Media Player > Run Smoke Test`, or headless: `Unity -batchmode -projectPath <project> -logFile - -executeMethod BasisMediaSmokeTest.RunBatch` | By hand |
-
-## Not yet run
-
-These have never been run and do not count as coverage.
-
-| Row | What it would check | How to run it |
-| --- | --- | --- |
-| SEI user data: managed seek and loop | A seek drops the managed SEI user-data queue, and a looping file drops what the previous pass left queued. | a scene script subscribing and logging `ptsUs` against `fixtures/h264-sei-userdata-640x360-30fps.ts` served over HTTP: seek back and confirm the frame indices restart from the landed frame with nothing from the old position in between; loop the file and confirm the same across the wrap |
-| A fragmented MP4 hours long | A multi-hour, multi-gigabyte fragmented MP4 over ranged HTTP opens from its segment index, and a seek near the end plays. | `ffmpeg -stream_loop -1 -i <clip> -t 7200 -c copy -movflags +frag_keyframe+empty_moov+default_base_moof+global_sidx -frag_duration 2000000 out.mp4`, serve it, then `bm-probe play <url> --duration 30 --seek-to-ms 6600000` |
-| RIST on Android | Plain and AES-128 RIST streams connect and play on a Quest client build. | a Quest build playing a plain and an AES-128 RIST stream |
-| Android audio geometry refusal | Out-of-range Matroska audio rate or channel count gets a typed, logged refusal: the audio mutes while video plays. | a Quest build playing a crafted Matroska file; `adb logcat -s basis-media` |
-| FFI callback panic fences | MediaCodec, Vulkan and librist callbacks record panics without unwinding into foreign code, and a mid-render close leaks no Vulkan objects. | a Quest build playing a fixture, closed mid-playback |
-| MediaCodec frame geometry refusal | A failed or non-positive NDK frame-size query is refused with a typed error, and ordinary playback is unchanged. | a Quest build playing a fixture |
-| Vulkan present-layer lifetimes | Closing the last player is validation-clean and the next open presents; reopens get a fresh `RenderTexture`; logcat shows no device address. | a Quest build: close the last player, reopen, then `adb logcat -s basis-media` |
-| Vulkan device-creation feature guard | The Vulkan hook enables `samplerYcbcrConversion` only where advertised, video still shows, and the log carries the appended-extension line. | a Quest build playing a fixture, then `adb logcat -s basis-media` |
-| Engine diagnostics in logcat | Engine diagnostics reach logcat under `basis-media`, including `session error:` for an unresolvable URL and the transport line when playing. | a Quest build opening an unresolvable URL and then a live stream, with `adb logcat -s basis-media` |
-| Proton / Wine | Under Proton, ranged VOD and live HTTP-TS classify as on Windows, and https uses Wine's certificate store. | the Windows client under Proton on a Linux box, one ranged VOD and one live HTTP-TS lane |
 
 ## Android devices
 

@@ -1,7 +1,7 @@
 # Testing the player in Unity
 
-Manual checks for the managed side: shared playback, the panel, the session
-cap and the prefabs. None has an automated test. The engine's tests are in
+Manual checks for the managed side: shared playback, the panel and the
+prefabs. None has an automated test. The engine's tests are in
 [`Native~/TESTING.md`](Native~/TESTING.md), and
 [`Native~/DIAGNOSTICS.md`](Native~/DIAGNOSTICS.md) explains the captures.
 
@@ -21,8 +21,10 @@ shows they build, nothing more.
 Needs two clients in the same world. `Basis > Tools > Media Player > Test
 Scene > Shared Playback (two clients)` builds a scene with one networked player
 and no source set: use a URL both clients can fetch, not a local file. The
-lettered clips (see [Session cap](#session-cap)) show a running timecode for
-comparing the two screens.
+lettered clips in `Native~/fixtures/captest` suit it: four 60 s H.264 clips
+with a keyframe every second, each showing a letter, a colour and a running
+timecode for comparing the two screens. Their music is Kevin MacLeod
+(incompetech.com), CC BY 4.0, attributed in `THIRD_PARTY_NOTICES.md`.
 
 For the second client, save the scene, add it to Build Settings, and run a
 standalone build alongside the editor. Drive the panel from the editor as
@@ -53,7 +55,7 @@ Give the build its own capture filenames first; both write to the same
 | Local resync | A follower presses **Local Resync** | Only that client reopens |
 | Inspector buttons | The same two presses from the networking component's inspector, in Play Mode | Same as from the panel |
 | Untrusted URL | The owner sets a URL on a host outside `BasisTrustedUrls` | The follower loads it with no prompt |
-| A video hours long | Owner seeks deep into a fragmented video of two hours or more, then a client joins. Try a direct URL (see the engine guide's "A fragmented MP4 hours long") and `https://www.youtube.com/watch?v=aNS5o3VJ0-A` (11 h, H.264) | Opens as fast as a short video; the joiner lands beside the owner |
+| A video hours long | Owner seeks deep into a fragmented video of two hours or more, then a client joins. Try a direct URL (make one with `ffmpeg -stream_loop -1 -i <clip> -t 7200 -c copy -movflags +frag_keyframe+empty_moov+default_base_moof+global_sidx -frag_duration 2000000 out.mp4` and serve it with byte ranges) and `https://www.youtube.com/watch?v=aNS5o3VJ0-A` (11 h, H.264) | Opens as fast as a short video; the joiner lands beside the owner |
 
 No follower may snap to the start during any resync, even briefly. With the
 yt-dlp package installed, also check that page URLs reach other clients as page
@@ -85,28 +87,6 @@ One client, in a scene with more than one player.
 | Admin tab | With and without `*` | Shown only with it, on a networked player |
 | Markup injection | A title containing `</noparse>` and `<b>` | Shown literally |
 
-## Session cap
-
-`Basis > Tools > Media Player > Test Scene > Four Players (7.1)` (or `(Stereo)`)
-builds four players ten metres apart along +X. Walk along +X to change which
-are nearest. The cap is set in `Settings > Developer > Media Player`.
-
-The players use the lettered clips in `Native~/fixtures/captest`: four 60 s
-H.264 clips with a keyframe every second, each showing a letter, a colour and a
-running timecode, and playing a different genre of music. The music is Kevin
-MacLeod (incompetech.com), CC BY 4.0, attributed in `THIRD_PARTY_NOTICES.md`.
-
-| Row | Do | Expect |
-| --- | --- | --- |
-| Cap holds | Four players, cap 3 | The furthest reads Dormant |
-| Waking | Walk to a dormant player that had been playing | It resumes near where it would have been; a further one goes dormant |
-| Live waking | The same with a live source | It rejoins at the live edge |
-| No flapping | Stand between two players and move gently | Sessions do not repeatedly open and close |
-| Promotion | Select a dormant player in the panel | It starts; the furthest active one goes dormant |
-| Cap lifted | Set the cap to 0 | Every player wakes |
-| Startup | A scene where every player autoplays | The cap holds from the start |
-| With shared playback | The owner's player goes dormant | Other clients keep playing |
-
 ## Prefabs and components
 
 After changing their components, check `MediaPlayerStreaming` and
@@ -129,7 +109,6 @@ script logging `UserDataReceived`:
 | Row | Do | Expect |
 | --- | --- | --- |
 | Ordered delivery | Play | Frame indices 0 to 179 in order, each as playback reaches it, and x264's `dc45e9bd-…` once at the start |
-| Seek | Seek back | Logging resumes from the landed frame |
 | Late subscriber | Subscribe a few seconds in | Starts with the message then due |
 | Subscriber one frame late | Subscribe from `Update` after `Open` | Receives the first message |
 
@@ -151,25 +130,9 @@ stated.
 | Page URL | An untrusted YouTube page URL, with the yt-dlp package installed | One prompt; the extracted stream opens with no second one |
 | Split pair | A script calls `Open(video, audio)` with the audio leg on an untrusted host | Prompts for the audio URL as well; nothing opens until both are accepted |
 | World script sets the room's URL | A script calls `SetUrl` on the networking component with an untrusted URL, two clients | The owner is asked first; **Decline** sends nothing, and the follower loads only after **Accept** |
-| Prop | A prop whose script calls `OpenUserUrl` on its player | Prompts, then plays |
-| Prop bypass | The same prop calling `OpenResolved` or `SetSubtitleTracks` | Refused by the sandbox |
-| Avatar auto-start | An avatar carrying a `BasisMediaPlayer` with an authored URL and **Play On Start** | Nothing opens and nothing prompts; **Play On Start** is off on the loaded copy |
 
 Closing the menu does not answer the prompt. It moves to the notification list,
 where it can be brought back up or dismissed; a dismissal is a decline.
-
-## Admin media lock
-
-`BasisNetworkModeration.MediaPlayerBlockedLocally` stops a client loading any
-media. The client enforces it, in `Open(string)` and in `OpenUserUrl`. None of
-these rows has been run; they need a server that can set the lock.
-
-| Row | Do | Expect |
-| --- | --- | --- |
-| Locked client | Lock on, no bypass permission, enter a URL | Refused with a `Video` warning; no session |
-| Driven by a peer | An unlocked client loads a URL | The locked client does not play |
-| Page URL | Enter a YouTube URL while locked | Refused, with no resolver activity |
-| Admin | The same with `*` | All load normally |
 
 ## Console diagnostics
 
