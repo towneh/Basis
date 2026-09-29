@@ -92,6 +92,7 @@ One client, in a scene with more than one player.
 | Long pause | Pause a minute, then play, on a video and an audio-only file | Resumes with no error |
 | Live stream | Open one | The seek bar hides |
 | MPEG-TS file | Open an on-demand `.ts` or `.m2ts` over HTTPS, not through HLS | Plays from the start. The duration reads 0 and the seek bar hides |
+| WAV file | With the yt-dlp package installed, open a 7.1 `.wav` over HTTPS on the multi-channel prefab | Opens straight away with no yt-dlp lines in the Console, and all eight outputs carry sound |
 | Captions | Toggle captions, switch player | The setting applies to every player |
 | Subtitles | A source with subtitle files | The language row shows only with captions on |
 | Status | Watch a load, then open a URL that fails (a host that does not exist) | Connecting, Buffering, Playing, with the resolution. A failure shows its reason in red, not only a code |

@@ -146,7 +146,7 @@ public static class BasisMediaUrlRouter
         ".ts", ".m2ts", ".mts",
         ".m3u8",
         ".mkv", ".webm",
-        ".opus", ".mp3", ".flac", ".aac",
+        ".opus", ".mp3", ".flac", ".aac", ".wav",
     };
 
     /// <summary>
