@@ -3,7 +3,8 @@
 //!
 //! Each submitted AU holds whole FLAC frames, normally one (Matroska
 //! stores frames; the raw-file demuxer emits whole frames), decoded
-//! synchronously into a small output queue. FLAC has no codec latency, so drain is a no-op.
+//! synchronously into a small output queue. With no codec latency, drain
+//! is a no-op.
 
 use std::collections::VecDeque;
 use std::io::Cursor;

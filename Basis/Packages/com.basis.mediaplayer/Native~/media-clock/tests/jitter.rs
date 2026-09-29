@@ -126,7 +126,7 @@ fn run_pattern(
 
 /// Smoothed ladder on the Quest trace: once settled, the jitter moves the
 /// clock (and every frame's due time) by under 3 ms, less than half a
-/// 72 Hz vsync (6.9 ms), so presentation holds its cadence.
+/// 72 Hz vsync (6.9 ms). Presentation holds its cadence.
 #[test]
 fn smoothing_holds_due_times_through_quest_callback_jitter() {
     let mut c = clock(true);

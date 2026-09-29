@@ -136,8 +136,8 @@ public static class BasisMediaUrlRouter
         return false;
     }
 
-    // Containers the engine demuxes from a plain byte stream. No .mpd: there is no
-    // DASH demuxer, so a raw manifest goes through a resolver. .opus but not .ogg:
+    // Containers the engine demuxes from a plain byte stream. No .mpd: with no DASH
+    // demuxer, a raw manifest goes through a resolver. .opus but not .ogg:
     // .opus is Opus by convention, while .ogg is a generic container that may carry
     // codecs the engine does not decode.
     private static readonly string[] DirectExtensions =

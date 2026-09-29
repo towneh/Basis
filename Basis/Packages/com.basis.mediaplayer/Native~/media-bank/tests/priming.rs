@@ -109,8 +109,8 @@ fn priming_cap_is_a_moving_one_x_line() {
 }
 
 /// The presentation signal fixes the schedule presentation-relative at
-/// the point release has reached, so release carries straight on at 1x
-/// and the bank's lag is what is left unreleased: near zero on a join that
+/// the point release has reached. Release carries straight on at 1x, and
+/// the bank's lag is what is left unreleased: near zero on a join that
 /// released everything it took.
 #[test]
 fn presentation_anchor_continues_the_schedule_without_a_pause() {

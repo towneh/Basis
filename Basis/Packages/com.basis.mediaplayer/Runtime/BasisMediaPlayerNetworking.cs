@@ -1087,12 +1087,12 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
                     return;
                 }
 
-                // Resolved CDN URLs are per-client and expiring, so a page URL
+                // Resolved CDN URLs are per-client and expiring: a page URL
                 // (YouTube/Twitch/…) goes through the router and this client resolves
-                // it itself. Both that and the engine's own open are asynchronous, and
-                // the session starts playing as soon as it is up, so the owner's
-                // position/pause snapshot is stashed and applied once the session leaves
-                // Opening (aged by the elapsed time), after which the heartbeat refines it.
+                // it itself. That and the engine's own open are asynchronous, and the
+                // session starts playing as soon as it is up. The owner's position/pause
+                // snapshot is stashed and applied once the session leaves Opening (aged
+                // by the elapsed time); the heartbeat refines it after that.
                 pendingRemoteState = state;
                 pendingRemotePositionTicks = positionTicks;
                 pendingRemoteStashedAt = Time.realtimeSinceStartup;
@@ -1146,9 +1146,9 @@ public sealed class BasisMediaPlayerNetworking : BasisNetworkBehaviour, IBasisMe
 
         BmState state = mediaPlayer.State;
         bool loadStarted = mediaPlayer.LoadGeneration != pendingRemoteLoadGeneration;
-        // Buffering is not settling: it is the window before the first frame is shown and the
-        // clock starts, so a seek and pause sent then take effect before anything at 0 is
-        // seen or heard. The engine holds the pause across the seek.
+        // Buffering is left out of `settling`. A seek and pause sent before the first frame
+        // shows and the clock starts take effect before anything at 0 is seen or heard, and
+        // the engine holds the pause across the seek.
         bool settling = state == BmState.Idle || state == BmState.Opening;
         // A resolve that fails reports Error without ever opening, and that releases the
         // stash too.

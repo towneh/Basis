@@ -471,10 +471,9 @@ impl Bank {
     /// hold-lift on a priming join, so the arrived span is the depth the
     /// viewer joins with. An explicitly configured depth therefore holds
     /// for lag plus cushion, or the join would silently shed the cushion.
-    /// Auto holds to the estimator's lag only, so it joins fast and grows on
-    /// evidence: a cold Auto target sits a hair above zero, and adding the
-    /// cushion would cost every Auto live join about 500 ms. A zero target
-    /// lifts immediately.
+    /// Auto holds to the estimator's lag only. A cold Auto target sits a
+    /// hair above zero, and adding the cushion would cost every Auto live
+    /// join about 500 ms. A zero target lifts immediately.
     fn hold_target(&self) -> MediaTime {
         let target = self.target_lag();
         if self.priming()
@@ -636,11 +635,11 @@ impl Bank {
                 self.stall_total += shift;
             }
             // Media arriving ahead of the schedule (the rest of a join's
-            // opening burst) deepens the bank with no anchor shift, so `lag`
+            // opening burst) deepens the bank with no anchor shift. `lag`
             // follows the lead track's banked span upwards, less the
             // cushion: within the cushion a high span is arrival jitter,
             // and tracking it would ratchet the schedule earlier with each
-            // early burst. Downwards `lag` is left alone, so a delivery
+            // early burst. Downwards `lag` is left alone, and a delivery
             // stall reads to the estimator as a delay.
             let surplus = (self.lead_banked() - self.cfg.decoder_cushion).max(MediaTime::ZERO);
             self.lag = self.lag.max(surplus).min(self.cfg.lag_cap);
@@ -883,9 +882,9 @@ impl Bank {
     }
 
     /// The engine's presentation signal, ending a priming join: the first
-    /// frame is reaching the viewer at `wall`, so fix the 1x schedule
+    /// frame is reaching the viewer at `wall`. The 1x schedule is fixed
     /// presentation-relative, phased at the point the lead track's release
-    /// has reached, so the schedule resumes 1x without pausing.
+    /// has reached, and resumes without pausing.
     /// Released-ahead media is in-flight depth held downstream; what the
     /// lead track still has banked is the lag. A later anchor would pause
     /// the schedule, and since one anchor governs every track it would

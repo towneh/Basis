@@ -91,7 +91,8 @@ public sealed class BasisMediaPlayerAudio : MonoBehaviour, IBasisMediaTickConsum
     /// <summary>
     /// End-to-end audio output latency (µs): the delay between a sample being
     /// pulled from the ring and leaving the speaker. The tap delivers audio per
-    /// DSP block, so it is the DSP output buffer plus 20 ms of headroom.
+    /// DSP block, and the estimate is the DSP output buffer plus 20 ms of
+    /// headroom.
     ///
     /// Cached because it's read per frame: the figure only changes with the DSP
     /// configuration, and is recomputed in OnEnable, on an output rebuild and

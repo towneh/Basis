@@ -323,8 +323,8 @@ pub(crate) const NO_GENERATION: u64 = u64::MAX;
 /// gate. The clock's start cannot answer that: when audio starts the clock,
 /// the video thread never reaches its clock-start branch.
 ///
-/// Recording *which* timeline presented, not a flag, keeps this race-free:
-/// a render event that raced a seek writes a retired generation, which
+/// The value written names the timeline that presented. A render event
+/// that raced a seek writes a retired generation, which
 /// [`presented_this_generation`] does not match, and nothing needs clearing
 /// at a flush.
 pub(crate) fn note_presented(px: &PipelineShared, generation: u64) {
@@ -346,7 +346,7 @@ fn buffering_ends(presented: u64, current: u64, pause_wanted: bool) -> bool {
 
 /// Whether the audio pull may serve the ring: in Playing, or in Buffering
 /// once the clock runs (a start anchors the clock an output latency before
-/// the first picture, so sound pulled from then is heard as it shows).
+/// the first picture, and sound pulled from then is heard as it shows).
 /// Never while the clock is parked, and only for the timeline in force: not
 /// with a seek queued (the clock still runs on the timeline being left),
 /// not before the ring is this timeline's, and not with a pause waiting on
@@ -768,10 +768,9 @@ pub struct SplitLegs {
     /// offers its first dts. Container timelines start anywhere (an
     /// arbitrary 33-bit clock on MPEG-TS, a `baseMediaDecodeTime` on fMP4,
     /// the first cluster timestamp on Matroska), and the two legs need not
-    /// agree on where zero is or where a landed seek sits, so the cap meters
-    /// how far each leg has come from its own baseline, not absolute dts. A
-    /// seek moves both baselines: each leg clears its own as its demuxer
-    /// moves.
+    /// agree on where zero is or where a landed seek sits. The cap meters how
+    /// far each leg has come from its own baseline. A seek moves both
+    /// baselines: each leg clears its own as its demuxer moves.
     origin_us: [std::sync::atomic::AtomicI64; 2],
 }
 
@@ -781,13 +780,13 @@ const UNSET: i64 = i64::MIN;
 /// How far ahead of the other leg a leg may bank before it waits.
 ///
 /// Deliberately tight. On an on-demand source the Bank releases its queue
-/// in arrival order on a dts-derived schedule, so an event that arrives
-/// early but is due late sits at the head and holds up everything behind
-/// it, including the other leg's frames that are due now. Keeping the legs
+/// in arrival order on a dts-derived schedule: an event that arrives early
+/// but is due late sits at the head and holds up everything behind it,
+/// including the other leg's frames that are due now. Keeping the legs
 /// within a fraction of a second keeps arrival order close to timeline
-/// order and bounds that wait well inside the decoder's cushion. It must also stay well under
-/// the Bank's read-ahead depth, or one leg fills the Bank before the cap
-/// applies and the other cannot get in.
+/// order and bounds that wait well inside the decoder's cushion. It must
+/// also stay well under the Bank's read-ahead depth, or one leg fills the
+/// Bank before the cap applies and the other cannot get in.
 const SPLIT_LEAD_CAP_US: i64 = 100_000;
 
 impl SplitLegs {
@@ -1727,10 +1726,10 @@ pub fn run_demux_leg(
                 split.note_origin(leg, dts_us);
                 // Two separately muxed sources need not agree on where their
                 // timelines start, and the Bank measures what it holds as one
-                // span across both legs, so a gap between the origins counts
-                // as held media. Past the cushion the Bank reads as full from
+                // span across both legs: a gap between the origins counts as
+                // held media. Past the cushion the Bank reads as full from
                 // the trailing leg's first access unit and the session would
-                // sit in Buffering until closed, so the pair is refused. Only
+                // sit in Buffering until closed. The pair is refused. Only
                 // before the first seek: a landed seek re-latches both
                 // baselines wherever each demuxer stopped.
                 if px.shared.generation.load(Ordering::Relaxed) == 0
@@ -2882,8 +2881,8 @@ pub fn run_audio(px: &Arc<PipelineShared>, rx: &Receiver<MediaMsg>) {
             px.shared.av_offset_us.store(
                 av_offset_us(
                     playhead,
-                    // Per generation, so after a seek the old video position
-                    // is never paired with the new audio playhead.
+                    // Per generation: after a seek the old video position
+                    // must never pair with the new audio playhead.
                     presented_this_generation(
                         px.presented_generation.load(Ordering::Relaxed),
                         px.shared.generation.load(Ordering::Relaxed),
@@ -3539,7 +3538,7 @@ mod tests {
     }
 
     /// The offset is a difference between two terms of the same generation,
-    /// or unknown, so the window after a flush never exports the old video
+    /// or unknown. The window after a flush must not export the old video
     /// position against the new audio playhead as a measurement.
     #[test]
     fn the_av_offset_is_unknown_until_this_generation_presents() {

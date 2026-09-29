@@ -124,11 +124,11 @@ fn resolve(base: &str, rel: &str) -> Result<String, DemuxError> {
             // components are walked, because `Path` only parses the
             // syntax of the platform it was compiled for: a Unix build
             // reads `C:\dir\clip.ts` as one ordinary filename and would
-            // accept a playlist written to attack a Windows client, so the
+            // accept a playlist written to attack a Windows client. The
             // same rule applies on every host. A drive-shaped string
             // already parses as a URL with a one-letter scheme and is
-            // refused above, so the drive check is defence in depth for
-            // that arm.
+            // refused above; the drive check is defence in depth for that
+            // arm.
             if rel.contains('\\') || has_drive_prefix(rel) {
                 return Err(DemuxError::Parse(format!(
                     "playlist URI outside the playlist's directory: {rel:?}"

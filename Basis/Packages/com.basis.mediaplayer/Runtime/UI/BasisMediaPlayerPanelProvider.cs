@@ -444,7 +444,7 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
             // visibly becomes "https://youtube.com/…" rather than being silently rewritten.
             string normalized = BasisMediaUrlRouter.NormalizeUrl(u);
             if (normalized != u) _urlField.SetValueWithoutNotify(normalized);
-            // The user typed it, so there is nothing to ask them about.
+            // A typed URL is the user's own choice and skips the prompt.
             if (_activeNetworking != null) _ = _activeNetworking.SetApprovedUrl(normalized);
             else _activePlayer.OpenApprovedUrl(normalized);
         };
@@ -1070,13 +1070,13 @@ public class BasisMediaPlayerPanelProvider : BasisMenuActionProvider<BasisMainMe
         if (_seekAwaitUntil > 0f)
         {
             // The engine's seek event names the target it answered (landed or
-            // refused), so neither an earlier seek of a chain nor the old
-            // playhead passing near the target reads as this seek landing.
-            // Once answered, it has landed when the position reaches the
-            // target or, for a refusal or a landing short of it, once
+            // refused). Neither an earlier seek of a chain nor the old
+            // playhead passing near the target can then read as this seek
+            // landing. Once answered, it has landed when the position reaches
+            // the target or, for a refusal or a landing short of it, once
             // Buffering is over. That second test needs the answer from an
-            // earlier refresh, so a state read before the event was drained
-            // does not count.
+            // earlier refresh: a state read before the event was drained does
+            // not count.
             bool answered = _activePlayer.SeekAnsweredSince(_seekAwaitActedOn, _seekAwaitUs, SeekAnswerWithinUs);
             bool landed = answered
                 && (System.Math.Abs(posS - _seekAwaitPosS) <= SeekLandedWithinSeconds

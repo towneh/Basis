@@ -294,10 +294,10 @@ fn converge_from(offset: MediaTime) -> MediaTime {
 /// decrease while the rate is still non-zero: a fixed-rate law never has one.
 #[test]
 fn the_rate_falls_as_the_error_closes() {
-    // A fixed-rate law also falls when the fast window expires and the
-    // ceiling steps down, so the error starts inside the proportional region
-    // (below `fast_slew_cap_ppm * slew_tau`) and the walk stays inside the
-    // fast window.
+    // The error starts inside the proportional region (below
+    // `fast_slew_cap_ppm * slew_tau`) and the walk stays inside the fast
+    // window: a fixed-rate law would also fall when the fast window expires
+    // and the ceiling steps down.
     let cfg = ClockConfig::default();
     let mut c = clock_at_zero();
     let mut wall = MediaTime::ZERO;

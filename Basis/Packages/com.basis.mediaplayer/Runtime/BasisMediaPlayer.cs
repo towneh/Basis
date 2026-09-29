@@ -1125,10 +1125,10 @@ public class BasisMediaPlayer : MonoBehaviour, IBasisPcmSource
         LastErrorMessage = null;
         // The per-session engine readings describe a session that no longer
         // exists. The open path clears them only after `bm_session_open`
-        // succeeds, so without this a close, or an open that fails before that
+        // succeeds. Without this, a close, or an open that fails before that
         // point, would leave the previous session's values for the diagnostics
         // recorder to write into its capture for an idle player. `OpenStreams`
-        // closes first, so this covers it too. A moderation-blocked open returns
+        // closes first and is covered too. A moderation-blocked open returns
         // before `Close` and deliberately leaves a still-playing session's
         // readings alone.
         System.Threading.Volatile.Write(ref _engineChannels, 0);

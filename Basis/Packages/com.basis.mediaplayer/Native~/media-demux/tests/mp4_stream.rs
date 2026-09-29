@@ -595,9 +595,9 @@ fn video_only_fixture_still_demuxes() {
 }
 
 /// Open a fixture spread out with its `mfra` as the only index, and hold
-/// the open to that index: the walk it falls back to yields the same
-/// stream, so a row comparing streams alone would pass without it. The
-/// open must note no refusal of the `mfra` and fetch less than a walk.
+/// the open to that index. The walk it falls back to yields the same
+/// stream, and a row comparing streams alone would pass on the walk too.
+/// The open must note no refusal of the `mfra` and fetch less than a walk.
 fn open_by_mfra(name: &str) -> (Mp4Demuxer, common::Counters) {
     let source = common::inflate_mfra(&fixture(name));
     let counters = source.counters();
@@ -703,7 +703,7 @@ fn an_mfra_that_misses_the_fragments_is_not_used() {
 /// runs; fetched a block at a time, that is a request and a round trip per
 /// block over HTTP. A fragment this size is read whole instead: its
 /// header, then its data in one read. The first fragment's header came in
-/// with the open's read past `moov`, so draining costs its data, then the
+/// with the open's read past `moov`; draining then costs its data, and the
 /// second fragment's header and data. Fragments too large to read whole
 /// are covered by the rows in `mp4_runs`.
 #[test]

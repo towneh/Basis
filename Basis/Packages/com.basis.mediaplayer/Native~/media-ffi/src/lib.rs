@@ -35,8 +35,8 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 #[cfg(windows)]
 use std::sync::atomic::AtomicI64;
-// `stable_texture` compiles under test on every host, so the import it
-// needs cannot be Android-only.
+// The import `stable_texture` needs cannot be Android-only: it compiles
+// under test on every host.
 #[cfg(any(target_os = "android", test))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -141,8 +141,8 @@ fn write_detail(text: &str, out: &mut [u8]) -> u32 {
         out[..bytes.len()].copy_from_slice(bytes);
         return bytes.len() as u32;
     }
-    // Room for the mark first, then back to a boundary: the caller decodes
-    // the whole buffer, so a split character would be its problem.
+    // Room for the mark first, then back to a boundary. The caller decodes
+    // the whole buffer and must never meet a split character.
     let mut len = out.len() - DETAIL_ELLIPSIS.len();
     while len > 0 && !text.is_char_boundary(len) {
         len -= 1;
@@ -234,7 +234,7 @@ struct Descriptor {
     /// A separate audio-only source played against `url`, which is then
     /// treated as video-only. Adaptive ladders serve everything above
     /// their muxed fallback rung this way. Both legs are cuts of the same
-    /// content, so their timelines already agree. On-demand HTTP(S) and
+    /// content, and their timelines already agree. On-demand HTTP(S) and
     /// local files only. Absent = one source carrying everything.
     #[serde(default)]
     audio_url: Option<String>,

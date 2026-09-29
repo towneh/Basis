@@ -180,9 +180,9 @@ pub struct ClockConfig {
     /// The smoothed master is the wall clock plus the mean of the last
     /// `SMOOTHING_SAMPLES` playhead-minus-wall offsets, sampled at least
     /// `SMOOTHING_INTERVAL` apart (Media3's `AudioTrackPositionTracker`
-    /// scheme). The clock's own corrections do not enter the average, so a
-    /// catch-up is not carried past its target. The snap rung always acts on
-    /// the raw position.
+    /// scheme). Leaving the clock's own corrections out of the average stops
+    /// a catch-up being carried past its target. The snap rung always acts
+    /// on the raw position.
     pub smooth_master: bool,
 }
 

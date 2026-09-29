@@ -425,8 +425,8 @@ fn a_signalling_transport_failure_names_its_cause() {
 }
 
 /// A candidate address the gate refuses never receives a packet. The
-/// check sits at the transmit boundary, so the connectivity check
-/// itself is what gets suppressed. The mirror case proves the machinery
+/// check sits at the transmit boundary and suppresses the connectivity
+/// check itself. The mirror case proves the machinery
 /// would have sent to the address had the gate permitted it.
 #[test]
 fn blocked_candidate_address_never_receives_a_packet() {

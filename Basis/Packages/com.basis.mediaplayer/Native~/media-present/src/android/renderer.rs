@@ -976,9 +976,9 @@ fn import_buffer(
 /// session involved.
 ///
 /// `SessionRenderer::render` collects as part of its own pass, but only a
-/// live session reaches it, so the last session to close would leave
-/// nothing to run the collector and its buried view would outlive the
-/// image it was made over. The caller issues this drain for that case.
+/// live session reaches it. After the last session closes nothing would run
+/// the collector, and its buried view would outlive the image it was made
+/// over. The caller issues this drain for that case.
 ///
 /// Silent where the device context or the recording state is absent,
 /// except for one line the first time the recording state is missing: the
