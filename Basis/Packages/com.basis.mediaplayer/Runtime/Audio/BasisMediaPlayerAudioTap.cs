@@ -38,7 +38,6 @@ public sealed class BasisMediaPlayerAudioTap : MonoBehaviour
     private bool spreadMono;                       // replicate ch0 across the DSP width (positioned mono sources)
     private volatile float sourceVolume = 1f;      // this AudioSource's own volume/mute, pushed from the main thread
     private volatile bool active;
-    private volatile int observedChannels;         // DSP width seen on the audio thread
 
     /// <summary>
     /// Called on the main thread by <see cref="BasisMediaPlayerAudio"/> during
@@ -63,7 +62,6 @@ public sealed class BasisMediaPlayerAudioTap : MonoBehaviour
         gainProvider = gain;
         onMixedBlock = metrics;
         stepProvider = sourceFramesPerOutputFrame;
-        observedChannels = 0;
         active = s != null && t != null && reader != null;
         PollSourceVolume();
     }
@@ -171,7 +169,6 @@ public sealed class BasisMediaPlayerAudioTap : MonoBehaviour
             return;
         }
 
-        observedChannels = channels;
         int frames = data.Length / channels;
         float gain = (gainProvider != null ? gainProvider() : 1f) * sourceVolume;
         Func<double> step = stepProvider;
