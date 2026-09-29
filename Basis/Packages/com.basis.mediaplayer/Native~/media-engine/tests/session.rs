@@ -1722,6 +1722,116 @@ fn user_data_lane_delivers_every_frames_message() {
     assert_eq!(foreign[0].pts_us, ours[0].pts_us);
 }
 
+/// DMX lighting data stamped into the video by Truss
+/// (https://github.com/towneh/Truss) comes out of the engine as Truss
+/// wrote it: every record, in order, its CRC intact once the SEI's
+/// emulation-prevention bytes are removed, and its DMXS payload decoding to
+/// the values tools/gen-truss-dmx-fixture.py wrote, including universe 4
+/// joining at frame 30.
+#[test]
+fn truss_dmx_records_arrive_whole_and_decode() {
+    const TRUSS_UUID: [u8; 16] = [
+        0xb1, 0xf0, 0xa7, 0xd4, 0x9c, 0x3e, 0x4a, 0x52, 0x8f, 0x61, 0x2d, 0x7c, 0x5e, 0x0b, 0x93,
+        0xa8,
+    ];
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    let be16 = |b: &[u8], at: usize| u16::from_be_bytes([b[at], b[at + 1]]) as usize;
+    let be32 = |b: &[u8], at: usize| u32::from_be_bytes(b[at..at + 4].try_into().unwrap());
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/h264-truss-dmx-320x180-30fps.ts")
+        .to_string_lossy()
+        .into_owned();
+    let mut session = Session::open(OpenRequest::new(path));
+    let shared = session.shared().clone();
+    let px = session.pipeline().clone();
+
+    let mut messages = Vec::new();
+    assert!(
+        wait_for(Duration::from_secs(20), || {
+            messages.extend(Session::drain_user_data(&px, 64, 1 << 20));
+            let state = shared.state.load(Ordering::Relaxed);
+            assert_ne!(
+                state,
+                State::Error as u32,
+                "error {}",
+                shared.last_error.load(Ordering::Relaxed)
+            );
+            state == State::Ended as u32
+        }),
+        "Truss session never ended"
+    );
+    messages.extend(Session::drain_user_data(&px, 64, 1 << 20));
+    session.close();
+
+    let records: Vec<_> = messages.iter().filter(|m| m.uuid == TRUSS_UUID).collect();
+    assert_eq!(
+        records.len(),
+        60,
+        "one record per access unit, none dropped"
+    );
+    for (i, m) in records.iter().enumerate() {
+        let r = &m.payload[..];
+        assert_eq!(&r[..8], b"TRUSSDMX", "record {i} magic");
+        assert_eq!((r[8], r[9]), (1, 1), "record {i} version and carrier");
+        assert_eq!(be32(r, 10) as usize, i, "record {i} seq");
+        assert_eq!(be32(r, 22) as usize, i, "record {i} frame index");
+        let len = be16(r, 26);
+        assert_eq!(r.len(), 28 + len + 4, "record {i} length");
+        assert_eq!(be32(r, 28 + len), crc32(&r[..28 + len]), "record {i} CRC");
+
+        let p = &r[28..28 + len];
+        assert_eq!(&p[..4], b"DMXS", "record {i} payload magic");
+        assert_eq!(
+            (p[4], p[5]),
+            (1, 0x01),
+            "record {i} payload version and flags"
+        );
+        let universes: Vec<usize> = if i >= 30 {
+            (0..5).collect()
+        } else {
+            (0..4).collect()
+        };
+        assert_eq!(be16(p, 6), universes.len(), "record {i} block count");
+        let mut at = 8;
+        for &u in &universes {
+            assert_eq!(be16(p, at), u, "record {i} universe");
+            assert_eq!(be16(p, at + 2), 0, "record {i} start slot");
+            assert_eq!(be16(p, at + 4), 512, "record {i} universe {u} length");
+            let values = &p[at + 10..at + 10 + 512];
+            for (s, &v) in values.iter().enumerate() {
+                assert_eq!(
+                    usize::from(v),
+                    (u * 520 + s + i) % 251,
+                    "record {i} universe {u} slot {s}"
+                );
+            }
+            at += 10 + 512;
+        }
+        assert_eq!(at, len, "record {i} has nothing past its blocks");
+        if i > 0 {
+            let step = m.pts_us - records[i - 1].pts_us;
+            assert!(
+                (33_000..=34_000).contains(&step),
+                "pts step {step} on record {i}"
+            );
+        }
+    }
+}
+
 /// A seek that decodes forward to its target delivers no user data from
 /// the span it skipped: those frames are never shown, and a consumer
 /// driving lights off them would replay a second of cues in an instant.
