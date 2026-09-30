@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 media-decode = { workspace = true }
 claxon = "0.4.3"
-opus = "0.3.1"
+audiopus_sys = "0.2.2"
 
 # The AV1 software decoder sits out the Android graph: the published rav1d
 # crate is missing src/arm/asm-offsets.h, so its arm64 asm cannot build,

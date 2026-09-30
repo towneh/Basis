@@ -240,7 +240,7 @@ connection. Set **Liveness** to Live for those.
 
 | Row | What it checks | How to run | Runs in |
 | --- | --- | --- | --- |
-| Software decode adapters | claxon FLAC, libopus Opus and rav1d AV1 decode fixtures with correct timestamps; surround Opus, broken headers, a FLAC AU decoding past its ceiling or overfilling the output queue, and an AV1 frame past the size limit get typed errors. | `cargo test -p decode-sw` | CI |
+| Software decode adapters | claxon FLAC, libopus Opus and rav1d AV1 decode fixtures with correct timestamps, and 5.1 Opus comes out in WAV channel order; Opus past 7.1 or in an ambisonic layout, broken headers, a FLAC AU decoding past its ceiling or overfilling the output queue, and an AV1 frame past the size limit get typed errors. | `cargo test -p decode-sw` | CI |
 | PCM adapter | WAV and Blu-ray 16- and 24-bit PCM converts to float identically in WAV channel order, and unsupported formats are refused. | `cargo test -p decode-sw` | CI |
 | MF adapter contracts | H.264, AAC and MP3 decode through Windows' built-in Media Foundation decoders, and VP9 and AV1 through installed Store extensions. | `cargo test -p decode-mf` | CI, Windows |
 | Strided plane copies | Decoder-reported strides, sizes and dimensions are checked before plane copies, and negative, short, overflowing or odd-sized geometry is refused. | `cargo test -p decode-mf --lib` + `cargo test -p decode-sw --lib` | CI (decode-mf half Windows only) |
@@ -420,8 +420,8 @@ row's source, and read the captures and `adb logcat -s basis-media`.
   keyframe-only playlists or adaptive switching, and fetches whole segments of
   up to 64 MiB.
 - Raw audio seeks are approximate except WAV and FLAC.
-- No VP9 software decoder; Opus is mono or stereo; AV1 above 8-bit 4:2:0 is
-  refused.
+- No VP9 software decoder; Opus stops at 7.1 and refuses ambisonics; AV1
+  above 8-bit 4:2:0 is refused.
 - RTSP carries H.264 and AAC only, without credentials or multicast.
 - WHEP carries H.264 and Opus only, ignores the server's STUN and TURN entries,
   and sends no authentication. Its fuzz target needs `--features whep` and

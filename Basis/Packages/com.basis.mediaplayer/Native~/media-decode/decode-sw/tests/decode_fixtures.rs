@@ -234,13 +234,71 @@ fn flac_refuses_a_broken_header() {
     assert!(OpusDecoder::new(b"not opus").is_err());
 }
 
+/// Mapping family 1 stores 5.1 in Vorbis order (FL C FR RL RR LFE); the
+/// decoder hands it out in WAV order. The fixture sounds one speaker at a
+/// time, a second each in WAV order, three times over, so second `k` must
+/// be loud in slot `k % 6` alone.
 #[test]
-fn opus_refuses_surround_mapping() {
-    // OpusHead with mapping family 1 (surround): typed refusal until a
-    // multistream decoder exists.
+fn opus_51_fixture_decodes_in_wav_order() {
+    let demuxed = demux("sine-48k-51.opus");
+    assert_eq!(
+        demuxed.codec_private[18], 1,
+        "fixture must be mapping family 1"
+    );
+    let mut decoder = OpusDecoder::new(&demuxed.codec_private).expect("decoder");
+    assert_eq!(decoder.output_format(), (48_000, 6));
+    let pcm: Vec<f32> = decode_all(&mut decoder, &demuxed.aus)
+        .into_iter()
+        .flat_map(|chunk| chunk.data)
+        .collect();
+    assert!(
+        pcm.len() / 6 >= 18 * 48_000,
+        "decoded {} frames",
+        pcm.len() / 6
+    );
+
+    for second in 0..18 {
+        let window = &pcm[6 * (second * 48_000 + 12_000)..6 * (second * 48_000 + 36_000)];
+        let mut power = [0.0f64; 6];
+        for frame in window.as_chunks::<6>().0 {
+            for (slot, &s) in frame.iter().enumerate() {
+                power[slot] += f64::from(s) * f64::from(s);
+            }
+        }
+        let speaker = second % 6;
+        for (slot, &p) in power.iter().enumerate() {
+            if slot != speaker {
+                // At least 40 dB below the speaker sounding.
+                assert!(
+                    p * 10_000.0 < power[speaker],
+                    "second {second}: slot {slot} is loud, expected only slot {speaker}"
+                );
+            }
+        }
+    }
+}
+
+fn opus_head(channels: u8, family: u8, table: &[u8]) -> Vec<u8> {
     let mut head = b"OpusHead".to_vec();
-    head.extend_from_slice(&[1, 6, 0, 0, 128, 187, 0, 0, 0, 0, 1]);
-    assert!(OpusDecoder::new(&head).is_err());
+    head.extend_from_slice(&[1, channels, 0, 0, 128, 187, 0, 0, 0, 0, family]);
+    head.extend_from_slice(table);
+    head
+}
+
+#[test]
+fn opus_refuses_unsupported_layouts() {
+    // Family 0 is mono/stereo only.
+    assert!(OpusDecoder::new(&opus_head(6, 0, &[])).is_err());
+    // Ambisonics (family 2) is not decoded.
+    assert!(OpusDecoder::new(&opus_head(4, 2, &[4, 0, 0, 1, 2, 3])).is_err());
+    // Past 7.1.
+    assert!(OpusDecoder::new(&opus_head(9, 255, &[9, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8])).is_err());
+    // Mapping table shorter than the channel count.
+    assert!(OpusDecoder::new(&opus_head(6, 1, &[4, 2, 0, 4, 1])).is_err());
+    // A mapping entry naming a stream channel that does not exist.
+    assert!(OpusDecoder::new(&opus_head(6, 1, &[4, 2, 0, 4, 1, 2, 3, 6])).is_err());
+    // The same layout, well formed, is accepted.
+    assert!(OpusDecoder::new(&opus_head(6, 1, &[4, 2, 0, 4, 1, 2, 3, 5])).is_ok());
 }
 
 /// The AV1 fixture's video AUs and the size its container states.

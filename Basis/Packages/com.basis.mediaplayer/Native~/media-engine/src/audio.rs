@@ -394,7 +394,7 @@ fn audio_pair(format: AudioFormatInfo, shared: Arc<AudioShared>) -> (AudioProduc
     // ever be pushed. The flat cap keeps the allocation bounded and the log
     // line says the track is inert, so it does not look like a stall. No
     // decoder can reach this, since every adapter limits its channel count
-    // far below the cap (8 on the MF and software routes, 2 for Opus, 64 on
+    // far below the cap (8 on the MF and software routes, 64 on
     // MediaCodec).
     let channels = format.channels.max(1) as usize;
     let cap = match MAX_RING_SAMPLES / channels * channels {

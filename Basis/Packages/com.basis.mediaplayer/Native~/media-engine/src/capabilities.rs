@@ -187,7 +187,7 @@ pub fn capabilities() -> CapabilitySet {
     let video_caps = platform_video_caps();
 
     // Audio ceilings match the adapters' own checks: AAC chan_conf 1..=6,
-    // MP3 mono/stereo, Opus mapping family 0 only, claxon's 8-channel cap
+    // MP3 mono/stereo, Opus up to 7.1, claxon's 8-channel cap
     // and the PCM adapter's 1..=8. These hold on Android too, since the
     // demux-side AAC channel check and the in-process Opus/FLAC/PCM
     // decoders are platform-free. Headless platforms list only the
@@ -197,12 +197,12 @@ pub fn capabilities() -> CapabilitySet {
     let audio_caps = vec![
         audio("aac", 6),
         audio("mp3", 2),
-        audio("opus", 2),
+        audio("opus", 8),
         audio("flac", 8),
         audio("pcm", 8),
     ];
     #[cfg(not(any(windows, target_os = "android")))]
-    let audio_caps = vec![audio("opus", 2), audio("flac", 8), audio("pcm", 8)];
+    let audio_caps = vec![audio("opus", 8), audio("flac", 8), audio("pcm", 8)];
 
     // `rist` appears only when the feature is compiled in; without it the
     // stub's typed refusal is the runtime backstop.

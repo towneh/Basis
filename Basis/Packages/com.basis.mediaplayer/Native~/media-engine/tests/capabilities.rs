@@ -112,7 +112,7 @@ fn built_set_matches_this_build() {
     };
     assert_eq!(channels("aac"), Some(6));
     assert_eq!(channels("mp3"), Some(2));
-    assert_eq!(channels("opus"), Some(2));
+    assert_eq!(channels("opus"), Some(8));
     assert_eq!(channels("flac"), Some(8));
     // Integer PCM: RIFF/WAVE and the LPCM carried in MPEG-TS, one adapter,
     // 1..=8 channels.
@@ -163,7 +163,7 @@ fn built_set_matches_this_build() {
             .find(|a| a.codec == c)
             .map(|a| a.max_channels)
     };
-    assert_eq!(channels("opus"), Some(2));
+    assert_eq!(channels("opus"), Some(8));
     assert_eq!(channels("flac"), Some(8));
     // PCM needs no platform decoder, so it is present here too.
     assert_eq!(channels("pcm"), Some(8));

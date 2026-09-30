@@ -158,7 +158,7 @@ ITU BS.775 coefficients.
 - AudioLink and other `GetOutputData` analysers read silence from a normal
   output. Set `BasisMediaAudioChannel.AnalysisFeed` on the analyser's own
   `AudioSource`; it adds a small delay.
-- FLAC carries up to 7.1, AAC up to 5.1, Opus mono or stereo.
+- FLAC and Opus carry up to 7.1, AAC up to 5.1.
 
 For files with several audio tracks (MP4 and Matroska), `AudioTracks` lists
 them with their language and name where the file has them, and

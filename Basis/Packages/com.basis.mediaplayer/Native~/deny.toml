@@ -27,10 +27,9 @@ allow = [
 [advisories]
 yanked = "deny"
 ignore = [
-    # audiopus_sys wraps a vendored libopus for the `opus` crate. The
-    # wrapper is unmaintained but only builds and links libopus, which is
-    # current and watched. Revisit if the opus crate gains a maintained
-    # -sys or the pure-Rust decoder matures.
+    # audiopus_sys builds and statically links the libopus 1.3.1 it
+    # vendors, for the Opus decoder. The wrapper is unmaintained. Revisit
+    # if a maintained -sys crate appears or the pure-Rust decoder matures.
     "RUSTSEC-2026-0150",
     # paste is a proc-macro used at build time by rav1d; unmaintained but
     # inert at runtime. Follows rav1d's own tree; drop when upstream does.

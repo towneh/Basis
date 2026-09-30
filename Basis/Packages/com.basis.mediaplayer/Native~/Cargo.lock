@@ -658,12 +658,12 @@ dependencies = [
 name = "decode-sw"
 version = "0.1.0"
 dependencies = [
+ "audiopus_sys",
  "claxon",
  "libc",
  "media-clock",
  "media-decode",
  "media-demux",
- "opus",
  "rav1d",
 ]
 
@@ -1951,15 +1951,6 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "opus"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d3809943dff6fbad5f0484449ea26bdb9cb7d8efdf26ed50d3c7f227f69eb5c"
-dependencies = [
- "audiopus_sys",
-]
 
 [[package]]
 name = "p256"

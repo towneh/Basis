@@ -609,10 +609,6 @@ criteria = "safe-to-deploy"
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.opus]]
-version = "0.3.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.p256]]
 version = "0.13.2"
 criteria = "safe-to-deploy"
