@@ -12,12 +12,12 @@
 //! absolute, so no cross-segment correction is needed.
 //!
 //! Low-Latency HLS (a live playlist listing parts and offering blocking
-//! reloads) joins `PART-HOLD-BACK` behind the end on an independent part,
-//! reads complete segments whole, and parts only from the segment still
-//! being written or to finish one joined part way through, and reloads
-//! with `_HLS_msn`/`_HLS_part` so the server
-//! answers as soon as the next part exists. Parts flow through the same
-//! TS chain or per-fragment fMP4 parse as segments.
+//! reloads) joins `PART-HOLD-BACK` behind the end on an independent part.
+//! Complete segments are read whole; parts only from the segment still
+//! being written, or to finish one joined part way through. Reloads carry
+//! `_HLS_msn`/`_HLS_part`, which the server answers as soon as the next
+//! part exists. Parts flow through the same TS chain or per-fragment fMP4
+//! parse as segments.
 //!
 //! A variant whose audio is a separate rendition (`EXT-X-MEDIA
 //! TYPE=AUDIO` with a URI) names that rendition's playlist
@@ -975,9 +975,10 @@ impl Scheduler {
 
     /// Where a live session starts, and how far that is behind the end
     /// (RFC 8216bis §6.3.3): the playlist's `EXT-X-START`, else its hold
-    /// back behind the end (`PART-HOLD-BACK` when riding parts,
-    /// `HOLD-BACK` otherwise, three target durations when unstated),
-    /// snapped back to the nearest point a decoder can start from.
+    /// back behind the end (`PART-HOLD-BACK` when riding parts, three part
+    /// targets when unstated; `HOLD-BACK` otherwise, three target durations
+    /// when unstated), snapped back to the nearest point a decoder can
+    /// start from.
     fn live_join(&self) -> (JoinPoint, MediaTime) {
         let window = &self.window;
         let (points, end) = self.join_points();
@@ -1009,9 +1010,9 @@ impl Scheduler {
     /// Where a rendition joins to meet another playlist's join on the
     /// timeline, as hls.js aligns renditions: by program time when both
     /// playlists state one (the last point at or before it, within a target
-    /// duration), else by the
-    /// same sequence number, on the same part when this window lists it
-    /// as a start point. `None` when neither lands in this window.
+    /// duration), else by the same sequence number, on the same part when
+    /// this window lists it as a start point. `None` when neither lands in
+    /// this window.
     fn aligned_join(&self, anchor: JoinAnchor) -> Option<(Cursor, &'static str)> {
         let (points, _) = self.join_points();
         if let Some(target) = anchor.program_time_ms
@@ -1151,10 +1152,12 @@ impl Scheduler {
     }
 
     /// Refresh the playlist until the cursor's media is visible or the
-    /// playlist ends. A server that can block holds the reload until the
-    /// media exists, and it goes out at once; otherwise, or after a reload
-    /// that brought nothing, it waits the reload interval first. A window
-    /// that stops advancing for `STALE_TARGET_DURATIONS` is a dead lane.
+    /// playlist ends. While the server takes blocking reloads, a reload
+    /// goes out at once and the server holds it until the media exists; a
+    /// plain reload, or any reload after one that brought nothing, waits
+    /// the reload interval first. A server that refuses a blocking reload
+    /// gets plain ones from then on. A window that stops advancing for
+    /// `STALE_TARGET_DURATIONS` is a dead lane.
     fn refresh_until_progress(&mut self) -> Result<(), DemuxError> {
         let mut stalled_since: Option<Duration> = None;
         let stale_limit =

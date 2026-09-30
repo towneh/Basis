@@ -582,11 +582,11 @@ pub(crate) fn awaiting<T>(
 }
 
 /// The pinned client for each host a source or playlist fetcher has been
-/// sent to. A ranged
-/// source asks again every chunk and every request walks from the URL the
-/// caller opened, so without these a redirected source would pay a resolve
-/// and a handshake per hop per chunk. A client held here only ever connects
-/// to the addresses that were vetted when it was built.
+/// sent to. A ranged source asks again every chunk, and every request
+/// walks from the URL the caller opened: without these a redirected source
+/// would pay a resolve and a handshake per hop per chunk. A client held
+/// here only ever connects to the addresses that were vetted when it was
+/// built.
 #[derive(Default)]
 pub(crate) struct PinnedClients {
     by_host: Vec<(String, reqwest::Client)>,
