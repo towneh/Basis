@@ -23,7 +23,7 @@ pub fn run(fixture: &Path) -> ExitCode {
             .map(|e| e.path())
             .filter(|p| {
                 p.extension()
-                    .is_some_and(|ext| ext == "mp4" || ext == "ts" || ext == "m2ts")
+                    .is_some_and(|ext| matches!(ext.to_str(), Some("mp4" | "mov" | "ts" | "m2ts")))
             })
             .collect();
         entries.sort();
@@ -168,6 +168,7 @@ fn check_fixture(path: &Path) -> Result<String, String> {
         let lpcm = our_audio_codec == Some(AudioCodec::Pcm);
         let codec_ok = match stream.codec_name.as_str() {
             "aac" => our_audio_codec == Some(AudioCodec::Aac),
+            "mp3" => our_audio_codec == Some(AudioCodec::Mp3),
             "pcm_bluray" => lpcm,
             other => return Err(format!("oracle audio codec {other}")),
         };

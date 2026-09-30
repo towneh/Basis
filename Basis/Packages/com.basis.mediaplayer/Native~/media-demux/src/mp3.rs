@@ -102,6 +102,11 @@ fn parse_frame_header(h: &[u8]) -> Option<FrameInfo> {
     })
 }
 
+/// Sample rate and channel count from a Layer III frame header.
+pub(crate) fn frame_format(h: &[u8]) -> Option<(u32, u32)> {
+    parse_frame_header(h).map(|info| (info.sample_rate, info.channels))
+}
+
 /// The encoder's leading metadata frame (Xing/Info from LAME and friends,
 /// VBRI from Fraunhofer): total counts and, for Xing, a 100-entry seek
 /// table mapping time percent to byte percent. Decodes as silence, so it

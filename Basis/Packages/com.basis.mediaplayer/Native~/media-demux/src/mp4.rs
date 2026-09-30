@@ -333,7 +333,7 @@ impl Mp4Demuxer {
                 return Err(DemuxError::Refused(self.refusals.join("; ")));
             }
             return Err(DemuxError::Unsupported(
-                "no decodable track (need H.264 video or AAC audio)",
+                "no decodable track (need H.264, H.265, VP9 or AV1 video, or AAC or MP3 audio)",
             ));
         }
         Ok(())
@@ -381,7 +381,7 @@ impl Mp4Demuxer {
         let audio_ids: Vec<u32> = mp4
             .tracks()
             .iter()
-            .filter(|(_, track)| track.kind == Some(re_mp4::TrackKind::Audio))
+            .filter(|(_, track)| is_audio(mp4, track))
             .map(|(id, _)| *id)
             .collect();
         // Bind the requested track, or the first when the index is out of
@@ -410,6 +410,7 @@ impl Mp4Demuxer {
         for (id, track) in mp4.tracks() {
             let track_id = TrackId(*id);
             let walked = walked.map(|w| w.get(id).map_or(&[][..], Vec::as_slice));
+            let audio = is_audio(mp4, track);
             match track.kind {
                 Some(re_mp4::TrackKind::Video) if self.video.is_none() => {
                     match self.extract_video(mp4, track, track_id, walked)? {
@@ -421,9 +422,7 @@ impl Mp4Demuxer {
                 // reached; if that one turns out undecodable the next
                 // decodable track takes over, which is why this is not an
                 // equality test.
-                Some(re_mp4::TrackKind::Audio)
-                    if self.audio.is_none() && wanted.is_none_or(|w| *id >= w) =>
-                {
+                _ if audio && self.audio.is_none() && wanted.is_none_or(|w| *id >= w) => {
                     let config = configs.get(id).map(Vec::as_slice);
                     if self
                         .extract_audio(mp4, track, track_id, config, walked)
@@ -439,8 +438,8 @@ impl Mp4Demuxer {
                     let entry = sample_entry(&trak.mdia.minf.stbl.stsd.contents);
                     let refusal = match (track.kind, &trak.mdia.hdlr.handler_type.value) {
                         (None, b"vide") if self.video.is_none() => Some(unsupported_video(&entry)),
-                        (None, b"soun") if self.audio.is_none() => Some(format!(
-                            "audio codec '{entry}' is not supported (supported: AAC)"
+                        (None, b"soun") if self.audio.is_none() && !audio => Some(format!(
+                            "audio codec '{entry}' is not supported (supported: AAC, MP3)"
                         )),
                         _ => None,
                     };
@@ -600,6 +599,68 @@ impl Mp4Demuxer {
         walked: Option<&[FragmentSample]>,
     ) -> Option<()> {
         let trak = track.trak(mp4);
+        let mp3 = mp3_entry(&trak.mdia.minf.stbl.stsd.contents);
+        let aac = match mp3 {
+            Some(_) => None,
+            None => Some(self.aac_config(trak, track_id, config)?),
+        };
+
+        // re_mp4 parses the edit list but does not apply it. For audio the
+        // first real edit's media time is the encoder priming: shift the
+        // track so priming samples carry negative timestamps and the PCM
+        // stage can drop everything before the origin.
+        let edits = edit_start(trak, u64::from(mp4.moov.mvhd.timescale), track.timescale);
+        let shift = edits.media_time.saturating_sub(edits.empty);
+        let start = MediaTime::from_micros(scale_to_us(edits.empty, track.timescale.max(1)));
+
+        let samples = match self.collect_samples(track, moov_reorder(track, trak), walked, shift) {
+            Ok(samples) => samples,
+            Err(e) => {
+                push_note(&mut self.refusals, || {
+                    format!("track {}: audio refused: {e}", track_id.0)
+                });
+                return None;
+            }
+        };
+
+        let (codec, sample_rate, channels, codec_private) = match aac {
+            Some((sample_rate, channels, asc)) => (AudioCodec::Aac, sample_rate, channels, asc),
+            None => {
+                let stated = mp3.unwrap_or_default();
+                let first = match samples.first() {
+                    Some(sample) => Some((sample.offset, sample.size)),
+                    None => self.first_indexed_sample(track_id),
+                };
+                let (sample_rate, channels) = self.mp3_format(track_id, first, stated)?;
+                (AudioCodec::Mp3, sample_rate, channels, Vec::new())
+            }
+        };
+        self.pending.push_back(StreamEvent::Format(
+            track_id,
+            Format::Audio {
+                codec,
+                sample_rate,
+                channels,
+                codec_private,
+            },
+        ));
+        self.audio = Some(AudioTrack {
+            id: track_id,
+            samples: self.new_samples(samples),
+            shift,
+            start,
+        });
+        Some(())
+    }
+
+    /// An `mp4a` track's output rate, channel count and
+    /// AudioSpecificConfig, or `None` once the refusal is noted.
+    fn aac_config(
+        &mut self,
+        trak: &re_mp4::TrakBox,
+        track_id: TrackId,
+        config: Option<&[u8]>,
+    ) -> Option<(u32, u32, Vec<u8>)> {
         let stsd = &trak.mdia.minf.stbl.stsd;
         let re_mp4::StsdBoxContent::Mp4a(mp4a) = &stsd.contents else {
             push_note(&mut self.refusals, || {
@@ -618,7 +679,7 @@ impl Mp4Demuxer {
         if dec.object_type_indication != 0x40 && dec.object_type_indication != 0x67 {
             push_note(&mut self.refusals, || {
                 format!(
-                    "track {}: skipped audio (object type {:#x}, not AAC)",
+                    "track {}: skipped audio (object type {:#x}, not AAC or MP3)",
                     track_id.0, dec.object_type_indication
                 )
             });
@@ -678,41 +739,79 @@ impl Mp4Demuxer {
             });
             return None;
         }
+        Some((parsed.output_rate, u32::from(parsed.channels()), asc))
+    }
 
-        // re_mp4 parses the edit list but does not apply it. For audio the
-        // first real edit's media time is the encoder priming: shift the
-        // track so priming samples carry negative timestamps and the PCM
-        // stage can drop everything before the origin.
-        let edits = edit_start(trak, u64::from(mp4.moov.mvhd.timescale), track.timescale);
-        let shift = edits.media_time.saturating_sub(edits.empty);
-        let start = MediaTime::from_micros(scale_to_us(edits.empty, track.timescale.max(1)));
-
-        let samples = match self.collect_samples(track, moov_reorder(track, trak), walked, shift) {
-            Ok(samples) => samples,
-            Err(e) => {
-                push_note(&mut self.refusals, || {
-                    format!("track {}: audio refused: {e}", track_id.0)
-                });
-                return None;
+    /// Where a track's first sample lies in a file read by its fragment
+    /// index, found without moving the cursors that playback reads from.
+    /// A track that starts late can be missing from the first fragments, so
+    /// they are read in turn, no further than a seek steps. `None` when
+    /// none of those holds the track.
+    fn first_indexed_sample(&mut self, track_id: TrackId) -> Option<(u64, u32)> {
+        let fragments = self.fragments.as_ref()?;
+        let mut cursors = Cursors::new();
+        let mut budget = MAX_FRAGMENT_SAMPLES;
+        for entry in fragments.index.entries.iter().take(MAX_SEEK_STEPS) {
+            let moofs = read_subsegment(&mut self.src, *entry, &self.limits).ok()?;
+            for moof in &moofs {
+                let built = crate::mp4_fragment::build(
+                    moof,
+                    &fragments.defaults,
+                    &mut cursors,
+                    &mut budget,
+                )
+                .ok()?;
+                let first = built
+                    .into_iter()
+                    .filter(|(id, _)| *id == track_id.0)
+                    .find_map(|(_, samples)| samples.first().copied());
+                if let Some(sample) = first {
+                    return Some((sample.offset, sample.size));
+                }
             }
-        };
+        }
+        None
+    }
 
-        self.pending.push_back(StreamEvent::Format(
-            track_id,
-            Format::Audio {
-                codec: AudioCodec::Aac,
-                sample_rate: parsed.output_rate,
-                channels: u32::from(parsed.channels()),
-                codec_private: asc,
-            },
-        ));
-        self.audio = Some(AudioTrack {
-            id: track_id,
-            samples: self.new_samples(samples),
-            shift,
-            start,
-        });
-        Some(())
+    /// An MP3 track's sample rate and channel count, from its first frame's
+    /// header, as the decoder will find them. A live source has no sample
+    /// at hand when it opens; there the sample entry's values stand.
+    fn mp3_format(
+        &mut self,
+        track_id: TrackId,
+        first: Option<(u64, u32)>,
+        stated: (u32, u32),
+    ) -> Option<(u32, u32)> {
+        let refuse = |this: &mut Self, why: String| {
+            push_note(&mut this.refusals, || {
+                format!("track {}: skipped audio ({why})", track_id.0)
+            });
+            None
+        };
+        let Some((offset, size)) = first else {
+            let (sample_rate, channels) = stated;
+            if sample_rate == 0 || !(1..=2).contains(&channels) {
+                return refuse(
+                    self,
+                    format!("MP3 stated as {sample_rate} Hz, {channels} ch"),
+                );
+            }
+            return Some(stated);
+        };
+        let mut header = [0u8; 4];
+        if size < header.len() as u32 {
+            return refuse(
+                self,
+                format!("first MP3 sample too short for a frame header ({size} of 4 bytes)"),
+            );
+        }
+        if let Err(e) = self.src.read_exact_at(offset, &mut header) {
+            return refuse(self, format!("first MP3 frame unreadable: {e}"));
+        }
+        match crate::mp3::frame_format(&header) {
+            Some(format) => Some(format),
+            None => refuse(self, "first frame is not MPEG audio Layer III".into()),
+        }
     }
 
     /// The whole table for a file that states one, an empty queue for a
@@ -1404,6 +1503,38 @@ fn sample_entry(contents: &re_mp4::StsdBoxContent) -> String {
         .collect()
 }
 
+/// Whether a track holds sound. The box parser gives QuickTime's MP3
+/// entries no kind of their own.
+fn is_audio(mp4: &re_mp4::Mp4, track: &re_mp4::Track) -> bool {
+    track.kind == Some(re_mp4::TrackKind::Audio)
+        || mp3_entry(&track.trak(mp4).mdia.minf.stbl.stsd.contents).is_some()
+}
+
+/// For an entry that carries MP3, the sample rate and channel count it
+/// states, or zeros where it states none. MP3 comes as an `mp4a` whose
+/// `esds` names MPEG-1 (0x6B) or MPEG-2 (0x69) audio, or under a
+/// QuickTime code (`.mp3`, the older `ms\0U`, or VLC's `mp3 `) whose
+/// fields re_mp4 does not keep.
+fn mp3_entry(contents: &re_mp4::StsdBoxContent) -> Option<(u32, u32)> {
+    match contents {
+        re_mp4::StsdBoxContent::Mp4a(mp4a) => {
+            let esds = mp4a.esds.as_ref()?;
+            matches!(esds.es_desc.dec_config.object_type_indication, 0x69 | 0x6B).then(|| {
+                (
+                    u32::from(mp4a.samplerate.value()),
+                    u32::from(mp4a.channelcount),
+                )
+            })
+        }
+        re_mp4::StsdBoxContent::Unknown(code)
+            if matches!(&code.value, b".mp3" | b"ms\0U" | b"mp3 ") =>
+        {
+            Some((0, 0))
+        }
+        _ => None,
+    }
+}
+
 fn unsupported_video(entry: &str) -> String {
     format!("video codec '{entry}' is not supported (supported: H.264, H.265, VP9, AV1)")
 }
@@ -1716,7 +1847,18 @@ fn describe_audio(
         "und" | "" => None,
         other => Some(other.to_string()),
     };
-    let (sample_rate, channels) = match &trak.mdia.minf.stbl.stsd.contents {
+    let contents = &trak.mdia.minf.stbl.stsd.contents;
+    if let Some((sample_rate, channels)) = mp3_entry(contents) {
+        return AudioTrackInfo {
+            id,
+            language,
+            label: None,
+            codec: AudioCodec::Mp3,
+            sample_rate,
+            channels,
+        };
+    }
+    let (sample_rate, channels) = match contents {
         re_mp4::StsdBoxContent::Mp4a(mp4a) => match config {
             Some(config) => (config.output_rate, u32::from(config.channels())),
             None => (

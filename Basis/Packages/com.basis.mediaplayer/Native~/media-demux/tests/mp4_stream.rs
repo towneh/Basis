@@ -224,6 +224,162 @@ fn an_audio_object_type_that_is_not_aac_is_skipped() {
     );
 }
 
+fn audio_announce(demux: &mut Mp4Demuxer) -> Option<(AudioCodec, u32, u32, Vec<u8>)> {
+    loop {
+        match demux.next_event().expect("event") {
+            StreamEvent::Format(
+                _,
+                Format::Audio {
+                    codec,
+                    sample_rate,
+                    channels,
+                    codec_private,
+                },
+            ) => return Some((codec, sample_rate, channels, codec_private)),
+            StreamEvent::Eos(..) => return None,
+            _ => {}
+        }
+    }
+}
+
+fn audio_frames(demux: &mut Mp4Demuxer) -> Vec<Vec<u8>> {
+    let audio = demux.audio_track().expect("an audio track").0;
+    access_units(demux)
+        .into_iter()
+        .filter(|au| au.0 == audio)
+        .map(|au| au.4)
+        .collect()
+}
+
+#[test]
+fn mp3_is_read_from_either_sample_entry() {
+    for name in [
+        "h264-mp3-320x180.mp4",
+        "h264-mp3-320x180.mov",
+        "h264-mp3-320x180-frag.mov",
+    ] {
+        let mut demux = open(name);
+        assert_eq!(
+            audio_announce(&mut demux),
+            Some((AudioCodec::Mp3, 44100, 2, Vec::new())),
+            "{name}"
+        );
+        let frames = audio_frames(&mut demux);
+        assert_eq!(frames.len(), 155, "{name}");
+        assert!(
+            frames.iter().all(|f| f.starts_with(&[0xFF, 0xFB])),
+            "{name}: every sample is one MPEG-1 Layer III frame as stored"
+        );
+    }
+}
+
+#[test]
+fn mp3_is_read_under_each_quicktime_code() {
+    for code in [b"ms\0U", b"mp3 "] {
+        let mut bytes = fixture("h264-mp3-320x180.mov");
+        let found: Vec<usize> = bytes
+            .windows(4)
+            .enumerate()
+            .filter(|(_, w)| *w == b".mp3")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(found.len(), 1, "one sample entry code");
+        bytes[found[0]..found[0] + 4].copy_from_slice(code);
+        let mut demux = Mp4Demuxer::open(
+            Box::new(MemSource(bytes)),
+            DemuxLimits::default(),
+            Generation(1),
+        )
+        .expect("opens");
+        assert_eq!(
+            audio_announce(&mut demux),
+            Some((AudioCodec::Mp3, 44100, 2, Vec::new())),
+            "{code:?}"
+        );
+    }
+}
+
+#[test]
+fn mpeg2_audio_in_an_esds_is_mp3() {
+    let mut bytes = fixture("h264-mp3-320x180.mp4");
+    let at = bytes
+        .windows(6)
+        .position(|w| w == [0x04, 0x80, 0x80, 0x80, 0x0D, 0x6B])
+        .expect("the fixture's object type");
+    bytes[at + 5] = 0x69;
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(bytes)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("opens");
+    assert_eq!(
+        audio_announce(&mut demux).map(|a| a.0),
+        Some(AudioCodec::Mp3)
+    );
+}
+
+#[test]
+fn an_mp3_track_that_is_not_layer_iii_is_refused() {
+    let mut bytes = fixture("h264-mp3-320x180.mov");
+    let first = audio_frames(&mut open("h264-mp3-320x180.mov")).remove(0);
+    let at = bytes
+        .windows(first.len())
+        .position(|w| w == first)
+        .expect("the first frame");
+    // Layer II in place of Layer III.
+    bytes[at + 1] = 0xFD;
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(bytes)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("opens on its video");
+    assert_eq!(demux.audio_track(), None);
+    assert!(demux.video_track().is_some());
+    let refusals = demux.take_refusals();
+    assert!(
+        refusals
+            .iter()
+            .any(|n| n.contains("first frame is not MPEG audio Layer III")),
+        "the refusal is noted: {refusals:?}"
+    );
+}
+
+#[test]
+fn an_mp3_first_sample_shorter_than_a_frame_header_is_refused() {
+    let mut bytes = fixture("h264-mp3-320x180.mov");
+    let first = audio_frames(&mut open("h264-mp3-320x180.mov")).remove(0);
+    // The audio `stsz`: version and flags, a zero default size, the count,
+    // then the first sample's size. Cut to three bytes, the sample's first
+    // four still read as a valid header.
+    let size = u32::try_from(first.len())
+        .expect("a small frame")
+        .to_be_bytes();
+    let at = bytes
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"stsz")
+        .map(|(at, _)| at + 16)
+        .find(|&at| bytes[at..at + 4] == size)
+        .expect("the audio stsz");
+    bytes[at..at + 4].copy_from_slice(&3u32.to_be_bytes());
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(bytes)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("opens on its video");
+    assert_eq!(demux.audio_track(), None);
+    let refusals = demux.take_refusals();
+    assert!(
+        refusals
+            .iter()
+            .any(|n| n.contains("too short for a frame header (3 of 4 bytes)")),
+        "the refusal is noted: {refusals:?}"
+    );
+}
+
 #[test]
 fn all_layouts_demux_identically() {
     let baseline = drain(&mut open("h264-aac-640x360-30fps.mp4"));
