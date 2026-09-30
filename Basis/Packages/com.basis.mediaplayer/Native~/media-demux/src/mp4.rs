@@ -743,10 +743,9 @@ impl Mp4Demuxer {
     }
 
     /// Where a track's first sample lies in a file read by its fragment
-    /// index, found without moving the cursors that playback reads from.
-    /// A track that starts late can be missing from the first fragments, so
-    /// they are read in turn, no further than a seek steps. `None` when
-    /// none of those holds the track.
+    /// index. The earliest fragments can hold none of the track, so up to
+    /// `MAX_SEEK_STEPS` of them are read, on cursors of their own so that
+    /// playback's stay where they were.
     fn first_indexed_sample(&mut self, track_id: TrackId) -> Option<(u64, u32)> {
         let fragments = self.fragments.as_ref()?;
         let mut cursors = Cursors::new();

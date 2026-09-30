@@ -8,9 +8,9 @@ sample entry that carries it.
   with no `esds`.
 - fixtures/h264-mp3-320x180-frag.mov: the `.mov` remuxed into fragments
   behind a `sidx`, so its samples are found through the index, not `moov`.
-  Its sound is offset by 1.5 s, so the first fragment holds none of it.
-  With no edit list to state the offset, ffmpeg writes the first sound
-  frame at zero and stretches its duration over the gap.
+  Its sound is offset by 1.5 s, which ffmpeg writes as a first sound
+  frame at zero lasting over the gap, stored after the first fragment,
+  so that fragment holds only picture.
 
 4 s of 320x180 H.264 at 24 fps and stereo MP3 at 44.1 kHz. The sound is
 a 440 Hz sine in the left channel for one second, then the right, and
