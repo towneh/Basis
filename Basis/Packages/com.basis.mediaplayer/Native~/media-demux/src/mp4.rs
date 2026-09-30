@@ -173,6 +173,15 @@ impl Mp4Demuxer {
             budget = reader.remaining_budget();
             head
         };
+        // A fragment takes its tracks, defaults and sample descriptions from
+        // `moov`, so one met first cannot be read. The delivery formats
+        // carrying fragments put `moov` first (RFC 8216 3.3; MSE's
+        // initialization segment).
+        if head.first_fragment.is_some() && head.moov_end.is_none() {
+            return Err(DemuxError::Unsupported(
+                "a movie fragment comes before the moov that describes it",
+            ));
+        }
 
         // With a trusted index the whole file need not be walked: `moov`
         // and the index say where every fragment is. Without one the
@@ -184,7 +193,7 @@ impl Mp4Demuxer {
         let mut mp4 = None;
         let mut walked = None;
         let mut configs = None;
-        let mut fragmented = head.first_fragment.is_some();
+        let mut fragmented = false;
         if let Some(moov_end) = head.moov_end {
             let header = read_metadata(&mut src, moov_end, &mut budget, false)?;
             // Read while `moov` is still in the cache, ahead of any index

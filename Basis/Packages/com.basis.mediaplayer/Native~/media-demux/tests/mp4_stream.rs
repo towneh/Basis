@@ -421,6 +421,43 @@ fn a_walk_stopped_by_a_corrupt_box_size_says_so() {
     assert_eq!(drain(&mut demux).video_aus, 24, "one fragment of 24 frames");
 }
 
+/// A fragment placed ahead of `moov` names tracks and defaults that
+/// nothing has described yet, and is refused rather than read.
+#[test]
+fn a_fragment_before_the_moov_is_refused() {
+    let bytes = fixture("h264-aac-negcts-frag.mp4");
+    let size_at = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let moov = size_at(0);
+    let moof = moov + size_at(moov);
+    let mdat = moof + size_at(moof);
+    let after = mdat + size_at(mdat);
+    assert_eq!(&bytes[moov + 4..moov + 8], b"moov");
+    assert_eq!(&bytes[moof + 4..moof + 8], b"moof");
+    assert_eq!(&bytes[mdat + 4..mdat + 8], b"mdat");
+    // ftyp, the first fragment, then moov and the rest.
+    let moved = [
+        &bytes[..moov],
+        &bytes[moof..after],
+        &bytes[moov..moof],
+        &bytes[after..],
+    ]
+    .concat();
+    match Mp4Demuxer::open(
+        Box::new(MemSource(moved)),
+        DemuxLimits::default(),
+        Generation(1),
+    ) {
+        Err(media_demux::DemuxError::Unsupported(why)) => {
+            assert_eq!(
+                why,
+                "a movie fragment comes before the moov that describes it"
+            );
+        }
+        Err(e) => panic!("refused for the wrong reason: {e}"),
+        Ok(_) => panic!("a fragment ahead of moov must not be read"),
+    }
+}
+
 /// A file whose fragments are as far apart as a real long video's: the
 /// walk has to pay for the headers it parses, not for a cache block per
 /// fragment, or the budget runs out part-way down the file.
