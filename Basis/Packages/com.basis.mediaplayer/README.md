@@ -67,15 +67,18 @@ four, recording diagnostics.
 | `rtspt://` | RTSP over TCP only | `rtspt://stream.vrcdn.live/live/vrcdn` |
 | `rist://` | RIST live (optional AES) | `rist://stream.example:5000?secret=KEY&aes-type=128` |
 | `whep://` / `wheps://` | WHEP (WebRTC), sub-second join | `whep://stream.example:8889/live/whep` |
-| `https://….mp4` | Fragmented live or on-demand MP4 | `https://stream.vrcdn.live/live/vrcdn.live.mp4` |
+| `https://….mp4`, `.mov` | Fragmented live or on-demand MP4, or QuickTime | `https://stream.vrcdn.live/live/vrcdn.live.mp4` |
 | `https://….ts` | MPEG-TS | `https://stream.vrcdn.live/live/vrcdn.live.ts` |
 | `https://….m3u8` | HLS, on-demand or live, including Low-Latency HLS | `https://stream.example/live/index.m3u8` |
 | `https://….webm`, `.mkv` | WebM or Matroska: VP9 or AV1 video, Opus audio | `https://stream.example/vod/clip.webm` |
 | `https://….flac` `.mp3` `.aac` `.opus` `.wav` | Audio only | `https://stream.example/audio/track.flac` |
 | An absolute path | Local file (not a network share; `file://` URLs are refused) | `C:\media\clip.mp4` |
 
-The format is read from the file's contents; the URL needs no extension.
-Private and loopback addresses (`localhost`, `192.168.…`, `10.…`) are refused
+The format is read from the file's contents, but the extension decides the
+route. An `http(s)` URL ending in one of the extensions above (or `.m4v`,
+`.m4a`, `.m4s`, `.m2ts`, `.mts`) opens directly. Any other goes first to an
+installed page resolver such as yt-dlp, and opens directly only when none
+takes it. Private and loopback addresses (`localhost`, `192.168.…`, `10.…`) are refused
 unless **Allow Local Addresses** is ticked. Audio goes up to 7.1 channels.
 
 A track nothing here can play is refused and the reason shown in the Media

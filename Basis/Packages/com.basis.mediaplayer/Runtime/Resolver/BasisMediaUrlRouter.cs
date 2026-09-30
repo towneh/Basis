@@ -142,7 +142,7 @@ public static class BasisMediaUrlRouter
     // codecs the engine does not decode.
     private static readonly string[] DirectExtensions =
     {
-        ".mp4", ".m4v", ".m4a", ".m4s",
+        ".mp4", ".m4v", ".m4a", ".m4s", ".mov",
         ".ts", ".m2ts", ".mts",
         ".m3u8",
         ".mkv", ".webm",
