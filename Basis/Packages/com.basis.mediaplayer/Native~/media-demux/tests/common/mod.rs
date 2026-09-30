@@ -271,3 +271,59 @@ fn pad_index(boxed: &mut [u8]) {
         p += 12;
     }
 }
+
+/// A live stream's source: no length, and bytes served once, in order.
+/// Re-reads are served from a copy of the first [`LIVE_HEAD`] bytes, for
+/// the container sniff and a demuxer starting again at zero; any other
+/// read that does not continue from the last one fails.
+pub struct LiveSource {
+    bytes: Vec<u8>,
+    /// Where the stream has been read to, readable after the demuxer has
+    /// taken the source.
+    served: Arc<AtomicU64>,
+}
+
+pub const LIVE_HEAD: usize = 64 * 1024;
+
+impl LiveSource {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            served: Arc::default(),
+        }
+    }
+
+    pub fn served(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.served)
+    }
+}
+
+impl ByteSource for LiveSource {
+    fn size(&mut self) -> Result<Option<u64>, SourceError> {
+        Ok(None)
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, SourceError> {
+        let served = self.served.load(Ordering::Relaxed);
+        let Ok(at) = usize::try_from(offset) else {
+            return Err("offset past memory".into());
+        };
+        if offset < served {
+            if at >= LIVE_HEAD {
+                return Err(format!("re-read at {offset} with the stream at {served}").into());
+            }
+            // The copy holds only what has been served.
+            let head = &self.bytes[..LIVE_HEAD.min(served as usize)];
+            let n = buf.len().min(head.len() - at);
+            buf[..n].copy_from_slice(&head[at..at + n]);
+            return Ok(n);
+        }
+        if offset > served {
+            return Err(format!("skip to {offset} with the stream at {served}").into());
+        }
+        let n = buf.len().min(self.bytes.len().saturating_sub(at));
+        buf[..n].copy_from_slice(&self.bytes[at..at + n]);
+        self.served.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}

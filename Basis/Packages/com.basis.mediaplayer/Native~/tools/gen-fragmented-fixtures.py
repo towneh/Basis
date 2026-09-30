@@ -5,6 +5,7 @@
     fixtures/h264-aac-manyfrag.mp4        the same streams, no index
     fixtures/h264-aac-longfrag-sidx.mp4   indexed, keyframes inside fragments
     fixtures/h264-aac-bigfrag-sidx.mp4    indexed, a fragment of a megabyte
+    fixtures/h264-aac-livefrag.mp4        a fragment per track every 40 ms
 
 40 s of H.264 (320x180, 24 fps, GOP 12, two B-frames so pts and dts
 differ) + stereo AAC, cut into a fragment every 100 ms and at every
@@ -30,6 +31,11 @@ The fourth is 3 s of 640x360 at 3 Mbit/s in one fragment, which holds
 about a megabyte of video ahead of its audio: several of the demuxer's
 cache blocks, as a real file's fragment is.
 
+The fifth is laid out as a live origin serves fragmented MP4 over HTTP
+in one response: 6 s cut every 40 ms, each track in a `moof` of its own
+(`+separate_moof`) with a `sidx` ahead of it (`+dash`), so the tracks'
+fragments alternate a sample or two at a time.
+
 Needs ffmpeg on PATH. Run from Native~ (the fixture paths are relative
 to it):
 
@@ -45,6 +51,7 @@ INDEXED = os.path.join("fixtures", "h264-aac-manyfrag-sidx.mp4")
 PLAIN = os.path.join("fixtures", "h264-aac-manyfrag.mp4")
 LONGFRAG = os.path.join("fixtures", "h264-aac-longfrag-sidx.mp4")
 BIGFRAG = os.path.join("fixtures", "h264-aac-bigfrag-sidx.mp4")
+LIVEFRAG = os.path.join("fixtures", "h264-aac-livefrag.mp4")
 SECONDS = 40
 LONGFRAG_SECONDS = 20
 FRAGMENT = ["-frag_duration", "100000"]
@@ -107,6 +114,28 @@ def check(path, want_index, min_fragments=257):
           f"sidx references {[count for _, count in reaches]}")
 
 
+def check_live(path):
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path,
+                    "-f", "null", "-"], check=True)
+    data = open(path, "rb").read()
+    boxes = list(top_level(data))
+    fragments = 0
+    for i, (kind, pos, size) in enumerate(boxes):
+        if kind != "moof":
+            continue
+        fragments += 1
+        assert boxes[i - 1][0] == "sidx", f"{path}: moof at {pos} has no sidx"
+        trafs = 0
+        child = pos + 8
+        while child < pos + size:
+            child_size, child_kind = struct.unpack(">I4s", data[child:child + 8])
+            trafs += child_kind == b"traf"
+            child += child_size
+        assert trafs == 1, f"{path}: moof at {pos} holds {trafs} tracks"
+    assert fragments >= 250, f"{path}: only {fragments} fragments"
+    print(f"wrote {path}: {len(data)} bytes, {fragments} fragments")
+
+
 def main():
     os.makedirs("fixtures", exist_ok=True)
     subprocess.run(
@@ -141,10 +170,20 @@ def main():
          "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "2",
          "-movflags", "+frag_keyframe+empty_moov+default_base_moof+global_sidx",
          "-frag_duration", "3000000", *BITEXACT, BIGFRAG], check=True)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=duration=6:size=320x180:rate=24",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+         "-c:v", "libx264", "-preset", "slow", "-crf", "32", "-g", "24",
+         "-bf", "2", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "2",
+         "-movflags", "+empty_moov+default_base_moof+separate_moof+dash",
+         "-frag_duration", "40000", *BITEXACT, LIVEFRAG], check=True)
     check(INDEXED, want_index=True)
     check(PLAIN, want_index=False)
     check(LONGFRAG, want_index=True, min_fragments=8)
     check(BIGFRAG, want_index=True, min_fragments=1)
+    check_live(LIVEFRAG)
     return 0
 
 

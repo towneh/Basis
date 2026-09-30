@@ -967,3 +967,192 @@ fn a_file_with_only_refused_tracks_fails_with_the_reason() {
         Ok(_) => panic!("a file with nothing playable must not open"),
     }
 }
+
+/// Every access unit, by track, as `(pts, dts, key, data)`.
+type ByTrack = std::collections::BTreeMap<u32, Vec<(MediaTime, MediaTime, bool, Vec<u8>)>>;
+
+fn by_track(demux: &mut dyn Demuxer) -> ByTrack {
+    let mut out = ByTrack::new();
+    loop {
+        match demux.next_event().expect("no demux error") {
+            StreamEvent::Au(au) => {
+                out.entry(au.track.0)
+                    .or_default()
+                    .push((au.pts, au.dts, au.key, au.data));
+            }
+            StreamEvent::Eos(reason) => {
+                assert_eq!(reason, EosReason::Natural);
+                return out;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn open_live(bytes: Vec<u8>) -> Result<Box<dyn Demuxer>, media_demux::DemuxError> {
+    media_demux::open_auto(
+        Box::new(common::LiveSource::new(bytes)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+}
+
+/// A fragmented file served as a live stream, with no length and every
+/// byte read once, plays what the file does, sample for sample. The
+/// fixtures between them hold fragments carrying both tracks, one track
+/// each, a segment index ahead of the first or of every fragment, signed
+/// composition offsets, and keyframes inside fragments.
+#[test]
+fn a_live_stream_plays_every_sample_the_file_does() {
+    for name in [
+        "h264-aac-frag.mp4",
+        "h264-aac-negcts-frag.mp4",
+        "h264-aac-manyfrag.mp4",
+        "h264-aac-manyfrag-sidx.mp4",
+        "h264-aac-longfrag-sidx.mp4",
+        "h264-aac-bigfrag-sidx.mp4",
+        "h264-aac-livefrag.mp4",
+    ] {
+        let file = by_track(&mut open(name));
+        let mut live = open_live(fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let streamed = by_track(live.as_mut());
+        assert_eq!(streamed.len(), 2, "{name}: both tracks");
+        assert_eq!(streamed, file, "{name}");
+    }
+}
+
+#[test]
+fn a_live_stream_has_no_length_and_does_not_seek() {
+    let mut live = open_live(fixture("h264-aac-livefrag.mp4")).expect("opens");
+    assert_eq!(live.duration(), None);
+    match live.seek(MediaTime::from_secs(2), Generation(2)) {
+        Err(media_demux::DemuxError::Unsupported(why)) => {
+            assert_eq!(why, "seek on a live MP4 stream");
+        }
+        other => panic!("a live stream must refuse a seek: {other:?}"),
+    }
+}
+
+/// Only a fragmented file says where its samples are as they arrive.
+#[test]
+fn a_live_stream_that_is_not_fragmented_is_refused() {
+    for name in ["h264-aac-640x360-30fps.mp4", "h264-aac-moov-trailing.mp4"] {
+        match open_live(fixture(name)) {
+            Err(media_demux::DemuxError::Unsupported(why)) => assert_eq!(
+                why, "progressive MP4 needs a source with a known length",
+                "{name}"
+            ),
+            Err(e) => panic!("{name}: refused for the wrong reason: {e}"),
+            Ok(_) => panic!("{name}: a progressive file must not open as a live stream"),
+        }
+    }
+}
+
+/// A stream cut part-way through a fragment's media data ends after the
+/// fragments before it.
+#[test]
+fn a_live_stream_cut_inside_a_fragment_ends_after_the_ones_before_it() {
+    let bytes = fixture("h264-aac-livefrag.mp4");
+    let whole = by_track(open_live(bytes.clone()).expect("opens").as_mut());
+    let mdats = top_level(&bytes)
+        .into_iter()
+        .filter(|(kind, _, _)| kind == b"mdat")
+        .collect::<Vec<_>>();
+    let (_, at, size) = mdats[mdats.len() / 2];
+    let cut = by_track(
+        open_live(bytes[..at + size / 2].to_vec())
+            .expect("opens")
+            .as_mut(),
+    );
+    let played: usize = cut.values().map(Vec::len).sum();
+    assert!(played > 0, "the fragments before the cut play");
+    for (track, units) in &cut {
+        assert!(whole[track].starts_with(units), "track {track}");
+    }
+    assert!(
+        played < whole.values().map(Vec::len).sum(),
+        "the cut costs samples"
+    );
+}
+
+/// A stream whose `moov` declares a track it never sends plays the other
+/// no more than half a second behind what has arrived.
+#[test]
+fn a_track_that_never_arrives_holds_the_other_back_half_a_second() {
+    let bytes = fixture("h264-aac-livefrag.mp4");
+    let boxes = top_level(&bytes);
+    // The fixture's audio is track 2, in fragments of its own.
+    let mut video_only = Vec::new();
+    let mut skip_next = false;
+    for &(kind, at, size) in &boxes {
+        let boxed = &bytes[at..at + size];
+        if std::mem::take(&mut skip_next) {
+            assert_eq!(&kind, b"mdat");
+            continue;
+        }
+        if &kind == b"moof" && fragment_track(boxed) == 2 {
+            skip_next = true;
+            continue;
+        }
+        video_only.extend_from_slice(boxed);
+    }
+    let video_ends: Vec<usize> = top_level(&video_only)
+        .into_iter()
+        .filter(|(kind, _, _)| kind == b"mdat")
+        .map(|(_, at, size)| at + size)
+        .collect();
+
+    let source = common::LiveSource::new(video_only.clone());
+    let served = source.served();
+    let mut live = media_demux::open_auto(Box::new(source), DemuxLimits::default(), Generation(1))
+        .expect("opens");
+    let mut n = 0usize;
+    loop {
+        match live.next_event().expect("no demux error") {
+            StreamEvent::Au(au) => {
+                // One picture per fragment at 24 fps: half a second is
+                // twelve of them past the one going out. Near the end,
+                // finding the end reads the rest of the stream.
+                let bound = video_ends.get(n + 13).copied().unwrap_or(video_only.len());
+                let read = served.load(std::sync::atomic::Ordering::Relaxed) as usize;
+                assert!(
+                    read <= bound,
+                    "picture {n} (dts {:?}) went out with {read} bytes read, past {bound}",
+                    au.dts
+                );
+                n += 1;
+            }
+            StreamEvent::Eos(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(n, video_ends.len(), "every picture plays");
+}
+
+/// Top-level boxes as `(kind, offset, size)`.
+fn top_level(bytes: &[u8]) -> Vec<([u8; 4], usize, usize)> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 8 <= bytes.len() {
+        let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        assert!(size >= 8 && at + size <= bytes.len(), "box at {at}");
+        out.push((bytes[at + 4..at + 8].try_into().unwrap(), at, size));
+        at += size;
+    }
+    out
+}
+
+/// The track a single-track `moof` carries, from its `tfhd`.
+fn fragment_track(moof: &[u8]) -> u32 {
+    let traf = top_level(&moof[8..])
+        .into_iter()
+        .find(|(kind, _, _)| kind == b"traf")
+        .map(|(_, at, _)| 8 + at)
+        .expect("a traf");
+    let tfhd = top_level(&moof[traf + 8..])
+        .into_iter()
+        .find(|(kind, _, _)| kind == b"tfhd")
+        .map(|(_, at, _)| traf + 8 + at)
+        .expect("a tfhd");
+    u32::from_be_bytes(moof[tfhd + 12..tfhd + 16].try_into().unwrap())
+}

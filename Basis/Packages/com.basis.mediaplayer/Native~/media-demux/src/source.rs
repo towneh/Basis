@@ -15,8 +15,8 @@ pub type SourceError = Box<dyn std::error::Error + Send + Sync>;
 /// response alive and only re-requests on a real seek).
 pub trait ByteSource: Send {
     /// Total size in bytes, when the source knows it (VOD). Progressive MP4
-    /// demuxing requires a known length; live sources take a
-    /// sequential path.
+    /// demuxing requires a known length; live sources, fragmented MP4
+    /// included, are read sequentially.
     fn size(&mut self) -> Result<Option<u64>, SourceError>;
 
     /// Read up to `buf.len()` bytes at `offset`. A return of 0 means end of

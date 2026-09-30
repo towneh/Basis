@@ -10,6 +10,9 @@
 //! fragment's worth of sample references whatever the file's length, and a
 //! twelve-hour video costs the same to open as a three-minute one.
 //!
+//! A source with no length is a live stream, read as it arrives (see
+//! [`live`]).
+//!
 //! One video track and one audio track (the one asked for, else the first)
 //! are interleaved in decode order. Remaining tracks are reported via
 //! [`Mp4Demuxer::take_notes`], and tracks nothing here can play via
@@ -28,6 +31,8 @@ use crate::mp4_fragment::{Cursors, FragmentSample, TrackDefaults};
 use crate::mp4_index::{IndexEntry, SegmentIndex};
 use crate::source::{ByteSource, CachedSource, SourceReader};
 use crate::{Au, AudioCodec, DemuxError, EosReason, Format, StreamEvent, TrackId, VideoCodec};
+
+mod live;
 
 #[derive(Debug, Clone, Copy)]
 struct SampleRef {
@@ -68,6 +73,17 @@ impl Samples {
         match self {
             Self::Whole { .. } => 0,
             Self::Held(held) => held.len(),
+        }
+    }
+
+    /// How far apart in decode time the held samples lie.
+    fn held_span(&self) -> MediaTime {
+        match self {
+            Self::Held(held) => match (held.front(), held.back()) {
+                (Some(first), Some(last)) => last.dts.saturating_sub(first.dts),
+                _ => MediaTime::ZERO,
+            },
+            Self::Whole { .. } => MediaTime::ZERO,
         }
     }
 }
@@ -137,6 +153,8 @@ pub struct Mp4Demuxer {
     fragments: Option<Fragments>,
     /// The data of the fragments whose samples are queued.
     runs: crate::mp4_runs::HeldRuns,
+    /// Present when the source has no length and is read as it arrives.
+    live: Option<live::Live>,
 }
 
 impl Mp4Demuxer {
@@ -158,12 +176,9 @@ impl Mp4Demuxer {
         // files interleave per-track sample runs, both of which thrash a
         // ranged HTTP source without a cache.
         let mut src = CachedSource::new(src);
-        let len = src
-            .size()
-            .map_err(DemuxError::Source)?
-            .ok_or(DemuxError::Unsupported(
-                "progressive MP4 needs a source with a known length",
-            ))?;
+        let Some(len) = src.size().map_err(DemuxError::Source)? else {
+            return Self::open_live(src, limits, generation, options);
+        };
 
         // `moov` first, and nothing past it (see `scan_prefix`).
         let mut notes = Vec::new();
@@ -269,7 +284,23 @@ impl Mp4Demuxer {
             index,
             next: 0,
         });
-        let mut this = Self {
+        let mut this = Self::new(src, limits, generation, notes, &mp4);
+        this.fragments = fragments;
+        this.bind(&mp4, options, &configs, walked.as_ref())?;
+        if this.duration.is_none() {
+            this.duration = stated_duration(&mp4, this.fragments.as_ref());
+        }
+        Ok(this)
+    }
+
+    fn new(
+        src: CachedSource,
+        limits: DemuxLimits,
+        generation: Generation,
+        notes: Vec<String>,
+        mp4: &re_mp4::Mp4,
+    ) -> Self {
+        Self {
             src,
             limits,
             generation,
@@ -281,24 +312,31 @@ impl Mp4Demuxer {
             refusals: Vec::new(),
             emit_raw_video: false,
             audio_tracks: Vec::new(),
-            artwork: artwork_from_moov(&mp4),
-            fragments,
+            artwork: artwork_from_moov(mp4),
+            fragments: None,
             runs: crate::mp4_runs::HeldRuns::default(),
-        };
-        this.extract_tracks(&mp4, options, &configs, walked.as_ref())?;
+            live: None,
+        }
+    }
 
-        if this.video.is_none() && this.audio.is_none() {
-            if !this.refusals.is_empty() {
-                return Err(DemuxError::Refused(this.refusals.join("; ")));
+    /// Bind the tracks, failing when none of them can be played.
+    fn bind(
+        &mut self,
+        mp4: &re_mp4::Mp4,
+        options: &DemuxOptions,
+        configs: &HashMap<u32, Vec<u8>>,
+        walked: Option<&Walked>,
+    ) -> Result<(), DemuxError> {
+        self.extract_tracks(mp4, options, configs, walked)?;
+        if self.video.is_none() && self.audio.is_none() {
+            if !self.refusals.is_empty() {
+                return Err(DemuxError::Refused(self.refusals.join("; ")));
             }
             return Err(DemuxError::Unsupported(
                 "no decodable track (need H.264 video or AAC audio)",
             ));
         }
-        if this.duration.is_none() {
-            this.duration = stated_duration(&mp4, this.fragments.as_ref());
-        }
-        Ok(this)
+        Ok(())
     }
 
     /// Per-track findings the engine should surface as diagnostics
@@ -680,7 +718,7 @@ impl Mp4Demuxer {
     /// The whole table for a file that states one, an empty queue for a
     /// file whose fragments are read as they are reached.
     fn new_samples(&self, all: Vec<SampleRef>) -> Samples {
-        if self.fragments.is_some() {
+        if self.fragments.is_some() || self.live.is_some() {
             Samples::Held(VecDeque::new())
         } else {
             Samples::Whole { all, next: 0 }
@@ -844,6 +882,9 @@ impl Mp4Demuxer {
     /// Read ahead until both bound tracks have something to pick from, or
     /// the file runs out.
     fn fill(&mut self) -> Result<(), DemuxError> {
+        if self.live.is_some() {
+            return self.fill_live();
+        }
         while self.fragments.is_some() {
             let starved = self
                 .video
@@ -1776,6 +1817,9 @@ impl Demuxer for Mp4Demuxer {
     }
 
     fn seek(&mut self, target: MediaTime, generation: Generation) -> Result<MediaTime, DemuxError> {
+        if self.live.is_some() {
+            return Err(DemuxError::Unsupported("seek on a live MP4 stream"));
+        }
         self.generation = generation;
         if self.fragments.is_some() {
             return self.seek_fragmented(target);

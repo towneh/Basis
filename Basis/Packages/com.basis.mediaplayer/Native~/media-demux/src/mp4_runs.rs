@@ -161,13 +161,25 @@ impl HeldRuns {
         }
     }
 
+    /// Hold data already read, for the `remaining` samples queued in it: a
+    /// live stream's media data, which a forward-only source serves once.
+    pub fn adopt(&mut self, start: u64, bytes: Vec<u8>, remaining: usize) {
+        self.held += bytes.len() as u64;
+        self.runs.push_back(Run {
+            start,
+            filled: bytes.len(),
+            bytes,
+            remaining,
+        });
+    }
+
     pub fn clear(&mut self) {
         self.runs.clear();
         self.held = 0;
     }
 
-    #[cfg(test)]
-    fn held(&self) -> u64 {
+    /// Bytes held across every run.
+    pub fn held(&self) -> u64 {
         self.held
     }
 }
