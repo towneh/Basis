@@ -307,6 +307,21 @@ fn an_empty_edit_starts_the_video_late() {
 /// 1,024 samples: an empty edit of 500 ms, then an edit from media time
 /// 1024. The priming lands at 478.7 ms, after zero, so the demuxer names
 /// where the sound itself begins for the audio stage to drop it against.
+/// With no edit list a video track presents at the times the file
+/// states: two B-frames of reorder delay put the first picture 83 ms in.
+#[test]
+fn a_video_track_without_an_edit_list_keeps_its_reorder_delay() {
+    let mut demux = open("h264-aac-no-edit-list.mp4");
+    let video = demux.video_track().expect("a video track").0;
+    let first = access_units(&mut demux)
+        .into_iter()
+        .filter(|(track, ..)| *track == video)
+        .map(|(_, pts, ..)| pts)
+        .min()
+        .expect("video access units");
+    assert_eq!(first, MediaTime::from_micros(83_333));
+}
+
 #[test]
 fn an_empty_edit_keeps_the_audio_priming_ahead_of_the_start() {
     let mut demux = open("h264-aac-late-audio.mp4");

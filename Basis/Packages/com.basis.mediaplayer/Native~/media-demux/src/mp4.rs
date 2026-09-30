@@ -79,8 +79,9 @@ struct VideoTrack {
     /// `sps`); `None` for codecs whose samples pass through as stored
     /// (VP9 raw frames, AV1 temporal units).
     avc: Option<AvcParams>,
-    /// The edit list's shift, in the track's timescale: negative by the
-    /// gap when the picture starts after the movie does.
+    /// The edit list's shift, in the track's timescale: where
+    /// presentation starts in the media, less any gap before the picture
+    /// starts.
     shift: i64,
 }
 
@@ -512,14 +513,18 @@ impl Mp4Demuxer {
             }
         };
 
-        // re_mp4 already takes the reorder delay out of the sample table,
-        // which is what the video track's first real edit states; only a
-        // gap before the track starts is left to apply.
-        let movie_timescale = u64::from(mp4.moov.mvhd.timescale);
-        let shift = edit_start(track.trak(mp4), movie_timescale, track.timescale)
-            .empty
-            .saturating_neg();
-        let samples = self.new_samples(self.collect_samples(track, walked, shift)?);
+        // The first real edit names where presentation starts in the
+        // media, usually the reorder delay; with no edit list the times
+        // are presented as the file states them.
+        let trak = track.trak(mp4);
+        let edits = edit_start(trak, u64::from(mp4.moov.mvhd.timescale), track.timescale);
+        let shift = edits.media_time.saturating_sub(edits.empty);
+        let samples = self.new_samples(self.collect_samples(
+            track,
+            moov_reorder(track, trak),
+            walked,
+            shift,
+        )?);
         let width = if box_width != 0 {
             box_width
         } else {
@@ -647,7 +652,7 @@ impl Mp4Demuxer {
         let shift = edits.media_time.saturating_sub(edits.empty);
         let start = MediaTime::from_micros(scale_to_us(edits.empty, track.timescale.max(1)));
 
-        let samples = match self.collect_samples(track, walked, shift) {
+        let samples = match self.collect_samples(track, moov_reorder(track, trak), walked, shift) {
             Ok(samples) => samples,
             Err(e) => {
                 push_note(&mut self.refusals, || {
@@ -686,10 +691,12 @@ impl Mp4Demuxer {
     }
 
     /// A track's whole table: from the fragment walk where the file was
-    /// walked, from the parsed `moov` otherwise.
+    /// walked, from the parsed `moov` otherwise, whose times `reorder`
+    /// returns to the ones the file states.
     fn collect_samples(
         &self,
         track: &re_mp4::Track,
+        reorder: i64,
         walked: Option<&[FragmentSample]>,
         shift: i64,
     ) -> Result<Vec<SampleRef>, DemuxError> {
@@ -698,7 +705,7 @@ impl Mp4Demuxer {
                 .iter()
                 .map(|s| to_ref(*s, track.timescale.max(1), shift, &self.limits))
                 .collect(),
-            None => self.collect_shifted_samples(&track.samples, shift),
+            None => self.collect_shifted_samples(&track.samples, shift.saturating_sub(reorder)),
         }
     }
 
@@ -1363,6 +1370,25 @@ fn unsupported_video(entry: &str) -> String {
 /// the leading empty edits, a track starting after the movie does, and
 /// the media time the first real edit starts from. An empty edit is
 /// stated in the movie's timescale.
+/// How far the parse of `moov` moved a track's composition times back:
+/// it takes the smallest out whether or not an edit list asks for it.
+/// The file decodes its first sample at zero, which makes its first
+/// `ctts` offset that sample's stated composition time.
+fn moov_reorder(track: &re_mp4::Track, trak: &re_mp4::TrakBox) -> i64 {
+    let Some(first) = track.samples.first() else {
+        return 0;
+    };
+    let stated = trak
+        .mdia
+        .minf
+        .stbl
+        .ctts
+        .as_ref()
+        .and_then(|ctts| ctts.entries.first())
+        .map_or(0, |entry| i64::from(entry.sample_offset));
+    stated.saturating_sub(first.composition_timestamp)
+}
+
 struct EditStart {
     empty: i64,
     media_time: i64,
