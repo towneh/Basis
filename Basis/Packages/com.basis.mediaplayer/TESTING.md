@@ -34,9 +34,10 @@ shows they build, nothing more.
 
 ## Shared playback
 
-Needs two clients in the same world. `Basis > Tools > Media Player > Test
-Scene > Shared Playback (two clients)` builds a scene with one networked player
-and no source set: use a URL both clients can fetch, not a local file. The
+Needs two clients in the same world. Build the scene with `Basis > Tools >
+Media Player > Test Scene > One Player (Stereo)`, then replace its source with a
+URL both clients can fetch. A local file loads on the owner and fails on the
+follower, which looks like a sync defect and is not one. The
 lettered clips in `Native~/fixtures/captest` suit it: four 60 s H.264 clips
 with a keyframe every second, each showing a letter, a colour and a running
 timecode for comparing the two screens. Their music is Kevin MacLeod

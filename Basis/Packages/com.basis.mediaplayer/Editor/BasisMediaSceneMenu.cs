@@ -56,17 +56,6 @@ public static class BasisMediaSceneMenu
     [MenuItem("Basis/Tools/Media Player/Test Scene/Four Players (7.1)", false, 103)]
     static void BuildFourSurround() => Build(4, SurroundPrefab, "7.1");
 
-    /// <summary>
-    /// The shared-playback rows: one networked player, and deliberately no
-    /// source. Every other test scene pre-fills a local fixture, and a local
-    /// path cannot work here: it loads on the owner and fails on the follower,
-    /// which reads as a sync defect rather than as a file the second machine
-    /// does not have. Both prefabs carry the networking
-    /// component, so the player itself needs nothing added.
-    /// </summary>
-    [MenuItem("Basis/Tools/Media Player/Test Scene/Shared Playback (two clients)", false, 104)]
-    static void BuildSharedPlayback() => Build(1, StereoPrefab, "stereo", fillSource: false);
-
     [MenuItem("Basis/Tools/Media Player/Insert Player (existing scene)/Stereo", false, 120)]
     static void InsertStereo() => Insert(StereoPrefab);
 
@@ -78,7 +67,7 @@ public static class BasisMediaSceneMenu
     /// scene is left dirty for you to keep or discard, and every object is
     /// registered for undo.
     /// </summary>
-    static void Build(int count, string prefabPath, string arrangement, bool fillSource = true)
+    static void Build(int count, string prefabPath, string arrangement)
     {
         if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
 
@@ -106,8 +95,8 @@ public static class BasisMediaSceneMenu
 
         EnsureDirectionalLight(scene);
 
-        string[] clips = fillSource ? TestClipUrls() : System.Array.Empty<string>();
-        string fixture = fillSource ? DefaultFixtureUrl() : string.Empty;
+        string[] clips = TestClipUrls();
+        string fixture = DefaultFixtureUrl();
         GameObject first = null;
         for (int i = 0; i < count; i++)
         {
@@ -136,17 +125,13 @@ public static class BasisMediaSceneMenu
         Selection.activeGameObject = first;
         EditorSceneManager.MarkSceneDirty(scene);
 
-        string where = !fillSource
-            ? "No source on purpose: set a URL both clients can reach. A local file "
-              + "path loads here and fails on the follower, which looks like a sync "
-              + "defect and is not one. Save the scene and add it to Build Settings "
-              + "to build the second client."
-            : clips.Length > 0
-                ? $"Pre-filled with {clips.Length} lettered test clips."
-                : string.IsNullOrEmpty(fixture)
-                    ? "Set a URL on each, then enter play mode."
-                    : "Pre-filled with the engine's 6 s A/V fixture, too "
-                      + "short for the rows that need walking. See TESTING.md.";
+        int assigned = Mathf.Min(count, clips.Length);
+        string where = assigned > 0
+            ? $"Pre-filled with {assigned} lettered test clip{(assigned == 1 ? "" : "s")}."
+            : string.IsNullOrEmpty(fixture)
+                ? "Set a URL on each, then enter play mode."
+                : "Pre-filled with the engine's 6 s A/V fixture, too "
+                  + "short for the rows that need walking. See TESTING.md.";
         Debug.Log($"[BasisMedia] test scene built with {count} {arrangement} player(s). {where} " +
                   "Both captures are on: the per-frame one writes as it goes, the engine's " +
                   $"lands when each session ends. Look in {Application.persistentDataPath}. " +

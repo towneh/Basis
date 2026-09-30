@@ -56,8 +56,8 @@ This plays picture only; sound needs a `BasisMediaPlayerAudio` (see
 [Audio](#audio)).
 
 `Basis > Tools > Media Player > Run Smoke Test` plays a test file and reports
-pass or fail. `Test Scene` in the same menu builds a scene with one player,
-four players, or two clients sharing playback, recording diagnostics.
+pass or fail. `Test Scene` in the same menu builds a scene with one player or
+four, recording diagnostics.
 
 ## Supported URLs
 
