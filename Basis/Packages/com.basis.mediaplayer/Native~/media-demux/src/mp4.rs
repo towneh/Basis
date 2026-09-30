@@ -182,6 +182,7 @@ impl Mp4Demuxer {
         // fragment would exhaust the budget part-way down a long file).
         let mut index = None;
         let mut mp4 = None;
+        let mut walked = None;
         let mut configs = None;
         let mut fragmented = head.first_fragment.is_some();
         if let Some(moov_end) = head.moov_end {
@@ -206,8 +207,10 @@ impl Mp4Demuxer {
                     budget = reader.remaining_budget();
                     tail
                 };
+                let mut media = None;
                 if let Some(first) = tail.first_fragment {
                     let media_end = media_end(&tail.indexes, len, &mut src);
+                    media = Some((first, media_end));
                     let trusted: Vec<SegmentIndex> = tail
                         .indexes
                         .into_iter()
@@ -228,6 +231,16 @@ impl Mp4Demuxer {
                     }
                 }
                 if index.is_some() {
+                    mp4 = Some(header);
+                } else if let Some((first, media_end)) = media {
+                    walked = Some(walk_fragments(
+                        &mut src,
+                        &header,
+                        first..media_end,
+                        &limits,
+                        &mut budget,
+                        &mut notes,
+                    )?);
                     mp4 = Some(header);
                 }
             } else {
@@ -263,7 +276,7 @@ impl Mp4Demuxer {
             fragments,
             runs: crate::mp4_runs::HeldRuns::default(),
         };
-        this.extract_tracks(&mp4, options, &configs)?;
+        this.extract_tracks(&mp4, options, &configs, walked.as_ref())?;
 
         if this.video.is_none() && this.audio.is_none() {
             if !this.refusals.is_empty() {
@@ -311,6 +324,7 @@ impl Mp4Demuxer {
         mp4: &re_mp4::Mp4,
         options: &DemuxOptions,
         configs: &HashMap<u32, Vec<u8>>,
+        walked: Option<&Walked>,
     ) -> Result<(), DemuxError> {
         let mut duration = MediaTime::ZERO;
 
@@ -348,9 +362,10 @@ impl Mp4Demuxer {
 
         for (id, track) in mp4.tracks() {
             let track_id = TrackId(*id);
+            let walked = walked.map(|w| w.get(id).map_or(&[][..], Vec::as_slice));
             match track.kind {
                 Some(re_mp4::TrackKind::Video) if self.video.is_none() => {
-                    match self.extract_video(mp4, track, track_id)? {
+                    match self.extract_video(mp4, track, track_id, walked)? {
                         Some(()) => {}
                         None => continue,
                     }
@@ -363,7 +378,10 @@ impl Mp4Demuxer {
                     if self.audio.is_none() && wanted.is_none_or(|w| *id >= w) =>
                 {
                     let config = configs.get(id).map(Vec::as_slice);
-                    if self.extract_audio(mp4, track, track_id, config).is_none() {
+                    if self
+                        .extract_audio(mp4, track, track_id, config, walked)
+                        .is_none()
+                    {
                         continue;
                     }
                 }
@@ -388,7 +406,19 @@ impl Mp4Demuxer {
                     continue;
                 }
             }
-            if let Some(track_duration) = stated_span(track.duration, track.timescale) {
+            let shift = [
+                self.video.as_ref().map(|v| (v.id, v.shift)),
+                self.audio.as_ref().map(|a| (a.id, a.shift)),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|(id, _)| *id == track_id)
+            .map_or(0, |(_, shift)| shift);
+            let stated = match walked {
+                Some(samples) => walked_end(samples, track.timescale, shift),
+                None => stated_span(track.duration, track.timescale),
+            };
+            if let Some(track_duration) = stated {
                 duration = duration.max(track_duration);
             }
         }
@@ -404,6 +434,7 @@ impl Mp4Demuxer {
         mp4: &re_mp4::Mp4,
         track: &re_mp4::Track,
         track_id: TrackId,
+        walked: Option<&[FragmentSample]>,
     ) -> Result<Option<()>, DemuxError> {
         let stsd = &track.trak(mp4).mdia.minf.stbl.stsd;
         let mut codec_private = Vec::new();
@@ -479,7 +510,7 @@ impl Mp4Demuxer {
         let shift = edit_start(track.trak(mp4), movie_timescale, track.timescale)
             .empty
             .saturating_neg();
-        let samples = self.new_samples(self.collect_shifted_samples(&track.samples, shift)?);
+        let samples = self.new_samples(self.collect_samples(track, walked, shift)?);
         let width = if box_width != 0 {
             box_width
         } else {
@@ -517,6 +548,7 @@ impl Mp4Demuxer {
         track: &re_mp4::Track,
         track_id: TrackId,
         config: Option<&[u8]>,
+        walked: Option<&[FragmentSample]>,
     ) -> Option<()> {
         let trak = track.trak(mp4);
         let stsd = &trak.mdia.minf.stbl.stsd;
@@ -606,7 +638,7 @@ impl Mp4Demuxer {
         let shift = edits.media_time.saturating_sub(edits.empty);
         let start = MediaTime::from_micros(scale_to_us(edits.empty, track.timescale.max(1)));
 
-        let samples = match self.collect_shifted_samples(&track.samples, shift) {
+        let samples = match self.collect_samples(track, walked, shift) {
             Ok(samples) => samples,
             Err(e) => {
                 push_note(&mut self.refusals, || {
@@ -641,6 +673,23 @@ impl Mp4Demuxer {
             Samples::Held(VecDeque::new())
         } else {
             Samples::Whole { all, next: 0 }
+        }
+    }
+
+    /// A track's whole table: from the fragment walk where the file was
+    /// walked, from the parsed `moov` otherwise.
+    fn collect_samples(
+        &self,
+        track: &re_mp4::Track,
+        walked: Option<&[FragmentSample]>,
+        shift: i64,
+    ) -> Result<Vec<SampleRef>, DemuxError> {
+        match walked {
+            Some(samples) => samples
+                .iter()
+                .map(|s| to_ref(*s, track.timescale.max(1), shift, &self.limits))
+                .collect(),
+            None => self.collect_shifted_samples(&track.samples, shift),
         }
     }
 
@@ -959,6 +1008,9 @@ const MAX_HELD_SAMPLES: usize = 65536;
 /// Samples one subsegment may state, across all its fragments and
 /// tracks: hours of 30 fps video with AAC beside it.
 const MAX_FRAGMENT_SAMPLES: usize = 1 << 20;
+/// Samples a file read by walking its fragments may state in all: about
+/// fifteen hours of 30 fps video with AAC beside it.
+const MAX_WALKED_SAMPLES: usize = 1 << 22;
 /// Fragments a seek steps over looking for the one holding its target,
 /// in either direction.
 const MAX_SEEK_STEPS: usize = 64;
@@ -1418,6 +1470,127 @@ fn read_subsegment(
         ));
     }
     Ok(moofs)
+}
+
+/// Every sample of a fragmented file read by walking its fragments, by
+/// track.
+type Walked = BTreeMap<u32, Vec<FragmentSample>>;
+
+/// Walk the fragments of a file that states no index, building each as
+/// the indexed path does. Only fragment headers are fetched, charged to
+/// the open's budget, and the samples the whole file may state are
+/// capped: a run with no per-sample fields states its count in four
+/// bytes. A box running past the end, or a header cut short or
+/// unreadable, ends the walk with a note saying where, as a capture cut
+/// off mid-fragment does. A failing source or an exhausted budget fails
+/// the open instead: a table silently short of later fragments would end
+/// the file early.
+fn walk_fragments(
+    src: &mut CachedSource,
+    header: &re_mp4::Mp4,
+    media: std::ops::Range<u64>,
+    limits: &DemuxLimits,
+    budget: &mut u64,
+    notes: &mut Vec<String>,
+) -> Result<Walked, DemuxError> {
+    let mut reader = SourceReader::new_sparse(src.inner_mut(), media.end, *budget);
+    let walked = walk_moofs(&mut reader, header, media, limits, notes);
+    *budget = reader.remaining_budget();
+    walked
+}
+
+fn walk_moofs(
+    reader: &mut SourceReader<'_>,
+    header: &re_mp4::Mp4,
+    media: std::ops::Range<u64>,
+    limits: &DemuxLimits,
+    notes: &mut Vec<String>,
+) -> Result<Walked, DemuxError> {
+    let defaults = crate::mp4_fragment::track_defaults(&header.moov);
+    let ceiling = MAX_FRAGMENT_BYTES.min(limits.max_metadata_bytes);
+    let mut cursors = Cursors::new();
+    let mut samples_left = MAX_WALKED_SAMPLES;
+    let mut walked = Walked::new();
+    let mut pos = media.start;
+
+    let stopped = loop {
+        if pos == media.end {
+            break None;
+        }
+        if media.end - pos < 8 {
+            break Some("fewer bytes are left than a box header takes");
+        }
+        if reader.seek(SeekFrom::Start(pos)).is_err() {
+            break Some("the box there cannot be reached");
+        }
+        let header = match BoxHeader::read(&mut *reader) {
+            Ok(header) => header,
+            Err(re_mp4::Error::Io(e)) if e.kind() != std::io::ErrorKind::UnexpectedEof => {
+                return Err(DemuxError::Io(e));
+            }
+            Err(_) => break Some("a box header there is cut short or unreadable"),
+        };
+        let body = reader.stream_position().map_err(DemuxError::Io)?;
+        // Measured from `body - 8` as in the other walks, so a 64-bit
+        // header's box reaches as far as its size says.
+        let size = header.size;
+        let Some(next) = (body - 8).checked_add(size) else {
+            break Some("a box there states a size past any file's end");
+        };
+        if size < 8 {
+            break Some("a box there states a size shorter than its header");
+        }
+        if next > media.end {
+            break Some("a box there runs past the end of the file");
+        }
+        if header.name == BoxType::MoofBox {
+            if size > ceiling {
+                return Err(DemuxError::Cap("movie fragment above the header ceiling"));
+            }
+            let moof = match catch_unwind(AssertUnwindSafe(|| {
+                MoofBox::read_box(&mut *reader, size)
+            })) {
+                Ok(Ok(moof)) => moof,
+                Ok(Err(e)) => return Err(DemuxError::Parse(format!("mp4: movie fragment: {e}"))),
+                Err(_) => {
+                    return Err(DemuxError::Parse(
+                        "mp4 parser panicked on a movie fragment".into(),
+                    ));
+                }
+            };
+            let built =
+                crate::mp4_fragment::build(&moof, &defaults, &mut cursors, &mut samples_left)
+                    .map_err(|why| DemuxError::Parse(format!("mp4: {why}")))?;
+            for (track_id, samples) in built {
+                walked.entry(track_id).or_default().extend(samples);
+            }
+        }
+        pos = next;
+    };
+    if let Some(why) = stopped {
+        push_note(notes, || {
+            format!(
+                "fragment walk stopped at byte {pos} of {}: {why}; the fragments before it play",
+                media.end
+            )
+        });
+    }
+    Ok(walked)
+}
+
+/// Where a walked track's media ends: the latest any sample finishes
+/// presenting, with the track's edit-list shift applied as it is to the
+/// samples themselves.
+fn walked_end(samples: &[FragmentSample], timescale: u64, shift: i64) -> Option<MediaTime> {
+    let end = samples
+        .iter()
+        .map(|s| {
+            s.pts
+                .saturating_sub(shift)
+                .saturating_add(i64::from(s.duration))
+        })
+        .max()?;
+    stated_span(u64::try_from(end).ok()?, timescale)
 }
 
 /// Move a time from one timescale to another.
@@ -2009,6 +2182,121 @@ mod tests {
             stated_span(99 * 3600 * 1000, 1000),
             Some(MediaTime::from_secs(99 * 3600)),
             "and the bound is not refusing long files as such"
+        );
+    }
+
+    /// A fragment whose run states only a count: sixteen bytes that name
+    /// any number of samples, all taking the track defaults.
+    fn counted_fragment(count: u32) -> Vec<u8> {
+        let mut mfhd = header(16, b"mfhd");
+        mfhd.extend_from_slice(&[0; 4]);
+        mfhd.extend_from_slice(&1u32.to_be_bytes());
+        let mut tfhd = header(16, b"tfhd");
+        tfhd.extend_from_slice(&0x0002_0000u32.to_be_bytes()); // default base is moof
+        tfhd.extend_from_slice(&1u32.to_be_bytes());
+        let mut trun = header(16, b"trun");
+        trun.extend_from_slice(&[0; 4]);
+        trun.extend_from_slice(&count.to_be_bytes());
+        let traf = [header(8 + 32, b"traf"), tfhd, trun].concat();
+        [header(8 + 16 + 40, b"moof"), mfhd, traf].concat()
+    }
+
+    /// Running out of budget part-way down the fragments fails the open
+    /// rather than ending the file where the walk stopped.
+    #[test]
+    fn a_walk_that_runs_out_of_budget_fails_the_open() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures/h264-aac-negcts-frag.mp4"),
+        )
+        .expect("fixture readable");
+        let size_at = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+        let moov_end = (size_at(0) + size_at(size_at(0) as usize)) as u64;
+        let len = bytes.len() as u64;
+        let mut src = CachedSource::new(Box::new(MemSource(bytes)));
+        let mut budget = DemuxLimits::default().max_metadata_bytes;
+        let header =
+            read_metadata(&mut src, moov_end, &mut budget, false).expect("the moov parses");
+        let mut budget = 1024;
+        assert!(matches!(
+            walk_fragments(
+                &mut src,
+                &header,
+                moov_end..len,
+                &DemuxLimits::default(),
+                &mut budget,
+                &mut Vec::new(),
+            ),
+            Err(DemuxError::Io(_))
+        ));
+    }
+
+    /// A walked track ends where its last sample does on the timeline the
+    /// samples are emitted on: an audio track's priming is not counted.
+    #[test]
+    fn a_walked_end_takes_the_edit_list_shift() {
+        let sample = |pts| FragmentSample {
+            offset: 0,
+            size: 4,
+            dts: pts,
+            pts,
+            duration: 1024,
+            sync: true,
+        };
+        let samples = [sample(0), sample(48000)];
+        assert_eq!(
+            walked_end(&samples, 48000, 1024),
+            Some(MediaTime::from_micros(1_000_000))
+        );
+        assert_eq!(
+            walked_end(&samples, 48000, 0),
+            Some(MediaTime::from_micros(1_021_333))
+        );
+    }
+
+    /// The walk caps the samples a file states in all, not per fragment:
+    /// each run here is within a fragment's allowance, and only the file
+    /// as a whole goes past. Pinned on both sides of the limit.
+    #[test]
+    fn a_walked_file_may_state_so_many_samples_and_no_more() {
+        let fixture = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures/h264-aac-negcts-frag.mp4"),
+        )
+        .expect("fixture readable");
+        // `ftyp` then `moov`, each stated in an ordinary size.
+        let size_at = |at: usize| u32::from_be_bytes(fixture[at..at + 4].try_into().unwrap());
+        let ftyp = size_at(0) as usize;
+        assert_eq!(&fixture[ftyp + 4..ftyp + 8], b"moov");
+        let moov_end = (ftyp + size_at(ftyp) as usize) as u64;
+        let init = fixture[..moov_end as usize].to_vec();
+
+        let walk = |counts: &[u32]| {
+            let mut bytes = init.clone();
+            for count in counts {
+                bytes.extend(counted_fragment(*count));
+            }
+            let len = bytes.len() as u64;
+            let mut src = CachedSource::new(Box::new(MemSource(bytes)));
+            let mut budget = DemuxLimits::default().max_metadata_bytes;
+            let header =
+                read_metadata(&mut src, moov_end, &mut budget, false).expect("the moov parses");
+            walk_fragments(
+                &mut src,
+                &header,
+                moov_end..len,
+                &DemuxLimits::default(),
+                &mut budget,
+                &mut Vec::new(),
+            )
+        };
+
+        let half = 1 << 21;
+        let walked = walk(&[half, half]).expect("four million samples in all");
+        assert_eq!(walked.values().map(Vec::len).sum::<usize>(), 1 << 22);
+        assert!(
+            matches!(walk(&[half, half + 1]), Err(DemuxError::Parse(_))),
+            "one sample past the file's allowance"
         );
     }
 

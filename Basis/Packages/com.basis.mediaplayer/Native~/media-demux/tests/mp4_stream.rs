@@ -333,6 +333,94 @@ fn truncated_metadata_is_a_typed_error() {
     assert!(result.is_err());
 }
 
+/// A `trun` of version 1 states signed composition offsets: a B-frame
+/// presented before the frame decoded ahead of it carries a negative one.
+/// With no index the file is read by walking its fragments, as a live
+/// stream's segments are. Read unsigned, each B-frame would land 2^32
+/// ticks later than it belongs and never come due.
+#[test]
+fn negative_composition_offsets_keep_b_frames_in_place() {
+    let mut demux = open("h264-aac-negcts-frag.mp4");
+    let duration = demux.duration().expect("the walk measures the file");
+    assert!(
+        duration <= MediaTime::from_micros(6_100_000),
+        "duration {duration:?}"
+    );
+
+    let mut pts: Vec<i64> = access_units(&mut demux)
+        .into_iter()
+        .filter(|(track, ..)| Some(*track) == demux.video_track().map(|t| t.0))
+        .map(|(_, pts, ..)| pts.as_micros())
+        .collect();
+    assert_eq!(pts.len(), 144, "every frame of 6 s at 24 fps");
+    pts.sort_unstable();
+    let first = pts[0];
+    for (i, at) in pts.iter().enumerate() {
+        let expected = first + (i as i64 * 1_000_000) / 24;
+        assert!(
+            (at - expected).abs() <= 1,
+            "frame {i} presents at {at} us, expected {expected}"
+        );
+    }
+    assert!(pts[143] < 6_100_000, "last frame at {} us", pts[143]);
+}
+
+/// A capture cut off inside the header of the box after its last whole
+/// fragment, here a 64-bit one with only twelve of its sixteen bytes,
+/// plays what it holds.
+#[test]
+fn a_walk_cut_inside_a_box_header_keeps_the_fragments_before_it() {
+    let mut bytes = fixture("h264-aac-negcts-frag.mp4");
+    bytes.extend_from_slice(&1u32.to_be_bytes());
+    bytes.extend_from_slice(b"mdat");
+    bytes.extend_from_slice(&[0; 4]);
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(bytes)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("the whole fragments still open");
+    let notes = demux.take_notes();
+    assert!(
+        notes.iter().any(|n| n.contains(
+            "fragment walk stopped at byte 145989 of 146001: a box header there is cut short"
+        )),
+        "the early end is noted: {notes:?}"
+    );
+    assert_eq!(drain(&mut demux).video_aus, 144);
+}
+
+/// A box stating a size shorter than its own header, part-way down the
+/// file, ends the walk there; the fragments before it play and a note
+/// says where the rest was lost.
+#[test]
+fn a_walk_stopped_by_a_corrupt_box_size_says_so() {
+    let bytes = fixture("h264-aac-negcts-frag.mp4");
+    let size_at = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let moof = size_at(0) + size_at(size_at(0));
+    let after = moof + size_at(moof);
+    let after = after + size_at(after);
+    let mut corrupt = bytes[..after].to_vec();
+    corrupt.extend_from_slice(&4u32.to_be_bytes());
+    corrupt.extend_from_slice(b"free");
+    corrupt.extend_from_slice(&bytes[after..]);
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(corrupt)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("the first fragment still opens");
+    let notes = demux.take_notes();
+    assert!(
+        notes.iter().any(|n| n.contains(&format!(
+            "fragment walk stopped at byte {after} of {}: a box there states a size shorter than its header",
+            bytes.len() + 8
+        ))),
+        "the early end is noted: {notes:?}"
+    );
+    assert_eq!(drain(&mut demux).video_aus, 24, "one fragment of 24 frames");
+}
+
 /// A file whose fragments are as far apart as a real long video's: the
 /// walk has to pay for the headers it parses, not for a cache block per
 /// fragment, or the budget runs out part-way down the file.
