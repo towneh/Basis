@@ -1,10 +1,10 @@
 using UnityEngine;
 
 /// <summary>
-/// Points a <see cref="BasisMediaPlayer"/> at a live stream, optionally
+/// Points a <see cref="BasisMediaPlayer"/> at a URL, optionally
 /// choosing between a desktop and an Android URL by build target.
 ///
-/// A player with a URL already set needs none of this. It earns its place
+/// A player with a URL already set needs none of this. It is useful
 /// when the right URL differs by platform: RTSP is lowest latency on
 /// desktop, and Quest wants MPEG-TS over HTTPS from the same source.
 ///
@@ -17,7 +17,7 @@ using UnityEngine;
 public sealed class BasisMediaPlayerStreaming : MonoBehaviour
 {
     [Header("Stream")]
-    [Tooltip("Live URL to play when AutoSelectPerPlatform is off. RTSP/HTTPS-fMP4/HTTPS-TS/HLS/RIST/WHEP are all accepted.")]
+    [Tooltip("URL to play when AutoSelectPerPlatform is off.")]
     public string StreamUrl = "rtsp://stream.vrcdn.live/live/vrcdn";
 
     [Tooltip("If true, pick PcUrl or QuestUrl automatically by build target instead of using StreamUrl. RTSP is lowest latency on PC/VR; Quest pulls MPEG-TS over HTTPS.")]
