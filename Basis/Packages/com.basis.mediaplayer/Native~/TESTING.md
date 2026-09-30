@@ -13,7 +13,7 @@ side has its own guide at [`../TESTING.md`](../TESTING.md), and
 - **cargo-deny and cargo-vet:** `cargo install --locked cargo-deny cargo-vet`.
 - **Windows:** PowerShell 7, NASM on `PATH`, and a GPU with hardware video
   decode for the Direct3D 11, Direct3D 12 and Media Foundation tests. Set `CARGO_TARGET_DIR`
-  to a short path such as `C:/bm-target` to stay under Windows' path-length
+  to a short path such as `C:/t` to stay under Windows' path-length
   limit.
 - **Optional:** `ffprobe` for the conformance check; librist built into
   `third_party/librist/` by `tools/build-librist.ps1` or `.sh` (needs meson and
