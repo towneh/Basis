@@ -200,12 +200,13 @@ impl Mp4Demuxer {
             // Read while `moov` is still in the cache, ahead of any index
             // at the far end of the file.
             configs = Some(audio_configs(&header, &mut src, moov_end, &mut budget));
-            // A fragmented file states `mvex` and keeps no samples in
-            // `moov`. Anything else has described itself entirely by
-            // here, and this parse is the whole of it.
-            if header.moov.mvex.is_some() && header.tracks().values().all(|t| t.samples.is_empty())
-            {
+            // `mvex` says fragments may follow `moov`, whether or not
+            // `moov` keeps samples of its own. A file without it has
+            // described itself entirely by here, and this parse is the
+            // whole of it.
+            if header.moov.mvex.is_some() {
                 fragmented = true;
+                let described = header.tracks().values().any(|t| !t.samples.is_empty());
                 let video = header
                     .tracks()
                     .iter()
@@ -217,10 +218,10 @@ impl Mp4Demuxer {
                     budget = reader.remaining_budget();
                     tail
                 };
-                let mut media = None;
-                if let Some(first) = tail.first_fragment {
-                    let media_end = media_end(&tail.indexes, len, &mut src);
-                    media = Some((first, media_end));
+                let media_end = media_end(&tail.indexes, len, &mut src);
+                // An index describes fragments alone: a `moov` holding
+                // samples of its own is walked.
+                if !described && let Some(first) = tail.first_fragment {
                     let trusted: Vec<SegmentIndex> = tail
                         .indexes
                         .into_iter()
@@ -240,19 +241,17 @@ impl Mp4Demuxer {
                         index = found.index(&mut src, &mut budget, &limits, &mut notes);
                     }
                 }
-                if index.is_some() {
-                    mp4 = Some(header);
-                } else if let Some((first, media_end)) = media {
+                if index.is_none() {
                     walked = Some(walk_fragments(
                         &mut src,
                         &header,
-                        first..media_end,
+                        moov_end..media_end,
                         &limits,
                         &mut budget,
                         &mut notes,
                     )?);
-                    mp4 = Some(header);
                 }
+                mp4 = Some(header);
             } else {
                 mp4 = Some(header);
             }
@@ -424,10 +423,8 @@ impl Mp4Demuxer {
             .flatten()
             .find(|(id, _)| *id == track_id)
             .map_or(0, |(_, shift)| shift);
-            let stated = match walked {
-                Some(samples) => walked_end(samples, track.timescale, shift),
-                None => stated_span(track.duration, track.timescale),
-            };
+            let stated = stated_span(track.duration, track.timescale)
+                .max(walked.and_then(|samples| walked_end(samples, track.timescale, shift)));
             if let Some(track_duration) = stated {
                 duration = duration.max(track_duration);
             }
@@ -690,9 +687,9 @@ impl Mp4Demuxer {
         }
     }
 
-    /// A track's whole table: from the fragment walk where the file was
-    /// walked, from the parsed `moov` otherwise, whose times `reorder`
-    /// returns to the ones the file states.
+    /// A track's whole table: the samples `moov` holds, whose times
+    /// `reorder` returns to the ones the file states, then those its
+    /// walked fragments add.
     fn collect_samples(
         &self,
         track: &re_mp4::Track,
@@ -700,13 +697,17 @@ impl Mp4Demuxer {
         walked: Option<&[FragmentSample]>,
         shift: i64,
     ) -> Result<Vec<SampleRef>, DemuxError> {
-        match walked {
-            Some(samples) => samples
-                .iter()
-                .map(|s| to_ref(*s, track.timescale.max(1), shift, &self.limits))
-                .collect(),
-            None => self.collect_shifted_samples(&track.samples, shift.saturating_sub(reorder)),
+        let mut all =
+            self.collect_shifted_samples(&track.samples, shift.saturating_sub(reorder))?;
+        for sample in walked.unwrap_or_default() {
+            all.push(to_ref(
+                *sample,
+                track.timescale.max(1),
+                shift,
+                &self.limits,
+            )?);
         }
+        Ok(all)
     }
 
     fn collect_shifted_samples(
@@ -1511,7 +1512,7 @@ fn read_subsegment(
 /// track.
 type Walked = BTreeMap<u32, Vec<FragmentSample>>;
 
-/// Walk the fragments of a file that states no index, building each as
+/// Walk the fragments that follow `moov`, building each as
 /// the indexed path does. Only fragment headers are fetched, charged to
 /// the open's budget, and the samples the whole file may state are
 /// capped: a run with no per-sample fields states its count in four
@@ -1543,7 +1544,14 @@ fn walk_moofs(
 ) -> Result<Walked, DemuxError> {
     let defaults = crate::mp4_fragment::track_defaults(&header.moov);
     let ceiling = MAX_FRAGMENT_BYTES.min(limits.max_metadata_bytes);
-    let mut cursors = Cursors::new();
+    // A track fragment with no `tfdt` carries on from the samples before
+    // it, which for the first are the ones `moov` holds.
+    let mut cursors: Cursors = header
+        .moov
+        .traks
+        .iter()
+        .map(|trak| (trak.tkhd.track_id, moov_decode_end(trak)))
+        .collect();
     let mut samples_left = MAX_WALKED_SAMPLES;
     let mut walked = Walked::new();
     let mut pos = media.start;
@@ -1611,6 +1619,22 @@ fn walk_moofs(
         });
     }
     Ok(walked)
+}
+
+/// Where the samples `moov` holds stop decoding, as the file states the
+/// times: the sum of its decode deltas.
+fn moov_decode_end(trak: &re_mp4::TrakBox) -> i64 {
+    let end = trak
+        .mdia
+        .minf
+        .stbl
+        .stts
+        .entries
+        .iter()
+        .fold(0u64, |end, entry| {
+            end.saturating_add(u64::from(entry.sample_count) * u64::from(entry.sample_delta))
+        });
+    i64::try_from(end).unwrap_or(i64::MAX)
 }
 
 /// Where a walked track's media ends: the latest any sample finishes
@@ -2234,6 +2258,56 @@ mod tests {
         trun.extend_from_slice(&count.to_be_bytes());
         let traf = [header(8 + 32, b"traf"), tfhd, trun].concat();
         [header(8 + 16 + 40, b"moof"), mfhd, traf].concat()
+    }
+
+    /// A fragment stating no base decode time carries on from the samples
+    /// before it, which for the first fragment are the ones `moov` holds:
+    /// hiding every `tfdt` leaves the walked times as they were.
+    #[test]
+    fn a_fragment_without_a_base_time_follows_the_moovs_samples() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures/h264-aac-moov-and-frag.mp4"),
+        )
+        .expect("fixture readable");
+        let size_at = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+        let moov_end = u64::from(size_at(0) + size_at(size_at(0) as usize));
+        let walk = |bytes: Vec<u8>| {
+            let len = bytes.len() as u64;
+            let mut src = CachedSource::new(Box::new(MemSource(bytes)));
+            let mut budget = DemuxLimits::default().max_metadata_bytes;
+            let header =
+                read_metadata(&mut src, moov_end, &mut budget, false).expect("the moov parses");
+            walk_fragments(
+                &mut src,
+                &header,
+                moov_end..len,
+                &DemuxLimits::default(),
+                &mut budget,
+                &mut Vec::new(),
+            )
+            .expect("the fragments walk")
+        };
+
+        // `tfdt` becomes `free`, a box the fragment parser steps over.
+        let mut hidden = bytes.clone();
+        let mut at = moov_end as usize;
+        while let Some(found) = hidden[at..].windows(4).position(|w| w == b"tfdt") {
+            hidden[at + found..at + found + 4].copy_from_slice(b"free");
+            at += found + 4;
+        }
+        assert_ne!(hidden, bytes, "the fixture's fragments state base times");
+
+        let stated = walk(bytes);
+        let followed = walk(hidden);
+        for (track, samples) in &stated {
+            let dts = |walked: &Walked| walked[track].iter().map(|s| s.dts).collect::<Vec<_>>();
+            assert_eq!(dts(&followed), dts(&stated), "track {track}");
+            assert!(
+                samples[0].dts > 0,
+                "track {track} starts after the moov's samples"
+            );
+        }
     }
 
     /// Running out of budget part-way down the fragments fails the open

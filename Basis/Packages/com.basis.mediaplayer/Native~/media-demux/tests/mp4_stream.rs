@@ -436,6 +436,65 @@ fn a_walk_stopped_by_a_corrupt_box_size_says_so() {
     assert_eq!(drain(&mut demux).video_aus, 24, "one fragment of 24 frames");
 }
 
+/// A `moov` that holds samples of its own and declares fragments is read
+/// as both: its samples, then every fragment after it.
+#[test]
+fn samples_in_the_moov_are_followed_by_its_fragments() {
+    let mut demux = open("h264-aac-moov-and-frag.mp4");
+    let duration = demux.duration().expect("a duration");
+    assert!(
+        duration >= MediaTime::from_micros(6_000_000),
+        "duration {duration:?}"
+    );
+    let video = demux.video_track().expect("a video track").0;
+    let mut pts: Vec<i64> = access_units(&mut demux)
+        .into_iter()
+        .filter(|(track, ..)| *track == video)
+        .map(|(_, pts, ..)| pts.as_micros())
+        .collect();
+    assert_eq!(pts.len(), 144, "every frame of 6 s at 24 fps");
+    // One cadence across the join, where `moov`'s 24 samples end and the
+    // fragments' begin.
+    pts.sort_unstable();
+    for (i, at) in pts.iter().enumerate() {
+        let expected = pts[0] + (i as i64 * 1_000_000) / 24;
+        assert!(
+            (at - expected).abs() <= 1,
+            "frame {i} presents at {at} us, expected {expected}"
+        );
+    }
+}
+
+/// A box between `moov` and the first fragment does not hide the
+/// fragments behind it: they are walked from the end of `moov`.
+#[test]
+fn fragments_behind_a_box_after_the_moov_are_walked() {
+    let bytes = fixture("h264-aac-negcts-frag.mp4");
+    let size_at = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let moov_end = size_at(0) + size_at(size_at(0));
+    let mut spaced = bytes[..moov_end].to_vec();
+    spaced.extend_from_slice(&8u32.to_be_bytes());
+    spaced.extend_from_slice(b"mdat");
+    spaced.extend_from_slice(&bytes[moov_end..]);
+    let mut demux = Mp4Demuxer::open(
+        Box::new(MemSource(spaced)),
+        DemuxLimits::default(),
+        Generation(1),
+    )
+    .expect("opens");
+    let video = demux.video_track().expect("a video track").0;
+    let pts: Vec<i64> = access_units(&mut demux)
+        .into_iter()
+        .filter(|(track, ..)| *track == video)
+        .map(|(_, pts, ..)| pts.as_micros())
+        .collect();
+    assert_eq!(pts.len(), 144);
+    assert!(
+        pts.iter().all(|at| (0..6_100_000).contains(at)),
+        "every frame within the file's six seconds"
+    );
+}
+
 /// A fragment placed ahead of `moov` names tracks and defaults that
 /// nothing has described yet, and is refused rather than read.
 #[test]
