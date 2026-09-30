@@ -18,8 +18,8 @@ using UnityEngine;
 /// doing. Judder and A/V drift show up in that layer, which this file
 /// captures.
 ///
-/// Both files share a time base, so the two captures can be read side by
-/// side.
+/// The two files use different clocks (the engine's stops while paused),
+/// so line them up by event, not by timestamp.
 /// </summary>
 [RequireComponent(typeof(BasisMediaPlayer))]
 public sealed class BasisMediaPlayerDiagnostics : MonoBehaviour, IBasisMediaTickConsumer

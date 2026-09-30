@@ -21,15 +21,15 @@ cargo +nightly fuzz run --features whep whep_signal fuzz/corpus/whep_signal
 CI replays every corpus once on each change (`media-engine.yml`) and runs a
 ten-minute campaign per target nightly (`media-engine-fuzz-nightly.yml`).
 
-`fuzz/corpus/<target>/` holds the committed seeds. Keep them to a few
-kilobytes: a small seed reaches the same code as a large one and mutates faster.
+`fuzz/corpus/<target>/` holds the committed seeds. Keep new seeds
+small: a small seed reaches the same code as a large one and mutates faster.
 `seed-frag-sidx.mp4` is a fragmented MP4 with a segment index, the layout that
 opens from the index.
 
 ## Contained upstream panics
 
-Some dependencies panic on hostile input. The engine catches those panics at
-its boundary with `catch_unwind` and reports a typed error, which works in the
+Some dependencies panic on hostile input. The engine catches those panics
+where it calls the crate, with `catch_unwind`, and reports a typed error, which works in the
 shipped build (`panic = "unwind"`). Fuzz builds abort on any panic, so the same
 inputs show up as crashes there. A crash whose backtrace ends inside one of
 these crates is that class, not an escape:
@@ -43,9 +43,9 @@ these crates is that class, not an escape:
 The crate's tests replay each pinned input and assert a typed error. Keep these
 inputs out of `fuzz/corpus/`, or every later campaign stops on them at start-up.
 
-Inputs that make the Matroska seek-head reads slow are a different case: the
-read budgets bound them, they live in `media-demux/tests/data/slow-mkv/`, and
-they belong in the corpus.
+Inputs that make the Matroska seek-head or MP4 reads slow are a different
+case: the read budgets bound them, they live in `media-demux/tests/data/slow-mkv/`
+and `slow-mp4/`, and they belong in the corpus.
 
 A panic inside `str0m` under `whep_signal` is a bug to report upstream: str0m
 holds that user input must never panic.

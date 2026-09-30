@@ -3,8 +3,9 @@
 The Rust engine behind `com.basis.mediaplayer`. It decodes with the platform's
 decoders (Media Foundation with D3D11VA on Windows, MediaCodec on Android) and
 hands frames to Unity on the GPU. Container and protocol parsing (MP4,
-MPEG-TS, MKV/WebM, HLS, RTSP/RTP, WHEP, RIST, raw audio) is
-`#![forbid(unsafe_code)]`. The package's managed code is in `../Runtime/`, and
+MPEG-TS, MKV/WebM, HLS, RTSP/RTP, WHEP, raw audio) is
+`#![forbid(unsafe_code)]` in the engine's own crates; RIST goes through librist
+(C) behind FFI. The package's managed code is in `../Runtime/`, and
 the built binaries are committed in `../Runtime/Plugins/`.
 
 | Crate | Role |
@@ -43,7 +44,7 @@ to `Linux/x86_64/`. Each needs librist staged first (see
 | `tools/android-env.ps1` | Finds an Android NDK (Unity's by default) and sets cargo up for `aarch64-linux-android`; dot-source it |
 | `tools/stage-android-plugin.ps1` | Builds the Android plugin and copies it into the package |
 | `tools/build-librist.ps1`, `build-librist.sh`, `build-librist-android.sh` | Build the librist library for Windows, Linux and Android |
-| `tools/gen-*.py` | Generate the test fixtures in `fixtures/` |
+| `tools/gen-*.py` | Generate some of the test fixtures in `fixtures/` |
 
 [`TESTING.md`](TESTING.md) covers prerequisites and testing, and
 [`DIAGNOSTICS.md`](DIAGNOSTICS.md) the captures. Fuzz targets are in `fuzz/`.
@@ -67,7 +68,7 @@ The code, the tests and the captures use these names:
 | Clock, master | The clock (`media-clock`) is a session's one source of position. With audio it follows the audio playhead, the master; without, the wall clock |
 | Playhead | How far the host's pull has got through the decoded audio |
 | Audio ring | Decoded audio waiting for the host to pull it |
-| Ladder, slew, snap | How the clock follows the master: no correction within a 20 ms dead band, a slew (running up to 2% fast or slow) beyond it, a snap (a jump) past 700 ms |
+| Ladder, slew, snap | How the clock follows the master: no correction within a 20 ms dead band, a slew (up to 2% fast or slow, briefly up to 50% after a snap or a change of master) beyond it, a snap (a jump) past 700 ms |
 | Release band | The 5 ms a running slew closes to before it stops |
 | Route | The decoder a track takes: hardware (DXVA, MediaCodec) or software |
 | Pool drop | A decoded frame that fell due but was never shown, because a newer frame was also due or it was more than 40 ms late |

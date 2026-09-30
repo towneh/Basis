@@ -1,7 +1,9 @@
 # librist
 
 Where the librist static library that `media-rist` links is staged, for builds
-with the `rist` feature. Without it, the engine builds with no RIST support.
+with the `rist` feature. Without the feature the engine builds with no RIST
+support; with it, the build stops until the library is staged.
+`BASIS_LIBRIST_DIR` points the build at another staging directory.
 
 - Pinned to librist v0.2.11 (https://code.videolan.org/rist/librist),
   BSD-2-Clause, with its bundled mbedTLS (Apache-2.0) linked into the archive.

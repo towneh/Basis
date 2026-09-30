@@ -2,7 +2,7 @@
   "name": "com.basis.mediaplayer",
   "displayName": "Basis Media Player",
   "version": "0.0.1",
-  "description": "Live and on-demand video — and audio-only media — for Basis. A Rust engine decodes with the operating-system hardware codecs and presents zero-copy into a Unity texture; the managed components handle output surfaces, per-speaker audio, captions and subtitles. No transcode server, no UnityEngine.Video.MediaPlayer.",
+  "description": "Live and on-demand video and audio for Basis. A Rust engine decodes with the platform's hardware decoders where it can and writes each frame into a Unity texture on the GPU; the managed components handle output surfaces, per-speaker audio, captions and subtitles.",
   "unity": "6000.0",
   "author": {
     "name": "BasisVR",

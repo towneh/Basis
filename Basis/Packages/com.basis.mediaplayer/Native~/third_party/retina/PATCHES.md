@@ -8,10 +8,13 @@ dropped. The source matches the crates.io release apart from these changes:
   PLAY response is treated as unstated rather than pinned. Some servers
   (VRCDN's RTSP edge among them) advertise `ssrc=00000000` while the RTP stream
   carries a real SSRC, and pinning the placeholder rejects every packet.
-- `src/codec/aac.rs`, `pull`: a complete AAC access unit whose packet lacks the
-  RTP marker bit is accepted rather than failing the session. RFC 3640 wants the
-  marker set, but mediamtx omits it on these packets and common clients accept
-  them.
+- `src/codec/aac.rs`, `pull`: a stream that never sets the RTP marker bit still
+  gets one access unit per packet, where upstream failed the session. RFC 3640
+  wants the marker set, but mediamtx omits it on these packets and common
+  clients accept them. mediamtx also splits an access unit across packets whose
+  AU-headers each state only their own packet's size, marking only the last;
+  once a stream has been seen to set the marker, such packets are gathered until
+  it arrives (at most 8,191 bytes).
 - `src/codec/aac.rs`, `push`: the body moved to `push_inner`, and the public
   entry point discards any reassembly in progress when it returns an error.
   Upstream keeps the fragment state across a refusal, which is harmless in

@@ -1,7 +1,7 @@
 # Testing the player in Unity
 
 Manual checks for the managed side: shared playback, the panel and the
-prefabs. None has an automated test. The engine's tests are in
+prefabs. None of the rows below has an automated test. The engine's tests are in
 [`Native~/TESTING.md`](Native~/TESTING.md), and
 [`Native~/DIAGNOSTICS.md`](Native~/DIAGNOSTICS.md) explains the captures.
 
@@ -18,8 +18,7 @@ prefabs. None has an automated test. The engine's tests are in
 When the pull request is ready, report the rows as the engine guide's
 [Reporting in a pull request](Native~/TESTING.md#reporting-in-a-pull-request)
 describes. Where a row needs a stream, use the public endpoints in the engine
-guide's [Network sources](Native~/TESTING.md#network-sources) first; a
-self-hosted stream is an aid, not the reference.
+guide's [Network sources](Native~/TESTING.md#network-sources) first.
 
 | What | How |
 | --- | --- |
@@ -27,10 +26,6 @@ self-hosted stream is an aid, not the reference.
 | Headless playback | `Native~/bm-probe` |
 | Graded playback in the editor | `Basis > Tools > Media Player > Run Smoke Test` |
 | The same in batch | `-executeMethod BasisMediaSmokeTest.RunBatch` (exit code 0 on a pass; steer it with `BASIS_SMOKE_URL`, `BASIS_SMOKE_SECONDS`, `BASIS_SMOKE_LIVE`, `BASIS_SMOKE_STRICT_HOLDS`) |
-
-With the project open in Unity, the managed assemblies can be compiled on their
-own against `Library/ScriptAssemblies` with the editor's Roslyn compiler. That
-shows they build, nothing more.
 
 ## Shared playback
 
@@ -189,5 +184,4 @@ file given with `-logFile <path>`.
 
 ## Still needs a person
 
-Picture and sound quality in a headset on the live transports, and everything
-above.
+Picture and sound quality in a headset on the live transports.

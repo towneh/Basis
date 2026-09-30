@@ -18,6 +18,10 @@ needs building.
 | Windows x64 | Direct3D 11 or 12 | H.264, HEVC, VP9 and AV1 in hardware where the GPU supports them; H.264, VP9 and AV1 also in software | AAC, MP3, FLAC, Opus, PCM |
 | Android arm64 (Quest) | Vulkan | H.264, HEVC, VP8, VP9 and AV1 where the device has a hardware decoder | AAC, MP3, FLAC, Opus, PCM |
 
+On Windows, HEVC and VP9 need Microsoft's HEVC and VP9 Video Extensions from
+the Store, and hardware AV1 needs the AV1 Video Extension. Without them HEVC
+and VP9 are refused and AV1 decodes in software.
+
 Direct3D 12 also needs Unity 6000.3 or later, whose native plugin API includes
 `IUnityGraphicsD3D12v8`. On an earlier editor the player refuses Direct3D 12
 with a logged error; Direct3D 11 is unaffected.
@@ -79,7 +83,7 @@ route. An `http(s)` URL ending in one of the extensions above (or `.m4v`,
 `.m4a`, `.m4s`, `.m2ts`, `.mts`) opens directly. Any other goes first to an
 installed page resolver such as yt-dlp, and opens directly only when none
 takes it. Private and loopback addresses (`localhost`, `192.168.…`, `10.…`) are refused
-unless **Allow Local Addresses** is ticked. Audio goes up to 7.1 channels.
+unless **Allow Local Addresses** is ticked.
 
 A track nothing here can play is refused and the reason shown in the Media
 Players panel: HEVC inside MPEG-TS, VP8 on Windows, VP8 and VP9 where the
@@ -192,9 +196,9 @@ resolves it.
 | `AnyoneCanControl` | Clients with no control permission also get the playback controls |
 | `PositionHeartbeatSeconds` | How often the owner sends its position (3 by default). 0 turns it off |
 
-**On-demand sources.** A seek while paused shows everyone the new frame and
-leaves them paused. Each client reaches the end on its own. A follower compares
-the owner's position with its own:
+On an on-demand source, a seek while paused shows everyone the new frame and
+leaves them paused, and each client reaches the end on its own. A follower
+compares the owner's position with its own:
 
 | Difference | What the follower does |
 | --- | --- |
@@ -202,14 +206,14 @@ the owner's position with its own:
 | 150 ms to 2 s | Plays up to 2% faster or slower until within 150 ms; its sound shifts in pitch by up to a third of a semitone meanwhile |
 | More than 2 s | Jumps to the owner's position |
 
-**Live sources** have no shared position: each viewer plays from the live edge,
+A live source has no shared position: each viewer plays from the live edge,
 and two viewers can be a second or more apart. Live sources cannot be paused or
 seeked. **Max Divergence (ms)** caps how far behind a viewer falls; beyond it,
 playback stutters.
 
-**Late joiners** land at the owner's position, or paused on the owner's frame.
-They are usually a fraction of a second behind and catch up within about half
-a minute. A page URL takes a few seconds to resolve first.
+A late joiner lands at the owner's position, or paused on the owner's frame,
+usually a fraction of a second behind, and catches up within about half a
+minute. A page URL takes a few seconds to resolve first.
 
 **Resync Everyone** (playback tab) takes control and reloads the source for
 every client at your position and play or pause state. **Local Resync** (My
@@ -266,15 +270,16 @@ Advanced.
 
 ## Troubleshooting
 
-1. **The Console.** A failed player logs
+1. The Console. A failed player logs
    `[BasisMedia] session error <code> (<category>): <reason> [<url>]`, and the
    Media Players panel shows the reason. Common reasons: an unsupported codec,
-   a private address, a refusing server.
-2. **What the machine supports:** `Settings > Developer > Media Player`, or
+   a private address, a refusing server. When a server admin has locked media
+   players, nothing opens and the log says so.
+2. What the machine supports: `Settings > Developer > Media Player`, or
    `BasisMediaPlayer.EngineCapabilities`.
-3. **`Basis > Debug > Media Player`** shows a player's pipeline stage by stage
-   while it runs.
-4. **Captures:** `BasisMediaPlayerDiagnostics` beside the player writes a
+3. `Basis > Debug > Media Player`, which shows a player's pipeline stage by
+   stage while it runs.
+4. Captures. `BasisMediaPlayerDiagnostics` beside the player writes a
    per-frame CSV to the persistent data folder, and **Engine capture** records
    the engine's side. [`Native~/DIAGNOSTICS.md`](Native~/DIAGNOSTICS.md)
    explains the columns.
@@ -338,11 +343,11 @@ player.UserDataReceived += (ptsUs, uuid, payload) =>
 - It runs on the main thread, once per message, in timestamp order. Keep it
   short.
 - `payload` is valid only during the call.
-- Check `uuid` first. Convert a 16-byte UUID with
+- Every UUID arrives, the encoder's included; filter on yours. To build one from 16 bytes use
   `BasisMediaPlayer.GuidFromRfc4122`; `new Guid(byte[])` reverses the first
   three fields.
 - Unsubscribe in `OnDisable`, comparing the player with `ReferenceEquals`.
-- Validate the payload; the player checks nothing beyond the UUID.
+- Validate the payload; the player passes it on unread.
 - Messages over 64 KiB are refused. Seeks and loops drop pending messages.
 
 SEI survives repackaging but not re-encoding.
@@ -368,14 +373,9 @@ SEI survives repackaging but not re-encoding.
 ## Building the engine
 
 The engine is a Rust workspace in `Native~/`. After changing it, rebuild the
-committed binaries in `Runtime/Plugins/`:
-
-```sh
-cd Native~
-cargo build --release -p media-ffi --features rist
-```
-
-[`Native~/README.md`](Native~/README.md) describes the engine, and
+committed binaries in `Runtime/Plugins/` as
+[`Native~/README.md`](Native~/README.md) describes (each platform needs
+librist staged first).
 [`Native~/TESTING.md`](Native~/TESTING.md) covers prerequisites and testing.
 [`TESTING.md`](TESTING.md) has the checks for the Unity side, and
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) the licences of what the
