@@ -150,15 +150,31 @@ reviewer which rows are still open.
 4. Generate fixtures from synthetic sources (`testsrc2`, sine tones) with a
    script in `tools/`; do not commit recorded media. New MP4 and TS fixtures
    must pass `bm-probe conformance fixtures`. Keep TS audio at 48 kHz with an
-   ADTS track.
+   ADTS track. A fixture shows the engine handles the case it was built for;
+   it cannot show the case was understood the way real sources write it.
+   Check behaviour that real sources exercise against a public endpoint too
+   (see [Network sources](#network-sources)).
 5. Add the row to the matrix in the same commit, once it has been run. Column
    changes also update [`DIAGNOSTICS.md`](DIAGNOSTICS.md).
 
 ## Network sources
 
 Some by-hand rows need a network source of a given kind: a live RTSP stream, a
-WHEP endpoint, a RIST sender, or files over HTTPS with byte ranges. Any source
-of that kind works. ffmpeg serves live MPEG-TS over HTTP (`ffmpeg -re -i
+WHEP endpoint, a RIST sender, or files over HTTPS with byte ranges. Where a
+row names a public endpoint, validate against it. It is written by software
+this engine did not come from, so it catches a misreading of a format that a
+source set up with the same reading would share.
+
+| Public endpoint | Kind |
+| --- | --- |
+| `https://stream.mux.com/v69RSHhFelSm4701snP22dYz2jICy4E4FUyk02rW4gxRM.m3u8` | Low-Latency HLS, fMP4 parts, separate audio rendition |
+| `https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8` | On-demand HLS, 1080p60 |
+
+Self-hosted servers cover what no public endpoint offers: a stream you can
+publish to, restart or impair, and a public result reproduced locally. They are
+an aid, not the reference, and so are the scripts in `tools/`. A failure seen
+only on a self-hosted source is checked on a public endpoint before it is put
+down to the engine. ffmpeg serves live MPEG-TS over HTTP (`ffmpeg -re -i
 <file.ts> -c copy -f mpegts -listen 1 http://127.0.0.1:<port>/live`),
 mediamtx serves RTSP, WHEP and HLS (Low-Latency by default, plain with
 `hlsVariant: mpegts`), and any static server with range requests serves
@@ -304,7 +320,7 @@ connection. Set **Liveness** to Live for those.
 | Playlist directory confinement | A disk playlist reaches only plain relative files beside it; absolute, `..`, drive-relative, UNC and planted-link paths are refused. | `cargo test -p media-hls --test hls` + `cargo test -p media-io --test resource_fetcher` | CI |
 | HLS VOD playback | HLS from file or HTTP plays to Ended without pool drops, chaining TS segments and timing fMP4 by its timestamps. | `cargo run -p bm-probe -- play fixtures/hls/ts/index.m3u8 --duration 8` and `…/hls/fmp4/index.m3u8` | By hand |
 | HLS live | Plain live HLS on TS segments with its audio muxed in plays in real time: nearly every frame presented, no silence, and the Bank in lag mode holding about the hold-back (three target durations when the playlist states none). | mediamtx with `hls: true` and `hlsVariant: mpegts` and a live stream published to it, then `bm-probe play http://127.0.0.1:8888/<path>/index.m3u8 --allow-local --duration 25` | By hand |
-| Low-Latency HLS over the internet | An LL-HLS origin at internet distance (mediamtx with `hls: true`, which serves LL-HLS by default, behind an HTTPS proxy) plays with nearly every frame presented, no stalls or reanchors, and a Bank lag under about a second. mediamtx serves the audio as a separate rendition: it joins at the variant's point, aligned by program time (noted as `audio rendition: joining …`), and the A/V offset sits within a frame, as on an RTSP stream of the same content. | `bm-probe play https://<host>/<path>/index.m3u8 --duration 30` | By hand |
+| Low-Latency HLS over the internet | An LL-HLS origin at internet distance plays with nearly every frame presented, no stalls or reanchors, and a Bank lag near the playlist's `PART-HOLD-BACK`: 1.5 to 3 s on the public origin (1 s parts), under a second on mediamtx (209 ms parts). The audio rendition joins at the variant's point, aligned by program time (noted as `audio rendition: joining …`), and the A/V offset sits within a frame. | `bm-probe play https://stream.mux.com/v69RSHhFelSm4701snP22dYz2jICy4E4FUyk02rW4gxRM.m3u8 --duration 30`; for short parts, mediamtx with `hls: true` behind an HTTPS proxy and `bm-probe play https://<host>/<path>/index.m3u8 --duration 30` | By hand |
 | HLS audio rendition seek | An on-demand variant with its audio in a separate rendition, the two cut at different segment boundaries, lands a forward and a backward seek on target with no silence, trims or ring drops, and the A/V offset within a frame afterwards. | `ffmpeg -i fixtures/h264-aac-320x180-30s.ts -map 0:v -c copy -f hls -hls_time 2 -hls_playlist_type vod -hls_segment_filename <dir>/v%03d.ts <dir>/video.m3u8`, the same with `-map 0:a` into `a%03d.ts`/`audio.m3u8`, a `master.m3u8` naming `audio.m3u8` as the `DEFAULT=YES` audio rendition of `video.m3u8`; then `bm-probe play <dir>/master.m3u8 --duration 14 --seek-to-ms 18000`, and again with `--seek-to-ms 3000` | By hand |
 | HLS over real HTTPS | HLS VOD with ranged segments and 5.1 audio plays from a real HTTPS origin, as does a public master playlist. | an on-demand HLS playlist with TS segments and one with fMP4 segments, served over HTTPS with ranges and carrying 5.1 audio; the public `https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8` | By hand |
 | RTSP lanes | `rtsp://` falls back from UDP to TCP, `rtspt://` stays on TCP; stereo, 5.1, slow-join, restart and forced-fallback lanes play with sender-report alignment. | live RTSP streams in stereo, in 5.1, with no audio, and with keyframes about 10 s apart, each over `rtsp://` and `rtspt://`; the public `rtsp://stream.vrcdn.live/live/vrcdn` | By hand |

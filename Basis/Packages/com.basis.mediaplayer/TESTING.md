@@ -17,7 +17,9 @@ prefabs. None has an automated test. The engine's tests are in
 
 When the pull request is ready, report the rows as the engine guide's
 [Reporting in a pull request](Native~/TESTING.md#reporting-in-a-pull-request)
-describes.
+describes. Where a row needs a stream, use the public endpoints in the engine
+guide's [Network sources](Native~/TESTING.md#network-sources) first; a
+self-hosted stream is an aid, not the reference.
 
 | What | How |
 | --- | --- |
