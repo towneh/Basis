@@ -61,7 +61,9 @@ $env:ANDROID_NDK_HOME = $ndk
 $env:ANDROID_NDK_ROOT = $ndk
 
 # Prefer the SDK's NDK-matched cmake+ninja when present (Unity layout:
-# SDK sits beside NDK); fall back to whatever is on PATH.
+# SDK sits beside NDK); fall back to cmake and ninja from PATH. Either way
+# the generator must be Ninja: CMake's default on Windows (Visual Studio)
+# cannot target Android.
 $sdkCmake = Get-ChildItem (Join-Path (Split-Path $ndk) "SDK\cmake") -ErrorAction SilentlyContinue |
     Sort-Object Name -Descending | Select-Object -First 1
 if ($sdkCmake) {
@@ -69,6 +71,8 @@ if ($sdkCmake) {
     $env:PATH = "$cmakeBin;$env:PATH"
     $env:CMAKE_GENERATOR = "Ninja"
     $env:CMAKE_MAKE_PROGRAM = Join-Path $cmakeBin "ninja.exe"
+} elseif (Get-Command ninja -ErrorAction SilentlyContinue) {
+    $env:CMAKE_GENERATOR = "Ninja"
 }
 
 $env:BM_ANDROID_ENV_OK = "1"
