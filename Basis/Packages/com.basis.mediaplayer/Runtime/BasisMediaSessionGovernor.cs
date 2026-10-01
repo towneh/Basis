@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Basis.Scripts.BasisSdk.Players;
+using Basis.Scripts.Drivers;
 using UnityEngine;
 
 /// <summary>
@@ -257,15 +258,14 @@ public static class BasisMediaSessionGovernor
         return Vector3.Distance(entry.Player.transform.position, listener);
     }
 
-    /// <summary>Where the viewer is. Falls back to the rendering camera, and
-    /// then to the origin, so a headless or camera-less run still ranks
-    /// deterministically rather than throwing.</summary>
+    /// <summary>Where the viewer is. Falls back to the local camera, and then to
+    /// the origin, so a headless or camera-less run still ranks deterministically
+    /// rather than throwing.</summary>
     static Vector3 ListenerPosition()
     {
         BasisLocalPlayer local = BasisLocalPlayer.Instance;
         if (local != null) return local.transform.position;
-        Camera camera = Camera.main;
-        return camera != null ? camera.transform.position : Vector3.zero;
+        return BasisLocalCameraDriver.HasInstance ? BasisLocalCameraDriver.Position : Vector3.zero;
     }
 
     /// <summary>Whether the player is holding engine resources: anything but

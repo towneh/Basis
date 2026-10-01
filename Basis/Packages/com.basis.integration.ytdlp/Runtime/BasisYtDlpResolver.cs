@@ -35,7 +35,7 @@ namespace Basis.Integration.YtDlp
             if (player == null) throw new ArgumentNullException(nameof(player));
             if (string.IsNullOrEmpty(pageUrl))
             {
-                Debug.LogWarning("[BasisMedia] yt-dlp resolve called with an empty URL.");
+                BasisDebug.LogWarning("[BasisMedia] yt-dlp resolve called with an empty URL.", BasisDebug.LogTag.Video);
                 return;
             }
 
@@ -64,8 +64,9 @@ namespace Basis.Integration.YtDlp
                 // Log the exception type, not its message — yt-dlp and extractor
                 // messages embed the raw page URL and its tokens, which would defeat
                 // the redaction.
-                Debug.LogError(
-                    $"[BasisMedia] yt-dlp resolution failed for '{BasisMediaUrlRouter.Redact(pageUrl)}' ({ex.GetType().Name}).");
+                BasisDebug.LogError(
+                    $"[BasisMedia] yt-dlp resolution failed for '{BasisMediaUrlRouter.Redact(pageUrl)}' ({ex.GetType().Name}).",
+                    BasisDebug.LogTag.Video);
                 if (loadGeneration == player.LoadGeneration) onError?.Invoke(ex);
             }
         }
